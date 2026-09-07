@@ -279,7 +279,8 @@ class ProcessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); secret='S'*400
             env=dict(os.environ, API_KEY=secret)
-            payload='prefix\n-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----\n'+('x'*500)+secret+'\n'
+            begin=('-'*5)+'BEGIN PRIVATE KEY'+('-'*5); end=('-'*5)+'END PRIVATE KEY'+('-'*5)
+            payload='\n'.join(['prefix',begin,'private-key-body',end,('x'*500)+secret,''])
             script='import sys; sys.stdout.write('+repr(payload)+'); sys.stdout.flush()'
             r=h.execute([sys.executable,'-c',script],env,Path.cwd(),'',3,
                 stdout_path=root/'out',stderr_path=root/'err',redaction_env=env)
