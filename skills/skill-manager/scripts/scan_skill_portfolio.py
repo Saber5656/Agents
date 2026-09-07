@@ -7,6 +7,7 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -26,6 +27,7 @@ RULE_CATEGORIES = {
     "eval_skill_mismatch": "quality", "duplicate_eval_id": "quality",
     "missing_eval_fixture": "quality", "fixture_scope_escape": "quality",
     "duplicate_skill_name": "duplicate",
+    "audit_incomplete": "contract",
 }
 
 
@@ -79,38 +81,91 @@ def git_revision(root: Path) -> str:
         return "unversioned"
 
 
+def _relative(path: Path, root: Path) -> str:
+    return Path(os.path.abspath(path)).relative_to(Path(os.path.abspath(root))).as_posix()
+
+
+def _scope_match(path: Path, root: Path, patterns: list[str]) -> bool:
+    relative = _relative(path, root)
+    return any(fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(path.name, pattern) for pattern in patterns)
+
+
+def _check_skill_boundary(path: Path, root: Path) -> None:
+    relative = _relative(path, root)
+    if path.is_symlink():
+        raise ValueError(f"symlinked skill boundary is forbidden: {relative}")
+    skill_path = path / "SKILL.md"
+    if skill_path.is_symlink():
+        raise ValueError(f"symlinked skill boundary is forbidden: {_relative(skill_path, root)}")
+    try:
+        path.resolve().relative_to(root.resolve())
+        skill_path.resolve().relative_to(root.resolve())
+    except ValueError as error:
+        raise ValueError(f"skill path escapes repository root: {path}") from error
+    for base, dirs, files in os.walk(path, followlinks=False):
+        for name in [*dirs, *files]:
+            nested = Path(base) / name
+            if nested.is_symlink():
+                raise ValueError(f"symlink inside audited skill is forbidden: {_relative(nested, root)}")
+
+
 def select_directories(root: Path, include: list[str], exclude: list[str]) -> list[Path]:
+    """Select skill directories without traversing unselected symlink paths.
+
+    Include patterns are repository-relative (for example ``skills/*``) and
+    may also be a direct skill basename for compatibility with a skills-root
+    invocation. With no include, only immediate children are considered.
+    """
+    root = Path(os.path.abspath(root))
+    if include:
+        candidates: list[Path] = []
+        for pattern in include:
+            candidates.extend(root.glob(pattern))
+    else:
+        candidates = list(root.iterdir())
+
     directories: list[Path] = []
-    for path in sorted(root.iterdir()):
-        skill_path = path / "SKILL.md"
-        if path.name.startswith("."):
-            continue
-        if (include and not any(fnmatch.fnmatch(path.name, pattern) for pattern in include)) or any(fnmatch.fnmatch(path.name, pattern) for pattern in exclude):
+    seen: set[Path] = set()
+    for path in sorted(candidates):
+        relative = _relative(path, root)
+        if path.name.startswith(".") or _scope_match(path, root, exclude):
             continue
         if path.is_symlink():
-            raise ValueError(f"symlinked skill boundary is forbidden: {path.relative_to(root)}")
+            explicit = any(not any(marker in pattern for marker in "*?[") and relative == pattern.rstrip("/") for pattern in include)
+            if explicit or (path / "SKILL.md").is_file():
+                raise ValueError(f"symlinked skill boundary is forbidden: {relative}")
+            continue
         if not path.is_dir():
             continue
-        if skill_path.is_symlink():
-            raise ValueError(f"symlinked skill boundary is forbidden: {path.relative_to(root)}")
-        if not skill_path.is_file():
-            continue
-        try:
-            path.resolve().relative_to(root.resolve())
-            skill_path.resolve().relative_to(root.resolve())
-        except ValueError as error:
-            raise ValueError(f"skill path escapes repository root: {path}") from error
-        for nested in path.rglob("*"):
-            if nested.is_symlink():
-                raise ValueError(f"symlink inside audited skill is forbidden: {nested.relative_to(root)}")
-        directories.append(path)
-    return directories
+
+        children = [path]
+        if not (path / "SKILL.md").exists() and include:
+            # An explicit container such as ``skills`` selects its direct
+            # skill children, while avoiding recursive discovery of unrelated
+            # directories and symlink aliases.
+            children = sorted(path.iterdir())
+        for candidate in children:
+            if candidate.name.startswith(".") or _scope_match(candidate, root, exclude):
+                continue
+            if candidate.is_symlink():
+                candidate_relative = _relative(candidate, root)
+                explicit = any(not any(marker in pattern for marker in "*?[") and candidate_relative == pattern.rstrip("/") for pattern in include)
+                if explicit or (candidate / "SKILL.md").is_file():
+                    raise ValueError(f"symlinked skill boundary is forbidden: {candidate_relative}")
+                continue
+            if not candidate.is_dir() or not (candidate / "SKILL.md").is_file():
+                continue
+            _check_skill_boundary(candidate, root)
+            if candidate not in seen:
+                seen.add(candidate)
+                directories.append(candidate)
+    return sorted(directories)
 
 
 def scoped_digest(directories: list[Path], root: Path, revision_sha: str | None = None) -> str:
     parts: list[str] = []
     if revision_sha and revision_sha != "unversioned":
-        relative_dirs = [str(directory.relative_to(root)) for directory in directories]
+        relative_dirs = [_relative(directory, root) for directory in directories]
         completed = subprocess.run(
             ["git", "ls-tree", "-r", "-z", "--name-only", revision_sha, "--", *relative_dirs],
             cwd=root, capture_output=True, check=True,
@@ -126,16 +181,16 @@ def scoped_digest(directories: list[Path], root: Path, revision_sha: str | None 
     else:
         paths = [path for directory in directories for path in directory.rglob("*") if path.is_file()]
     for path in sorted(paths):
-        parts.append(f"{path.relative_to(root)}:{digest_bytes(path.read_bytes())}")
+        parts.append(f"{_relative(path, root)}:{digest_bytes(path.read_bytes())}")
     return digest_bytes("\n".join(parts).encode())
 
 
-def finding(rule: str, severity: str, skill: str | list[str], evidence: str, impact: str) -> dict[str, Any]:
+def finding(rule: str, severity: str, skill: str | list[str], evidence: str, impact: str, confidence: str = "certain") -> dict[str, Any]:
     skills = [skill] if isinstance(skill, str) else sorted(set(skill))
     fid = digest_bytes(f"{rule}|{','.join(skills)}|{evidence}".encode())[:12]
     return {
         "finding_id": f"SM-{fid}", "rule_id": rule, "category": RULE_CATEGORIES.get(rule, "contract"),
-        "severity": severity, "confidence": "certain", "skills": skills,
+        "severity": severity, "confidence": confidence, "skills": skills,
         "evidence": [evidence], "impact": impact,
         "proposed_disposition": "hand off for bounded correction",
         "handler": "skill-updater", "approval_required": True, "baseline_state": "unverified",
@@ -260,10 +315,10 @@ def scan(root: Path, audit_id: str, profile: str, include: list[str] | None = No
         tool_names = set(tools) if isinstance(tools, list) else {token.strip() for token in str(tools).split(",") if token.strip()}
         read_only_claim = "read-only" in text.lower() or "read only" in text.lower()
         if read_only_claim and tool_names.intersection({"Write", "Edit"}):
-            findings.append(finding("read_only_tool_mismatch", "medium", directory.name, f"allowed-tools={tools}", "Declared tools may exceed the skill mutation boundary."))
+            findings.append(finding("read_only_tool_mismatch", "medium", directory.name, f"allowed-tools={tools}", "A wording-based signal suggests the declared tools may exceed the mutation boundary; this is a review candidate, not a compliance verdict.", "probable"))
 
         inventory.append({
-            "skill_id": skill_id, "path": directory.name, "profile": skill_profile,
+            "skill_id": skill_id, "path": _relative(directory, root), "profile": skill_profile,
             "canonical_repository": str(root), "revision_sha": revision_sha or git_revision(root), "copy_type": "tracked_source",
             "status": metadata.get("status", "unknown"), "contract_digest": digest_bytes(raw),
             "responsibility_summary": metadata.get("purpose", ""),
@@ -284,9 +339,12 @@ def scan(root: Path, audit_id: str, profile: str, include: list[str] | None = No
     eval_covered = sum(item["eval_status"] == "valid" for item in inventory)
     assertion_covered = sum(item["assertion_eval_count"] > 0 for item in inventory)
     benchmark_verified = sum(item["benchmark_status"] == "verified" for item in inventory)
+    uncertain = any(item["rule_id"] == "provenance_unclassified" for item in findings)
+    heuristic = any(item["rule_id"] == "read_only_tool_mismatch" for item in findings)
     return {
         "audit": {
             "id": audit_id, "revision_sha": revision_sha or git_revision(root),
+            "status": "complete",
             "scanned_at": datetime.now(timezone.utc).isoformat(),
             "scope_digest": scoped_digest(skill_dirs, root, revision_sha),
             "previous_audit_id": None,
@@ -294,6 +352,8 @@ def scan(root: Path, audit_id: str, profile: str, include: list[str] | None = No
         "inventory": inventory,
         "findings": findings,
         "summary": {
+            "status": "complete",
+            "compliance_status": "unverified" if uncertain or heuristic else "deterministic_checks_only",
             "hard_gate_pass": blocker_count == 0,
             "metrics": {
                 "skill_count": total,
@@ -338,18 +398,44 @@ def load_manifest(path: Path) -> dict[str, Any]:
 
 
 def revision_skill_paths(root: Path, revision_sha: str, include: list[str], exclude: list[str]) -> list[str]:
+    """Return repository-relative selected skill directories at a revision."""
     completed = subprocess.run(
         ["git", "ls-tree", "-r", "--name-only", revision_sha], cwd=root,
         capture_output=True, text=True, check=True,
     )
-    names = {line.split("/", 1)[0] for line in completed.stdout.splitlines() if line.endswith("/SKILL.md") and "/" in line}
-    return sorted(name for name in names if (not include or any(fnmatch.fnmatch(name, pattern) for pattern in include)) and not any(fnmatch.fnmatch(name, pattern) for pattern in exclude))
+    names = {
+        line.removesuffix("/SKILL.md")
+        for line in completed.stdout.splitlines()
+        if line.endswith("/SKILL.md")
+    }
+    selected: list[str] = []
+    for name in sorted(names):
+        path = Path(name)
+        def matches(pattern: str) -> bool:
+            normalized = pattern.rstrip("/")
+            return (
+                fnmatch.fnmatch(name, pattern)
+                or (not any(marker in normalized for marker in "*?[") and name.startswith(normalized + "/"))
+            )
+
+        if include and not any(matches(pattern) for pattern in include):
+            continue
+        if any(matches(pattern) for pattern in exclude):
+            continue
+        selected.append(name)
+    return selected
 
 
 def verify_snapshot(root: Path, revision_sha: str, directories: list[Path], include: list[str] | None = None, exclude: list[str] | None = None) -> None:
     if git_revision(root) != revision_sha:
         raise ValueError("repository HEAD does not match revision_sha")
-    paths = sorted(set([str(path.relative_to(root)) for path in directories] + revision_skill_paths(root, revision_sha, include or [], exclude or [])))
+    current = sorted(_relative(path, root) for path in directories)
+    expected = revision_skill_paths(root, revision_sha, include or [], exclude or [])
+    if current != expected:
+        raise ValueError("audited scope is incomplete at revision_sha: selected skill set differs")
+    paths = sorted(set(current))
+    if not paths:
+        raise ValueError("audited scope is incomplete at revision_sha: no tracked skills")
     completed = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all", "--", *paths], cwd=root, capture_output=True, text=True)
     if completed.returncode or completed.stdout.strip():
         raise ValueError("audited scope is not clean at revision_sha")
@@ -363,8 +449,50 @@ def verify_output_paths(root: Path, paths: list[Path]) -> None:
         raise ValueError("evidence outputs must be outside the audited repository")
 
 
+def incomplete_report(manifest: dict[str, Any], root: Path | None, directories: list[Path], reason: str) -> dict[str, Any]:
+    """Create an explicit incomplete result when snapshot identity is unusable."""
+    audit_root = root or Path(str(manifest.get("repository_root", "unavailable")))
+    try:
+        scope_digest = scoped_digest(directories, audit_root)
+    except (OSError, ValueError):
+        scope_digest = "0" * 64
+    selected = [_relative(path, audit_root) for path in directories if root is not None]
+    skills = [Path(path).name for path in selected] or ["<scope>"]
+    report = {
+        "audit": {
+            "id": str(manifest.get("audit_id", "unknown")),
+            "revision_sha": str(manifest.get("revision_sha", "unversioned")),
+            "status": "audit_incomplete",
+            "incomplete_reason": reason,
+            "scanned_at": datetime.now(timezone.utc).isoformat(),
+            "scope_digest": scope_digest,
+            "previous_audit_id": None,
+        },
+        "inventory": [],
+        "findings": [finding(
+            "audit_incomplete", "blocker", skills, reason,
+            "The requested revision and selected tracked scope could not be verified.",
+        )],
+        "summary": {
+            "status": "audit_incomplete",
+            "compliance_status": "unverified",
+            "hard_gate_pass": False,
+            "metrics": {
+                "skill_count": 0, "blocker_count": 1, "contract_valid_rate": 0.0,
+                "eval_coverage_rate": 0.0, "assertion_coverage_rate": 0.0,
+                "benchmark_verified_rate": 0.0,
+            },
+            "handoffs": [],
+        },
+    }
+    return report
+
+
 def markdown(report: dict[str, Any]) -> str:
-    lines = ["# Skill Portfolio Audit", "", f"- Revision: `{report['audit']['revision_sha']}`", f"- Skills: {len(report['inventory'])}", f"- Findings: {len(report['findings'])}", f"- Hard gate: {'pass' if report['summary']['hard_gate_pass'] else 'fail'}", "", "## Findings", ""]
+    lines = ["# Skill Portfolio Audit", "", f"- Status: `{report['audit'].get('status', 'unknown')}`", f"- Revision: `{report['audit']['revision_sha']}`", f"- Skills: {len(report['inventory'])}", f"- Findings: {len(report['findings'])}", f"- Hard gate: {'pass' if report['summary']['hard_gate_pass'] else 'fail'}", f"- Compliance status: `{report['summary'].get('compliance_status', 'unverified')}`"]
+    if report["audit"].get("incomplete_reason"):
+        lines.extend([f"- Incomplete reason: {report['audit']['incomplete_reason']}"])
+    lines.extend(["", "## Findings", ""])
     if not report["findings"]:
         lines.append("No deterministic findings.")
     else:
@@ -381,6 +509,9 @@ def main() -> int:
     parser.add_argument("--json", required=True, type=Path)
     parser.add_argument("--markdown", required=True, type=Path)
     args = parser.parse_args()
+    manifest: dict[str, Any] | None = None
+    root: Path | None = None
+    directories: list[Path] = []
     try:
         manifest = load_manifest(args.manifest)
         root = Path(manifest["repository_root"]).resolve()
@@ -389,6 +520,10 @@ def main() -> int:
         scope = manifest["scope"]
         include, exclude = scope.get("include", []), scope.get("exclude", [])
         directories = select_directories(root, include, exclude)
+        if not directories:
+            # Keep the revision-side scope so a deleted selected skill is
+            # reported as incomplete instead of silently becoming empty.
+            directories = [root / path for path in revision_skill_paths(root, manifest["revision_sha"], include, exclude)]
         if not directories:
             raise ValueError("audit scope selects no skills")
         verify_output_paths(root, [args.json, args.markdown])
@@ -404,7 +539,21 @@ def main() -> int:
         if manifest.get("previous_report"):
             previous = json.loads(Path(manifest["previous_report"]).read_text(encoding="utf-8"))
         classify_baseline(report, previous)
-    except (OSError, json.JSONDecodeError, ValueError) as error:
+    except (OSError, json.JSONDecodeError, ValueError, subprocess.CalledProcessError) as error:
+        if manifest is not None:
+            try:
+                if root is not None:
+                    verify_output_paths(root, [args.json, args.markdown])
+                report = incomplete_report(manifest, root, directories, str(error))
+                args.json.parent.mkdir(parents=True, exist_ok=True)
+                args.markdown.parent.mkdir(parents=True, exist_ok=True)
+                args.json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                args.markdown.write_text(markdown(report), encoding="utf-8")
+            except (OSError, ValueError) as output_error:
+                print(f"audit incomplete: {error}; cannot write report: {output_error}", file=sys.stderr)
+                return 2
+            print(f"audit incomplete: {error}", file=sys.stderr)
+            return 2
         print(f"audit invalid: {error}", file=sys.stderr)
         return 2
     args.json.parent.mkdir(parents=True, exist_ok=True)

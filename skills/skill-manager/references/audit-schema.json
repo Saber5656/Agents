@@ -7,10 +7,12 @@
   "properties": {
     "audit": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "revision_sha", "scanned_at", "scope_digest", "previous_audit_id"],
+      "required": ["id", "revision_sha", "status", "scanned_at", "scope_digest", "previous_audit_id"],
       "properties": {
         "id": {"type": "string", "minLength": 1},
         "revision_sha": {"type": "string", "pattern": "^([0-9a-f]{40}|unversioned)$"},
+        "status": {"enum": ["complete", "audit_incomplete"]},
+        "incomplete_reason": {"type": "string"},
         "scanned_at": {"type": "string", "format": "date-time"},
         "scope_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "previous_audit_id": {"type": ["string", "null"]}
@@ -52,7 +54,7 @@
     },
     "summary": {
       "type": "object", "additionalProperties": false, "required": ["hard_gate_pass", "metrics", "handoffs"],
-      "properties": {"hard_gate_pass": {"type": "boolean"}, "metrics": {"type": "object"}, "handoffs": {"type": "array"}}
+      "properties": {"status": {"enum": ["complete", "audit_incomplete"]}, "compliance_status": {"enum": ["deterministic_checks_only", "unverified"]}, "hard_gate_pass": {"type": "boolean"}, "metrics": {"type": "object"}, "handoffs": {"type": "array"}}
     }
   }
 }
