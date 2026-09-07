@@ -6,6 +6,20 @@
 
 ロールの参照は、自動起動や常駐監視の設定ではない。文体ロールも選択した場面だけに適用する。
 
+## 役割を選ぶ観点
+
+関連ロールへのリンクは、必要な専門性を選ぶための参照であり、追加担当の起動や順番どおりの実行を要求しない。同じ担当が複数の観点を扱い、既に確認した根拠を再利用してよい。
+
+| 論点 | 役割ごとの焦点 |
+|---|---|
+| 完了の判断 | assessor は実施範囲、evaluator は目的への充足、guardian は報告と事実の一致 |
+| 技術の調整 | director は作業の統合、lead は難しい技術選択、architect は構造と契約 |
+| 技術の品質 | tester は検証資産と実結果、reviewer は差分と回帰、qa は受け入れ品質 |
+| 知識と環境 | infra は記録・所在・同期、tech-infrastructure はビルドと実行環境、devopssec は配布と権限 |
+| 事業の判断 | strategy は価値と選択肢、director は領域横断の方針統合 |
+| 文章 | researcher は根拠、formatter は構成と表現、quality-manager は内容評価、director は編集全体、humanizer は選択された文体 |
+| 旧名称 | business-marketing-director は business-director の別名として参照する |
+
 ## 一覧
 
 | ロール | 目的 | 抽出上の扱い |
