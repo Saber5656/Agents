@@ -1,70 +1,30 @@
-# skills
+# Skills in Agents
 
-This repository contains reusable utility skills. Organization routing and policy
-ownership live outside the utility-skill layer.
+User-managed source skills live under `skills/<skill-name>/` in the Agents
+repository. `$AGENTS_ROOT`, `$SKILLS_ROOT`, and `$AGENTS_VAULT_ROOT` come from the
+ignored local `.env`; `.env.example` documents the portable variables.
 
-Workflow skills that need organization decisions consume an explicit,
-caller-supplied Saihai task context or a typed artifact such as a `Branch Plan`,
-`Task Change Manifest`, or `Publication Manifest`. They validate and execute that
-input; they do not select roles, approval owners, review providers, routing, or
-publication ownership. If required context is missing, the skill stops and returns
-a typed missing-context result to the caller.
+Each skill contains `SKILL.md` and optional `agents/`, `references/`, `scripts/`,
+`evals/`, and `tests/` directories. Vendor-owned `.system/` and plugin packages,
+local evaluation output, and installed-only user skills retain separate
+provenance. Do not overwrite an installed-only skill or local customization.
 
-## Repository layout
+Follow [COMMON-AGENTS.md](../COMMON-AGENTS.md) and the current [policies](../policies/).
+Retired Saihai intake, authority, manifests, fixed role chains, and approval gates
+are not prerequisites. Historical references are evidence only. Normal assigned
+work includes validation, pre-commit review, accepted finding remediation, and
+when requested publication, merge, main synchronization and chat organization.
+New unrelated discoveries are captured locally for the separate issueization
+batch; they do not expand the assigned implementation or block its completion.
 
-Each skill lives directly under the repository root:
+See [preserving installation](../docs/skill-installation.md) for inventory,
+file-specific deployment, effective digest read-back, and preimage rollback.
+Never point every consuming surface at a replacement root without first
+reconciling existing copies and preserving local edits. App reload and real
+behavioral verification are distinct from source edits and filesystem checks.
 
-```text
-<skill-name>/
-├── SKILL.md
-├── agents/       # optional UI metadata
-├── references/   # optional reusable guidance
-├── scripts/      # optional deterministic helpers
-├── evals/        # optional behavior scenarios
-└── tests/        # optional automated checks
-```
-
-Bundled `.system/` skills, `.workspace/` evaluation output, caches, and local
-runtime configuration are not part of the user-managed public skill source.
-
-## Local setup
-
-Use the clean public clone as the local skill root:
-
-```bash
-SKILLS_REPO_ROOT="${SKILLS_REPO_ROOT:-$HOME/dev/skills}"
-mkdir -p "$HOME/.claude" "$HOME/.codex"
-
-for SKILLS_LINK in "$HOME/.claude/skills" "$HOME/.codex/skills"; do
-  if [ -e "$SKILLS_LINK" ] && [ ! -L "$SKILLS_LINK" ]; then
-    printf 'Refusing to replace existing directory: %s\n' "$SKILLS_LINK" >&2
-    exit 1
-  fi
-  ln -sfn "$SKILLS_REPO_ROOT" "$SKILLS_LINK"
-done
-```
-
-If the command reports an existing directory, back up or remove that directory
-manually, then rerun the setup. The setup never deletes existing skill files.
-
-## Public and private data boundary
-
-Track reusable defaults, examples, templates, and tests. Keep machine-specific or
-private values in ignored files such as `.env`, `*.local.*`, or `*.private.*`.
-Never commit personal absolute paths, personal email addresses, Vault names, account names,
-tokens, credentials, private keys, certificates, or real contact data.
-
-Before publication, inspect the complete tracked diff and history for local paths,
-personal identifiers, credential material, and secret-adjacent files. A clean scan
-does not make an exposed credential safe; revoke or rotate any credential that may
-have entered Git history.
-
-## Development
-
-Create or update one feature unit at a time. A feature unit may include a
-coordinated set of related skills when their contracts must change together;
-keep supporting tests and evals with the behavior they verify, and run focused
-validation for each behavior plus one integrated validation for the feature unit
-before committing.
-Use task-specific branches/worktrees and publish changes through pull requests;
-do not push directly to the default branch.
+Reusable examples must use relative paths or environment variables. Private
+context, credentials, personal paths and runtime artifacts stay outside tracked
+files. Inspect selected diffs and unpublished commits before push. Keep each
+commit independently understandable and reversible, with appropriate tests and
+pre-commit review. Never bypass hooks or repository protection.
