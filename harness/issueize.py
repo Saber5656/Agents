@@ -543,6 +543,31 @@ class IssueizationBatch:
             candidate = self.store.get_task(task_id)
         if candidate.get("issueization_state") == "claimed":
             return "skipped"
+        if candidate.get("issueization_state") == "ambiguous":
+            # Reconciliation is not a new publication claim.  In particular,
+            # an absent list result cannot prove that a timed-out create failed.
+            try:
+                if existing is None:
+                    existing = self._remote_issue(repository, task_id)
+                if existing is not None:
+                    readback = self._readback_for_task(repository, task_id, existing, receipt)
+                    self._save_receipt(task_id, status="linking", issue=readback)
+                    self.store.link_issue(task_id, repository, readback['issue_id'], readback['url'],
+                                          verified=True, readback=readback)
+                    self._save_receipt(task_id, status="linked", issue=readback)
+                    return "issued"
+                if uncertain_receipt:
+                    self._save_receipt(task_id, status="ambiguous", diagnostic="remote marker not visible; reconciliation only, creation suppressed")
+                    return "ambiguous"
+                # A durable pre-create receipt proves this attempt never sent
+                # a remote mutation.  Only that narrow case is safe to retry.
+                candidate = self.store.retry_issueization(task_id, expected_version=candidate['version'])
+            except ReadbackMismatchError as exc:
+                self._save_receipt(task_id, status="incomplete", diagnostic=redact(str(exc), self.env))
+                return "incomplete"
+            except (RemoteError, ValueError, ConflictError) as exc:
+                self._save_receipt(task_id, status="ambiguous", diagnostic=redact(str(exc), self.env))
+                return "ambiguous"
         try:
             claim = self.store.claim_issueization(task_id, self.owner, lease_seconds=self.lease_seconds)
         except IssueizationError:
