@@ -8,8 +8,9 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+import stat
 
-from harness.tasks import ConfigurationError, ConflictError, TaskStore
+from harness.tasks import ConfigurationError, ConflictError, IssueizationError, TaskStore
 
 
 class StoreTests(unittest.TestCase):
@@ -54,7 +55,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(restarted.get_task(first["id"])["source_task_id"], parent["id"])
         self.assertEqual(restarted.get_task(second["id"])["issueization_state"], "unissued")
         changed = restarted.update_task(parent["id"], expected_version=parent["version"], execution_status="verified")
-        linked = restarted.link_issue(parent["id"], "org/repo", 123, "https://github.com/org/repo/issues/123")
+        linked = restarted.link_issue(parent["id"], "org/repo", 123, "https://github.com/org/repo/issues/123", verified=True)
         self.assertEqual(changed["execution_status"], "verified")
         self.assertEqual(linked["issueization_state"], "issued")
         self.assertEqual(linked["execution_status"], "verified")
@@ -114,7 +115,7 @@ class StoreTests(unittest.TestCase):
         retried = store.retry_issueization(task["id"], expected_version=ambiguous["version"])
         self.assertEqual(retried["issueization_state"], "retry")
         claim2 = store.claim_issueization(task["id"], "batch-b")
-        issued = store.link_issue(task["id"], "org/repo", 9, "https://github.com/org/repo/issues/9", claim_token=claim2["claim_token"])
+        issued = store.link_issue(task["id"], "org/repo", 9, "https://github.com/org/repo/issues/9", claim_token=claim2["claim_token"], verified=True)
         self.assertEqual(issued["issueization_state"], "issued")
         self.assertEqual(len(store.list_issue_links(task["id"])), 1)
         self.assertEqual(store.get_task(task["id"])["issueization_state"], "issued")
@@ -123,8 +124,8 @@ class StoreTests(unittest.TestCase):
         store = self.store()
         one = store.create_task(purpose="one", acceptance_evidence=["test:one"], completion_evidence=["run:one"])
         two = store.create_task(purpose="two", acceptance_evidence=["test:two"], completion_evidence=["run:two"])
-        store.link_issue(one["id"], "org/repo", 1, "https://github.com/org/repo/issues/1")
-        store.link_issue(two["id"], "org/repo", 2, "https://github.com/org/repo/issues/2")
+        store.link_issue(one["id"], "org/repo", 1, "https://github.com/org/repo/issues/1", verified=True)
+        store.link_issue(two["id"], "org/repo", 2, "https://github.com/org/repo/issues/2", verified=True)
         store.link_pr(one["id"], "org/repo", 10, "https://github.com/org/repo/pull/10")
         store.link_pr(two["id"], "org/repo", 10, "https://github.com/org/repo/pull/10")
         store.link_work_unit("wu", task_ids=[one["id"], two["id"]], issue_ids=[("org/repo", 1), ("org/repo", 2)], pr_ids=[("org/repo", 10)])
@@ -138,13 +139,70 @@ class StoreTests(unittest.TestCase):
     def test_completion_report_requires_unit_and_acceptance_evidence(self):
         store = self.store()
         requirement = store.create_requirement("ship parser", acceptance=["parser test"])
-        task = store.create_task(purpose="parser", acceptance_evidence=["parser test"])
+        task = store.create_task(purpose="parser", acceptance_evidence=["parser test"], completion_evidence=["run:parser"])
         store.link_requirement_task(requirement["id"], task["id"])
         self.assertFalse(store.completion_report()["complete"])
-        store.add_completion_evidence(task["id"], "run:parser")
         current = store.get_task(task["id"])
         store.update_task(task["id"], expected_version=current["version"], execution_status="completed")
+        store.add_acceptance_evidence(task["id"], "parser test", verified=True)
         self.assertTrue(store.completion_report()["complete"])
+
+    def test_completion_report_requires_verified_acceptance_and_exposes_records(self):
+        store = self.store()
+        task = store.create_task(purpose="verify", acceptance_evidence=["check"] , completion_evidence=["run"])
+        current = store.get_task(task["id"])
+        store.update_task(task["id"], expected_version=current["version"], execution_status="completed")
+        detail = store.get_task(task["id"])
+        self.assertEqual(detail["acceptance_records"], [{"evidence": "check", "verified": False}])
+        self.assertFalse(store.completion_report()["complete"])
+        detail = store.add_acceptance_evidence(task["id"], "check", verified=True)
+        self.assertEqual(detail["acceptance_records"], [{"evidence": "check", "verified": True}])
+        self.assertTrue(store.completion_report()["complete"])
+
+    def test_expired_claim_requires_reconciliation_before_new_claim(self):
+        store = self.store()
+        task = store.create_task(purpose="remote race")
+        claim = store.claim_issueization(task["id"], "batch-a", lease_seconds=-1)
+        candidates = store.list_issueization_candidates()
+        candidate = next(x for x in candidates if x["id"] == task["id"])
+        self.assertTrue(candidate["reconciliation_required"])
+        with self.assertRaises(IssueizationError):
+            store.claim_issueization(task["id"], "batch-b")
+        store.reconcile_expired_claim(task["id"])
+        self.assertEqual(store.get_task(task["id"])["issueization_state"], "ambiguous")
+
+    def test_discovery_retry_increments_version_and_retains_expected_result_history(self):
+        store = self.store()
+        origin = store.create_task(purpose="origin")
+        first = store.record_discovery(originating_task=origin["id"], discovery_key="event",
+                                       purpose="follow-up", expected_result="old", evidence_links=["vault://a"])
+        second = store.record_discovery(originating_task=origin["id"], discovery_key="event",
+                                        purpose="follow-up", expected_result="corrected", evidence_links=["vault://b"])
+        self.assertEqual(second["version"], first["version"] + 1)
+        self.assertEqual(second["expected_result_history"], ["old", "corrected"])
+        with self.assertRaises(ConflictError):
+            store.update_task(second["id"], expected_version=first["version"], purpose="stale")
+
+    def test_issue_link_requires_verified_exact_github_readback(self):
+        store = self.store()
+        task = store.create_task(purpose="link")
+        with self.assertRaises(ValueError):
+            store.link_issue(task["id"], "org/repo", 3, "https://example.test/issues/3", verified=True)
+        with self.assertRaises(ValueError):
+            store.link_issue(task["id"], "org/repo", 3, "https://github.com/other/repo/issues/3", verified=True)
+        linked = store.link_issue(task["id"], "org/repo", 3, "https://github.com/org/repo/issues/3", verified=True,
+                                  readback={"repository": "org/repo", "issue_id": 3, "url": "https://github.com/org/repo/issues/3"})
+        self.assertEqual(linked["issueization_state"], "issued")
+
+    def test_explicit_database_directory_and_sidecars_are_private(self):
+        db_dir = self.root / "permissive"; db_dir.mkdir(mode=0o755); db_dir.chmod(0o755)
+        db_path = db_dir / "tasks.sqlite3"
+        store = TaskStore(db_path)
+        store.create_task(purpose="private")
+        store.close()
+        self.assertEqual(stat.S_IMODE(db_dir.stat().st_mode), 0o700)
+        for path in db_dir.glob("tasks.sqlite3*"):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600, path)
 
     def test_requirements_remain_after_task_completion_and_scope_correction(self):
         store = self.store()

@@ -66,6 +66,7 @@ try:
         follow_up["id"], "org/repo", 123,
         "https://github.com/org/repo/issues/123",
         claim_token=claim["claim_token"],
+        verified=True,
     )
 except TimeoutError as error:
     store.mark_issueization_ambiguous(
@@ -75,16 +76,21 @@ except TimeoutError as error:
 
 Issueization states are `unissued`, `claimed`, `ambiguous`, `retry`, and
 `issued`. A claim has an owner, token, expiry, attempt count, and diagnostic.
-An ambiguous remote result is retained and can be reconciled before a retry;
+An expired claim is surfaced by `list_issueization_candidates()` with
+`reconciliation_required=True` and cannot be reclaimed by expiry alone. The
+batch must reconcile the remote outcome first (using `reconcile_expired_claim`)
+and must hold its process lifetime flock around external create/reconcile work
+so two live batches cannot create concurrently. An ambiguous remote result is retained and can be reconciled before a retry;
 the local task remains available when authentication, network, rate-limit, or
 agent-output failures occur. `import_existing_issue` and `import_backlog`
 link existing Issues without creating them.
 
 Tasks can have many Issue and PR links. `link_work_unit` joins any number of
 tasks, Issues, and PRs under one work unit while each task retains its own
-acceptance and completion evidence (`add_acceptance_evidence` and
+acceptance and completion evidence (`add_acceptance_evidence` with
+`verified=True`, and
 `add_completion_evidence`). `completion_report()` remains false when a linked
-unit, acceptance result, or completion result is missing. Requirements are
+unit, unverified acceptance result, acceptance result, or completion result is missing. Requirements are
 also durable records: use
 `create_requirement`, `link_requirement_task`, and `add_requirement_revision`
 to preserve all original requirements and later scope corrections through a
