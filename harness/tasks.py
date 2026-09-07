@@ -92,6 +92,14 @@ CREATE TABLE IF NOT EXISTS task_completion (
   recorded_at TEXT NOT NULL,
   PRIMARY KEY(task_id, evidence)
 );
+CREATE TABLE IF NOT EXISTS task_revisions (
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  field TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  value TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  PRIMARY KEY(task_id, field, revision)
+);
 CREATE TABLE IF NOT EXISTS task_dependencies (
   task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   depends_on TEXT NOT NULL REFERENCES tasks(id),
@@ -211,6 +219,7 @@ class TaskStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+        self._harden_permissions()
 
     def close(self):
         with self._lock:
@@ -229,9 +238,21 @@ class TaskStore:
                 self._conn.execute("BEGIN IMMEDIATE")
                 yield self._conn
                 self._conn.commit()
+                self._harden_permissions()
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def _harden_permissions(self):
+        if self._memory:
+            return
+        # The database may be supplied in an already-existing permissive
+        # directory. Keep the store and SQLite sidecars private regardless of
+        # the process umask or the directory's previous mode.
+        self.db_path.parent.chmod(0o700)
+        for path in (self.db_path, Path(str(self.db_path) + "-wal"), Path(str(self.db_path) + "-shm")):
+            if path.exists():
+                path.chmod(0o600)
 
     def _task(self, row):
         if row is None:
@@ -244,6 +265,10 @@ class TaskStore:
             "SELECT evidence FROM task_acceptance WHERE task_id=? ORDER BY rowid", (task_id,))]
         result["completion_evidence"] = [r[0] for r in self._conn.execute(
             "SELECT evidence FROM task_completion WHERE task_id=? ORDER BY rowid", (task_id,))]
+        result["acceptance_records"] = [{"evidence": r[0], "verified": bool(r[1])} for r in self._conn.execute(
+            "SELECT evidence,verified FROM task_acceptance WHERE task_id=? ORDER BY rowid", (task_id,))]
+        result["expected_result_history"] = [r[0] for r in self._conn.execute(
+            "SELECT value FROM task_revisions WHERE task_id=? AND field='expected_result' ORDER BY revision", (task_id,))]
         result["dependencies"] = [r[0] for r in self._conn.execute(
             "SELECT depends_on FROM task_dependencies WHERE task_id=? ORDER BY depends_on", (task_id,))]
         result["work_units"] = [r[0] for r in self._conn.execute(
@@ -293,6 +318,8 @@ class TaskStore:
               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                          (task_id, str(purpose), source, source_task_id, source_event_key,
                           expected_result, repository, assignee, priority, execution_status, now, now))
+            if expected_result is not None:
+                self._record_task_revision(conn, task_id, "expected_result", expected_result, now)
             conn.executemany("INSERT INTO task_evidence VALUES (?,?,?,?)",
                              [(task_id, x, "context", now) for x in evidence_links])
             conn.executemany("INSERT INTO task_acceptance VALUES (?,?,0,?)",
@@ -319,13 +346,16 @@ class TaskStore:
             if found:
                 task_id = found[0]
                 now = _now()
+                current = conn.execute("SELECT expected_result FROM tasks WHERE id=?", (task_id,)).fetchone()
+                if expected_result is not None and expected_result != current[0]:
+                    self._record_task_revision(conn, task_id, "expected_result", expected_result, now)
                 for link in dict.fromkeys(evidence_links or []):
                     conn.execute("INSERT OR IGNORE INTO task_evidence VALUES (?,?,?,?)",
                                  (task_id, link, "context", now))
                 for evidence in dict.fromkeys(acceptance_evidence or []):
                     conn.execute("INSERT OR IGNORE INTO task_acceptance VALUES (?,?,0,?)",
                                  (task_id, evidence, now))
-                conn.execute("UPDATE tasks SET updated_at=?, expected_result=COALESCE(?,expected_result) WHERE id=?",
+                conn.execute("UPDATE tasks SET updated_at=?, expected_result=COALESCE(?,expected_result), version=version+1 WHERE id=?",
                              (now, expected_result, task_id))
             else:
                 now, task_id = _now(), _id("task")
@@ -335,6 +365,8 @@ class TaskStore:
                   VALUES (?,?,?,?,?,?,?,?,?,?, 'unissued',?,?)""",
                              (task_id, purpose, "discovery", originating_task, discovery_key,
                               expected_result, repository, assignee, priority, "planned", now, now))
+                if expected_result is not None:
+                    self._record_task_revision(conn, task_id, "expected_result", expected_result, now)
                 conn.executemany("INSERT INTO task_evidence VALUES (?,?,?,?)",
                                  [(task_id, x, "context", now) for x in dict.fromkeys(evidence_links or [])])
                 conn.executemany("INSERT INTO task_acceptance VALUES (?,?,0,?)",
@@ -394,6 +426,12 @@ class TaskStore:
         if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
             raise KeyError(f"unknown task: {task_id}")
 
+    def _record_task_revision(self, conn, task_id, field, value, recorded_at):
+        row = conn.execute("SELECT COALESCE(MAX(revision), 0) FROM task_revisions WHERE task_id=? AND field=?",
+                           (task_id, field)).fetchone()
+        conn.execute("INSERT INTO task_revisions VALUES (?,?,?,?,?)",
+                     (task_id, field, row[0] + 1, str(value), recorded_at))
+
     def _ensure_work_unit(self, conn, work_unit, purpose=None):
         conn.execute("INSERT OR IGNORE INTO work_units VALUES (?,?,?)", (work_unit, purpose, _now()))
 
@@ -405,9 +443,19 @@ class TaskStore:
                        body=COALESCE(excluded.body,issues.body)""",
                      (repository, int(issue_id), issue_url, title, body, _now()))
 
-    def link_issue(self, task_id, repository, issue_id, issue_url, *, claim_token=None, title=None, body=None):
+    def link_issue(self, task_id, repository, issue_id, issue_url, *, claim_token=None,
+                   title=None, body=None, verified=False, readback=None):
         if not repository or not issue_url or int(issue_id) <= 0:
             raise ValueError("repository, positive issue_id, and issue_url are required")
+        expected_url = f"https://github.com/{repository}/issues/{int(issue_id)}"
+        if not verified or issue_url != expected_url:
+            raise ValueError("link_issue requires verified=True and the exact GitHub Issue URL")
+        if readback is not None:
+            rb_repo = readback.get("repository")
+            rb_id = readback.get("issue_id", readback.get("number"))
+            rb_url = readback.get("url", readback.get("issue_url", readback.get("html_url")))
+            if (rb_repo, int(rb_id) if rb_id is not None else None, rb_url) != (repository, int(issue_id), expected_url):
+                raise ValueError("Issue readback does not match repository, ID, and URL")
         with self._tx() as conn:
             task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if task is None:
@@ -439,8 +487,7 @@ class TaskStore:
             task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if task is None:
                 raise KeyError(f"unknown task: {task_id}")
-            active_claim = task["issueization_state"] == "claimed" and task["claim_expires_at"] and task["claim_expires_at"] > now.isoformat()
-            if task["issueization_state"] == "issued" or active_claim:
+            if task["issueization_state"] == "issued" or task["issueization_state"] == "claimed":
                 raise IssueizationError(f"task is not claimable: {task['issueization_state']}")
             conn.execute("""UPDATE tasks SET issueization_state='claimed',claim_token=?,claim_owner=?,
                          claim_expires_at=?,issueization_attempts=issueization_attempts+1,
@@ -450,7 +497,15 @@ class TaskStore:
 
     def list_issueization_candidates(self, *, limit=None):
         """Return tasks a separate batch may consider, without claiming them."""
-        tasks = self.list_tasks(issueization_state="unissued") + self.list_tasks(issueization_state="retry") + self.list_tasks(issueization_state="ambiguous")
+        tasks = (self.list_tasks(issueization_state="unissued") +
+                 self.list_tasks(issueization_state="retry") +
+                 self.list_tasks(issueization_state="ambiguous") +
+                 self.list_tasks(issueization_state="claimed"))
+        now = datetime.now(timezone.utc).isoformat()
+        for task in tasks:
+            expires = task.get("claim_expires_at")
+            task["reconciliation_required"] = bool(
+                task["issueization_state"] == "claimed" and expires and expires <= now)
         return tasks if limit is None else tasks[:limit]
 
     def claim_next_issueization(self, owner, *, lease_seconds=300):
@@ -478,6 +533,21 @@ class TaskStore:
             conn.execute("""UPDATE tasks SET issueization_state=?,claim_token=NULL,claim_owner=NULL,
                          claim_expires_at=NULL,issueization_error=?,version=version+1,updated_at=? WHERE id=?""",
                          (state, diagnostic, _now(), task_id))
+        return self.get_task(task_id)
+
+    def reconcile_expired_claim(self, task_id, diagnostic=None):
+        """Release an expired lease only after the batch has reconciled remote state."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._tx() as conn:
+            task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if task is None:
+                raise KeyError(f"unknown task: {task_id}")
+            if task["issueization_state"] != "claimed" or not task["claim_expires_at"] or task["claim_expires_at"] > now:
+                raise IssueizationError("task does not have an expired issueization claim")
+            conn.execute("""UPDATE tasks SET issueization_state='ambiguous',claim_token=NULL,
+                         claim_owner=NULL,claim_expires_at=NULL,issueization_error=?,
+                         version=version+1,updated_at=? WHERE id=?""",
+                         (diagnostic or "claim expired; reconcile remote outcome before retry", _now(), task_id))
         return self.get_task(task_id)
 
     def retry_issueization(self, task_id, *, expected_version=None):
@@ -637,8 +707,10 @@ class TaskStore:
                 task = by_id.get(task_id)
                 if task is None or task["execution_status"] not in ("completed", "verified"):
                     missing_tasks.append({"task_id": task_id, "reason": "execution not complete"})
-                elif not task["acceptance_evidence"]:
+                elif not task["acceptance_records"]:
                     missing_tasks.append({"task_id": task_id, "reason": "acceptance evidence missing"})
+                elif not all(record["verified"] for record in task["acceptance_records"]):
+                    missing_tasks.append({"task_id": task_id, "reason": "acceptance evidence not verified"})
                 elif not task["completion_evidence"]:
                     missing_tasks.append({"task_id": task_id, "reason": "completion evidence missing"})
             return {"complete": not missing_requirements and not missing_tasks,
