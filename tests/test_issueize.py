@@ -295,3 +295,24 @@ class IssueizationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DraftProtocolRegressionTests(unittest.TestCase):
+    def test_final_message_excludes_progress_commentary(self):
+        from harness.issueize import _codex_result
+        draft=json.dumps({'title':'Fixture','body':'Test purpose','acceptance':['One Issue exists']})
+        output='\n'.join([json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Progress update'}}),
+                            json.dumps({'type':'item.completed','item':{'type':'agent_message','text':draft}}),
+                            json.dumps({'type':'turn.completed','usage':{}})])
+        text,_=_codex_result(output)
+        self.assertEqual(parse_draft(text).title,'Fixture')
+
+    def test_drafting_disables_mutating_and_irrelevant_tools(self):
+        agent=CodexDraftAgent(env={'PATH':os.environ.get('PATH',''),'HOME':os.environ.get('HOME','')})
+        terminal=json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'{}'}})+'\n'+json.dumps({'type':'turn.completed'})
+        with mock.patch.object(agent,'_verify_subscription_login'), mock.patch('harness.issueize.subprocess.run',return_value=mock.Mock(returncode=0,stdout=terminal,stderr='')) as run:
+            agent.draft({'id':'task_fixture'})
+        argv=run.call_args.args[0]
+        for feature in ('apps','plugins','shell_tool','multi_agent'):
+            self.assertIn(['--disable',feature],[argv[i:i+2] for i in range(len(argv)-1)])
+        self.assertIn('Draft only',run.call_args.kwargs['input'])
