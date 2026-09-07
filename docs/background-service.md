@@ -1,7 +1,7 @@
 # Background execution service
 
 `harness.service` keeps scheduled work in a private SQLite database and runs
-one attempt at a time after the Codex App or conversation is gone. The default
+bounded concurrent attempts after the Codex App or conversation is gone. The default
 database is `$AGENTS_ROOT/.local/service.sqlite3`; the database, WAL/SHM files,
 service logs, and workspace lock directory are private. The service requires
 the existing `AGENTS_ROOT` and `AGENTS_VAULT_ROOT` roots and reads
@@ -39,25 +39,39 @@ acceptance records have been explicitly verified.
 
 ```sh
 python3 -m harness.service run-once --json
-python3 -m harness.service verify JOB_ID --evidence vault://runs/verified.json
+python3 -m harness.service verify JOB_ID --evidence 'vault://runs/verified.json; merge; main-sync'
 python3 -m harness.service run --poll 30
 ```
 
 The service only runs tasks whose dependencies are complete and verified with
 acceptance and completion evidence that includes a `main-sync` or `merged`
-stage marker. It never creates GitHub Issues. Pending UI
-operations remain in task context for a later supported UI reconciliation.
+stage marker. A worker success enters a separate read-only verification stage;
+the task is complete only after every acceptance record is verified and the
+verification evidence proves merge and main synchronization. It never creates
+GitHub Issues. Pending UI operations remain in task context for a later
+supported UI reconciliation.
+
+The explicit `verify` evidence must identify both the merge and main
+synchronization stages; a provider success string or acceptance text alone is
+insufficient.
 
 ## Restart, locks, and idle work
 
-At startup, a job or attempt left in `running` is changed to
-`needs_verification`; the service never assumes a process that disappeared
-completed successfully and does not blindly rerun that implementation. Each
-workspace/resource has a process lifetime lock held from claim through the end
-of the attempt. A second live service skips the locked resource. The external
-service launcher must also hold its process lifetime flock around create or
-reconcile operations; an expired lease alone is not evidence that a live
-worker stopped.
+Only the scheduler owner performs recovery. A newly constructed `ServiceStore`
+does not mutate live work. It records a process identity with every attempt;
+an alive or uninspectable process remains occupied, while a definitely dead
+attempt enters `reconciling` under both locks. A read-only receipt reconciler
+must run before a retry. If the receipt cannot prove that resuming is safe, the
+job remains `needs_verification` for the verification agent or explicit
+operator evidence. An expired lease alone is not evidence that a live worker
+stopped, and the batch layer must hold its process-lifetime flock around
+external create/reconcile operations to prevent overlapping creates.
+
+Each attempt acquires a workspace lock and a separate global resource lock.
+This excludes two resources in one workspace and the same resource in
+different workspaces. The scheduler uses a bounded worker pool; one configured
+coordinator slot is reserved from the worker capacity, and idle waits use an
+event rather than busy polling.
 
 The idle loop waits through a stop event rather than polling in a busy loop.
 The scheduler database retains attempts, updates, errors, and the next retry
@@ -80,10 +94,14 @@ python3 -m harness.service launchd generate --label com.example.agents
 ```
 
 The plist uses the absolute `sys.executable`, a configured database path, the
-Agents root as working directory, `RunAtLoad`, and `KeepAlive`. Prompts,
-contexts, tokens, and API keys are never written into the plist. On macOS, an
-operator can explicitly call the `install`, `start`, and `status` methods after
-review; this implementation does not activate a real LaunchAgent by itself.
+Agents root as working directory, `RunAtLoad`, and `KeepAlive`. It includes
+only a safe explicit `PATH` containing the resolved `codex` directory and
+system directories, so launchd does not depend on an interactive shell.
+Prompts, contexts, tokens, and API keys are never written into the plist. On
+macOS, `install` preserves a differing existing plist in a private timestamped
+backup and is idempotent; `start` checks status first. An operator can
+explicitly call these methods after review; this implementation does not
+activate a real LaunchAgent by itself.
 
 App-quit and host-reboot continuation still require a live acceptance run on
 the supported host. The subprocess and restart fixtures here prove durable

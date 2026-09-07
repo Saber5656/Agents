@@ -15,12 +15,14 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import shutil
 import sqlite3
 import string
 import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from .tasks import ConflictError, TaskStore
@@ -71,6 +73,7 @@ CREATE TABLE IF NOT EXISTS service_jobs (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
   workspace TEXT NOT NULL,
+  run_dir TEXT NOT NULL,
   resource TEXT NOT NULL DEFAULT 'default',
   prompt TEXT NOT NULL,
   context TEXT NOT NULL,
@@ -100,6 +103,7 @@ CREATE TABLE IF NOT EXISTS service_attempts (
   job_id TEXT NOT NULL REFERENCES service_jobs(id) ON DELETE CASCADE,
   attempt_number INTEGER NOT NULL,
   pid INTEGER,
+  identity TEXT,
   status TEXT NOT NULL,
   started_at TEXT NOT NULL,
   ended_at TEXT,
@@ -117,41 +121,59 @@ class WorkspaceLock:
         self.resource = resource
         self.lock_root = Path(lock_root)
         self.lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        key = hashlib.sha256(f"{self.workspace}\0{resource}".encode()).hexdigest()
-        self.path = self.lock_root / f"{key}.lock"
-        self._file = None
+        workspace_key = hashlib.sha256(str(self.workspace).encode()).hexdigest()
+        resource_key = hashlib.sha256(str(resource).encode()).hexdigest()
+        self.paths = [self.lock_root / "workspace" / f"{workspace_key}.lock",
+                      self.lock_root / "resource" / f"{resource_key}.lock"]
+        self.path = self.paths[0]
+        self._files = []
 
     def acquire(self, blocking=True):
-        if self._file is not None:
+        if self._files:
             return True
-        self._file = self.path.open("a+")
-        self.path.chmod(0o600)
+        opened = []
+        current_file = None
         try:
-            if os.name == "nt":
-                import msvcrt
-                mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
-                msvcrt.locking(self._file.fileno(), mode, 1)
-            else:
-                import fcntl
-                flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-                fcntl.flock(self._file.fileno(), flags)
+            for path in self.paths:
+                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                file = path.open("a+"); current_file = file; path.chmod(0o600)
+                if os.name == "nt":
+                    import msvcrt
+                    mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+                    msvcrt.locking(file.fileno(), mode, 1)
+                else:
+                    import fcntl
+                    flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+                    fcntl.flock(file.fileno(), flags)
+                opened.append(file)
+            self._files = opened
             return True
         except (BlockingIOError, OSError):
-            self._file.close(); self._file = None
+            if current_file is not None and current_file not in opened:
+                current_file.close()
+            for file in reversed(opened):
+                try:
+                    if os.name != "nt":
+                        import fcntl
+                        fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+                finally:
+                    file.close()
             return False
 
     def release(self):
-        if self._file is None:
+        if not self._files:
             return
-        try:
-            if os.name == "nt":
-                import msvcrt
-                self._file.seek(0); msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
-        finally:
-            self._file.close(); self._file = None
+        for file in reversed(self._files):
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    file.seek(0); msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+            finally:
+                file.close()
+        self._files = []
 
     def __enter__(self):
         if not self.acquire():
@@ -172,17 +194,32 @@ class ServiceStore:
             path = Path(db_path)
         self.db_path = Path(path)
         self.db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.db_path.parent.chmod(0o700)
+        if not self.db_path.exists():
+            fd = os.open(self.db_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.db_path, timeout=timeout, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA busy_timeout=15000")
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(SCHEMA); self._conn.commit(); self._harden()
-        self._recover_running()
+        self._conn.executescript(SCHEMA)
+        self._migrate_schema()
+        self._conn.commit(); self._harden()
+
+    def _migrate_schema(self):
+        """Add durable identity columns to databases from the first service release."""
+        job_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(service_jobs)")}
+        if "run_dir" not in job_columns:
+            self._conn.execute("ALTER TABLE service_jobs ADD COLUMN run_dir TEXT")
+            prefix = str(self.tasks.vault_root / "01-Projects" / "agent-runs" / "service-")
+            rows = self._conn.execute("SELECT id FROM service_jobs WHERE run_dir IS NULL").fetchall()
+            self._conn.executemany("UPDATE service_jobs SET run_dir=? WHERE id=?",
+                                  [(prefix + row[0], row[0]) for row in rows])
+        attempt_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(service_attempts)")}
+        if "identity" not in attempt_columns:
+            self._conn.execute("ALTER TABLE service_attempts ADD COLUMN identity TEXT")
 
     def _harden(self):
-        self.db_path.parent.chmod(0o700)
         for path in (self.db_path, Path(str(self.db_path) + "-wal"), Path(str(self.db_path) + "-shm")):
             if path.exists():
                 path.chmod(0o600)
@@ -201,17 +238,93 @@ class ServiceStore:
         with self._lock:
             self._conn.close()
 
-    def _recover_running(self):
-        with self.tx() as conn:
-            stamp = now()
-            conn.execute("UPDATE service_attempts SET status='needs_verification',ended_at=?,error=COALESCE(error,'service restarted while attempt was running') WHERE status='running'", (stamp,))
-            conn.execute("UPDATE service_jobs SET state='needs_verification',last_error=COALESCE(last_error,'service restarted while job was running'),updated_at=? WHERE state='running'", (stamp,))
-        for task in self.tasks.list_tasks(execution_status="running"):
+    @staticmethod
+    def _process_identity(pid):
+        identity = {"pid": int(pid)}
+        try:
+            fields = Path(f"/proc/{int(pid)}/stat").read_text().split()
+            if len(fields) > 21:
+                identity["start_ticks"] = fields[21]
+        except (OSError, ValueError):
+            pass
+        if "start_ticks" not in identity:
             try:
-                current = self.tasks.get_task(task["id"])
-                self.tasks.update_task(task["id"], expected_version=current["version"], execution_status="needs_verification")
-            except ConflictError:
+                observed = subprocess.run(
+                    ["ps", "-p", str(int(pid)), "-o", "lstart=,command="],
+                    capture_output=True, text=True, timeout=2, check=False)
+                fields = observed.stdout.strip().split(None, 5)
+                if observed.returncode == 0 and len(fields) >= 6:
+                    identity["start_time"] = " ".join(fields[:5])
+                    identity["command"] = fields[5]
+            except (OSError, subprocess.TimeoutExpired):
                 pass
+        return identity
+
+    def _pid_state(self, pid, recorded_identity=None):
+        if not pid:
+            return "unknown"
+        try:
+            os.kill(int(pid), 0)
+            if recorded_identity:
+                current = self._process_identity(pid)
+                recorded = json.loads(recorded_identity) if isinstance(recorded_identity, str) else recorded_identity
+                for key in ("start_ticks", "start_time"):
+                    if recorded.get(key) and current.get(key) and recorded[key] != current[key]:
+                        return "dead"
+                if recorded.get("command") and current.get("command") and recorded["command"] != current["command"]:
+                    return "unknown"
+                if not any(recorded.get(key) and current.get(key) for key in ("start_ticks", "start_time")):
+                    return "unknown"
+            return "alive"
+        except ProcessLookupError:
+            return "dead"
+        except PermissionError:
+            return "unknown"
+        except OSError:
+            return "unknown"
+
+    def recover_stale_jobs(self, reconciler=None):
+        """Reconcile only jobs whose recorded worker is definitely dead.
+
+        A live or uninspectable PID remains occupied.  The read-only
+        reconciler runs while both resource locks are held before retrying.
+        """
+        with self._lock:
+            rows = list(self._conn.execute("SELECT j.*,a.id AS attempt_id,a.pid,a.identity,a.attempt_number,a.status AS attempt_status FROM service_jobs j JOIN service_attempts a ON a.job_id=j.id AND a.status='running' WHERE j.state='running'"))
+        recovered = []
+        for row in rows:
+            if self._pid_state(row["pid"], row["identity"]) != "dead":
+                continue
+            lock = WorkspaceLock(row["workspace"], self.tasks.agents_root / ".local" / "service-locks", row["resource"])
+            if not lock.acquire(blocking=False):
+                continue
+            try:
+                with self.tx() as conn:
+                    current = conn.execute("SELECT * FROM service_jobs WHERE id=? AND state='running'", (row["id"],)).fetchone()
+                    if current is None:
+                        continue
+                    stamp = now()
+                    conn.execute("UPDATE service_jobs SET state='reconciling',last_error=?,updated_at=? WHERE id=?", ("worker died; read-only reconciliation in progress", stamp, row["id"]))
+                    conn.execute("UPDATE service_attempts SET status='reconciling',ended_at=?,error=? WHERE id=? AND status='running'", (stamp, "worker process is definitely dead", row["attempt_id"]))
+                try:
+                    result = (reconciler or default_reconciler)(self._job(current), row)
+                except Exception as exc:
+                    result = {"safe_to_resume": False, "reason": "receipt reconciliation failed", "error": str(exc)}
+                safe = isinstance(result, dict) and result.get("safe_to_resume") is True
+                state = "retry" if safe else "needs_verification"
+                with self.tx() as conn:
+                    conn.execute("UPDATE service_jobs SET state=?,next_attempt_at=?,last_error=?,updated_at=? WHERE id=?", (state, now() if safe else None, result.get("reason") if isinstance(result, dict) else "reconciliation requires verification", now(), row["id"]))
+                    conn.execute("UPDATE service_attempts SET status=?,result_json=? WHERE id=?", (state, json.dumps(result or {}, ensure_ascii=False), row["attempt_id"]))
+                task = self.tasks.get_task(row["task_id"])
+                if task is not None:
+                    try:
+                        self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="needs_verification")
+                    except ConflictError:
+                        pass
+                recovered.append({"job_id": row["id"], "state": state})
+            finally:
+                lock.release()
+        return recovered
 
     def _job(self, row):
         if row is None:
@@ -254,11 +367,12 @@ class ServiceStore:
             if existing:
                 return self.get_job(existing[0])
             jid = "job_" + hashlib.sha256(f"{task_id}\0{time.time_ns()}".encode()).hexdigest()[:24]
+            run_dir = self.tasks.vault_root / "01-Projects" / "agent-runs" / f"service-{jid}"
             stamp = now()
             conn.execute("""INSERT INTO service_jobs
-              (id,task_id,workspace,resource,prompt,context,model,effort,timeout,retry_base,retry_max,state,created_at,updated_at)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
-                         (jid, task_id, str(workspace), resource, prompt, context, model, effort, float(timeout), float(retry_base), float(retry_max), stamp, stamp))
+              (id,task_id,workspace,run_dir,resource,prompt,context,model,effort,timeout,retry_base,retry_max,state,created_at,updated_at)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
+                         (jid, task_id, str(workspace), str(run_dir), resource, prompt, context, model, effort, float(timeout), float(retry_base), float(retry_max), stamp, stamp))
         return self.get_job(jid)
 
     def record_update(self, job_id, message, evidence_links=()):
@@ -297,8 +411,10 @@ class ServiceStore:
             attempt = row["attempts_count"] + 1; stamp = now()
             conn.execute("UPDATE service_jobs SET state='running',attempts_count=?,updated_at=?,last_error=NULL WHERE id=?", (attempt, stamp, job_id))
             aid = f"attempt_{hashlib.sha256(f'{job_id}:{attempt}'.encode()).hexdigest()[:24]}"
-            conn.execute("INSERT INTO service_attempts VALUES (?,?,?,?,?,?,?,?,?)", (aid, job_id, attempt, os.getpid(), "running", stamp, None, None, None))
-            return dict(conn.execute("SELECT * FROM service_jobs WHERE id=?", (job_id,)).fetchone())
+            conn.execute("INSERT INTO service_attempts VALUES (?,?,?,?,?,?,?,?,?,?)", (aid, job_id, attempt, os.getpid(), json.dumps(self._process_identity(os.getpid())), "running", stamp, None, None, None))
+            claimed = dict(conn.execute("SELECT * FROM service_jobs WHERE id=?", (job_id,)).fetchone())
+            claimed["attempt_id"] = aid
+            return claimed
 
     def _claim_next(self):
         for row in self._ready_rows():
@@ -339,12 +455,12 @@ class ServiceStore:
         if task is not None:
             try:
                 current = self.tasks.get_task(job["task_id"])
-                self.tasks.update_task(job["task_id"], expected_version=current["version"], execution_status="needs_verification")
+                self.tasks.update_task(job["task_id"], expected_version=current["version"], execution_status="needs_verification" if succeeded else "running")
             except ConflictError:
                 pass
         return {"status": terminal, "job_id": job["id"], "attempt": attempt_no}
 
-    def run_once(self, executor: Callable | None = None):
+    def run_once(self, executor: Callable | None = None, verifier: Callable | None = None):
         if executor is None:
             self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"))
         job = self._claim_next()
@@ -354,10 +470,17 @@ class ServiceStore:
         lock = job.pop("_lock")
         try:
             if executor is None: executor = default_executor
-            result = executor({"job_id": job["id"], "task_id": job["task_id"], "workspace": job["workspace"], "prompt": job["prompt"], "context": job["context"], "model": job["model"], "effort": job["effort"], "timeout": job["timeout"], "updates": self.get_job(job["id"])["updates"]})
-            return self._finish_attempt(job, result=result)
-        except Exception as exc:
-            return self._finish_attempt(job, result={"status": "failed", "text": str(exc)}, error=str(exc))
+            try:
+                result = executor({"job_id": job["id"], "task_id": job["task_id"], "workspace": job["workspace"], "run_dir": job["run_dir"], "attempt_id": job["attempt_id"], "attempt": job["attempts_count"], "agents_root": str(self.tasks.agents_root), "vault_root": str(self.tasks.vault_root), "prompt": job["prompt"], "context": job["context"], "model": job["model"], "effort": job["effort"], "timeout": job["timeout"], "updates": self.get_job(job["id"])["updates"]})
+            except Exception as exc:
+                return self._finish_attempt(job, result={"status": "failed", "text": str(exc)}, error=str(exc))
+            outcome = self._finish_attempt(job, result=result)
+            if outcome["status"] == "needs_verification" and verifier is not None:
+                try:
+                    return self.verify_with_agent(job["id"], verifier)
+                except Exception as exc:
+                    return {"status": "needs_verification", "job_id": job["id"], "verification_error": str(exc)}
+            return outcome
         finally:
             lock.release()
 
@@ -367,11 +490,38 @@ class ServiceStore:
         task = self.tasks.get_task(job["task_id"])
         if not task.get("acceptance_records") or not all(x["verified"] for x in task["acceptance_records"]):
             raise ValueError("all acceptance evidence must be verified first")
+        evidence_text = [str(item).lower() for item in task.get("completion_evidence", [])]
+        evidence_text += [str(item).lower() for item in task.get("evidence_links", [])]
+        evidence_text.append(str(evidence).lower())
+        merged = any(re.search(r"\bmerge(?:d)?\b", item) or "pull request" in item or "/pull/" in item for item in evidence_text)
+        main_sync = any(("main" in item and "sync" in item) or "merged" in item for item in evidence_text)
+        if not merged or not main_sync:
+            raise ValueError("merge and main-sync evidence are required")
         task = self.tasks.add_completion_evidence(task["id"], evidence)
         task = self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="verified")
         with self.tx() as conn:
             conn.execute("UPDATE service_jobs SET state='completed',next_attempt_at=NULL,updated_at=? WHERE id=?", (now(), job_id))
         return self.get_job(job_id)
+
+    def verify_with_agent(self, job_id, verifier):
+        job = self.get_job(job_id)
+        try:
+            result = verifier({"job": job, "task": self.tasks.get_task(job["task_id"]), "agents_root": str(self.tasks.agents_root), "vault_root": str(self.tasks.vault_root)})
+        except Exception as exc:
+            return {"status": "needs_verification", "job_id": job_id, "verification_error": str(exc)}
+        if not isinstance(result, dict) or not result.get("acceptance") or not result.get("merge") or not result.get("main_sync"):
+            return {"status": "needs_verification", "job_id": job_id, "verification": result or {}}
+        evidence = result.get("evidence")
+        if not evidence:
+            return {"status": "needs_verification", "job_id": job_id, "verification": result}
+        proof = f"{evidence};merge;main-sync"
+        return {"status": "verified", "job_id": job_id, "job": self.verify(job_id, proof), "verification": result}
+
+    def verify_pending(self, verifier):
+        outcomes = []
+        for job in self.list_jobs("needs_verification"):
+            outcomes.append(self.verify_with_agent(job["id"], verifier))
+        return outcomes
 
     @staticmethod
     def auth_guard(env, login_check=None):
@@ -380,7 +530,10 @@ class ServiceStore:
             raise AuthError("API inference routes are forbidden; use ChatGPT subscription login")
         if login_check is None:
             def login_check(actual):
-                try: return subprocess.run(["codex", "login", "status"], env=actual, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20).returncode == 0
+                try:
+                    result = subprocess.run(["codex", "login", "status"], env=actual, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+                    text = (result.stdout + "\n" + result.stderr).lower()
+                    return result.returncode == 0 and "chatgpt" in text and any(marker in text for marker in ("logged in", "authenticated", "signed in"))
                 except (OSError, subprocess.TimeoutExpired): return False
         if not login_check(env):
             raise AuthError("codex login status is not authenticated")
@@ -388,53 +541,138 @@ class ServiceStore:
 
 
 def default_executor(spec):
-    from .runner import Job, run_job
-    agents_root = Path(os.environ.get("AGENTS_ROOT", Path(spec["workspace"]).parent)).resolve()
+    from .runner import Job, run_job, resume_job
+    agents_root = Path(spec["agents_root"]).resolve()
+    vault = Path(spec["vault_root"]).resolve()
+    if not agents_root.is_dir() or not vault.is_dir():
+        raise ValueError("explicit AGENTS_ROOT and AGENTS_VAULT_ROOT directories are required")
     env = load_agents_env(agents_root / ".env")
-    vault = Path(env.get("AGENTS_VAULT_ROOT", ""))
-    if not vault.is_dir():
-        raise ValueError("AGENTS_VAULT_ROOT must point to an existing Vault")
     prompt = spec["prompt"] + "\n\nContext:\n" + spec["context"]
     for update in spec.get("updates", []):
         prompt += f"\n\nUpdate: {update['message']}\nEvidence: {', '.join(update['evidence_links'])}"
-    result = run_job(Job(Path(spec["workspace"]), vault, prompt, provider="codex", codex_model=spec["model"], effort=spec["effort"], timeout=spec["timeout"]), env)
-    return result
+    common = agents_root / "COMMON-AGENTS.md"
+    if common.is_file():
+        prompt += "\n\nCurrent common policy:\n" + common.read_text()
+    job = Job(workspace=Path(spec["workspace"]), vault=vault, prompt=prompt,
+              mode="run", provider="codex", codex_model=spec["model"], effort=spec["effort"],
+              timeout=spec["timeout"], fallback=False, run_dir=Path(spec["run_dir"]))
+    run_dir = Path(spec["run_dir"])
+    if run_dir.exists():
+        return resume_job(job, run_dir, env)
+    return run_job(job, env, run_dir=run_dir)
+
+
+def default_reconciler(job, attempt):
+    """Read only receipt reconciliation after a definitely dead worker."""
+    run_dir = Path(job["run_dir"])
+    result_file = run_dir / "result.json"
+    if not result_file.is_file():
+        return {"safe_to_resume": False, "reason": "no durable result receipt; reconciliation required"}
+    try:
+        result = json.loads(result_file.read_text())
+    except (OSError, ValueError):
+        return {"safe_to_resume": False, "reason": "unreadable result receipt"}
+    if result.get("status") in ("completed", "review_findings", "review_incomplete"):
+        return {"safe_to_resume": False, "reason": "receipt requires acceptance verification", "receipt": result}
+    return {"safe_to_resume": True, "reason": "receipt is resumable", "receipt": result}
+
+
+def default_verifier(spec):
+    """A separate, read-only evidence stage that can be replaced by an agent."""
+    task = spec["task"]
+    evidence = [str(item).lower() for item in task.get("completion_evidence", []) + task.get("evidence_links", [])]
+    acceptance = bool(task.get("acceptance_records")) and all(item["verified"] for item in task["acceptance_records"])
+    merged = any(re.search(r"\bmerge(?:d)?\b", item) or "pull request" in item or "/pull/" in item for item in evidence)
+    synced = any(("main" in item and "sync" in item) or "merged" in item for item in evidence)
+    if acceptance and merged and synced:
+        return {"acceptance": True, "merge": True, "main_sync": True,
+                "evidence": "verified:" + task["id"] + ";merge;main-sync"}
+    return {"acceptance": acceptance, "merge": merged, "main_sync": synced,
+            "reason": "acceptance, merge, or main-sync evidence is incomplete", "evidence": None}
 
 
 class Scheduler:
-    def __init__(self, store, *, poll_interval=30.0, stop_event=None):
+    def __init__(self, store, *, poll_interval=30.0, stop_event=None, max_workers=2,
+                 coordinator_reserved=1, verification_executor=None, reconciler=None):
         self.store = store; self.poll_interval = poll_interval; self.stop_event = stop_event or threading.Event(); self._wait = self.stop_event.wait
+        self.max_workers = max(1, int(max_workers)); self.coordinator_reserved = max(0, int(coordinator_reserved))
+        self.worker_capacity = max(1, self.max_workers - self.coordinator_reserved)
+        self.verification_executor = verification_executor; self.reconciler = reconciler
+        self._prepared = False; self._prepare_lock = threading.Lock()
 
-    def run_once(self, executor=None): return self.store.run_once(executor=executor)
+    def _prepare(self):
+        if self._prepared:
+            return
+        with self._prepare_lock:
+            if self._prepared:
+                return
+            self.store.recover_stale_jobs(self.reconciler)
+            if self.verification_executor is not None:
+                self.store.verify_pending(self.verification_executor)
+            self._prepared = True
+
+    def run_once(self, executor=None):
+        self._prepare()
+        return self.store.run_once(executor=executor, verifier=self.verification_executor)
 
     def run_forever(self, executor=None):
-        while not self.stop_event.is_set():
-            result = self.run_once(executor=executor)
-            if result["status"] in ("idle", "blocked"):
-                self._wait(self.poll_interval)
+        pool = ThreadPoolExecutor(max_workers=self.worker_capacity, thread_name_prefix="agents-worker")
+        try:
+            while not self.stop_event.is_set():
+                futures = [pool.submit(self.run_once, executor) for _ in range(self.worker_capacity)]
+                results = [future.result() for future in futures]
+                if self.verification_executor is not None:
+                    self.store.verify_pending(self.verification_executor)
+                if all(result["status"] in ("idle", "blocked", "retry", "needs_verification") for result in results):
+                    self._wait(self.poll_interval)
+        finally:
+            pool.shutdown(wait=True)
         return "stopped"
 
 
 class Launchd:
-    def __init__(self, agents_root, db_path):
+    def __init__(self, agents_root, db_path, vault_root=None):
         self.agents_root = Path(agents_root).resolve(); self.db_path = Path(db_path).resolve()
+        self.vault_root = Path(vault_root).resolve() if vault_root else None
 
     def generate(self, label="com.agents.service"):
         environment = {"AGENTS_ROOT": str(self.agents_root)}
-        vault_root = os.environ.get("AGENTS_VAULT_ROOT")
+        vault_root = self.vault_root or (Path(os.environ["AGENTS_VAULT_ROOT"]).resolve() if os.environ.get("AGENTS_VAULT_ROOT") else None)
         if vault_root:
-            environment["AGENTS_VAULT_ROOT"] = str(Path(vault_root).resolve())
+            environment["AGENTS_VAULT_ROOT"] = str(vault_root)
+        codex = shutil.which("codex")
+        environment["PATH"] = (str(Path(codex).parent) + ":/usr/bin:/bin") if codex else "/usr/bin:/bin"
         payload = {"Label": label, "ProgramArguments": [sys.executable, "-m", "harness.service", "--db", str(self.db_path), "run"], "WorkingDirectory": str(self.agents_root), "EnvironmentVariables": environment, "RunAtLoad": True, "KeepAlive": True, "StandardOutPath": str(self.agents_root / ".local" / "service.log"), "StandardErrorPath": str(self.agents_root / ".local" / "service.error.log")}
         return plistlib.dumps(payload, fmt=plistlib.FMT_XML).decode()
 
     def install(self, label="com.agents.service", path=None):
         if sys.platform != "darwin": raise OSError("launchd installation is only supported on macOS")
         target = Path(path or Path.home() / "Library" / "LaunchAgents" / f"{label}.plist")
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True); target.write_text(self.generate(label)); target.chmod(0o600); return target
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        content = self.generate(label)
+        backup = None
+        changed = False
+        old_content = target.read_text() if target.exists() else None
+        if old_content is not None and old_content != content:
+            suffix = datetime.now().strftime("%Y%m%d%H%M%S")
+            backup = target.with_name(target.name + ".bak-" + suffix)
+            serial = 1
+            while backup.exists():
+                backup = target.with_name(target.name + f".bak-{suffix}-{serial}")
+                serial += 1
+            backup.write_text(old_content); backup.chmod(0o600)
+        if old_content != content:
+            target.write_text(content); target.chmod(0o600); changed = True
+            if target.read_text() != content:
+                raise OSError(f"launchd plist readback failed: {target}")
+        return {"path": str(target), "backup": str(backup) if backup else None, "changed": changed}
 
     def start(self, label="com.agents.service", path=None):
         target = path or Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
         if sys.platform != "darwin": raise OSError("launchd is only supported on macOS")
+        existing = self.status(label)
+        if existing.returncode == 0:
+            return existing
         return subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(target)], text=True, capture_output=True, check=False)
 
     def status(self, label="com.agents.service"):
@@ -452,7 +690,12 @@ def main(argv=None):
     once = sub.add_parser("run-once"); once.add_argument("--db", default=argparse.SUPPRESS); once.add_argument("--json", action="store_true")
     ver = sub.add_parser("verify"); ver.add_argument("--db", default=argparse.SUPPRESS); ver.add_argument("job_id"); ver.add_argument("--evidence", required=True); ver.add_argument("--json", action="store_true")
     ld = sub.add_parser("launchd"); ld.add_argument("--db", default=argparse.SUPPRESS); ld.add_argument("action", choices=["generate", "install", "start", "status"]); ld.add_argument("--label", default="com.agents.service"); ld.add_argument("--path"); ld.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv); store = ServiceStore(args.db)
+    args = parser.parse_args(argv)
+    root_hint = Path(os.environ.get("AGENTS_ROOT", Path(__file__).resolve().parents[1])).resolve()
+    selected_env = load_agents_env(root_hint / ".env")
+    if not selected_env.get("AGENTS_ROOT") or not selected_env.get("AGENTS_VAULT_ROOT"):
+        raise ValueError("AGENTS_ROOT and AGENTS_VAULT_ROOT must be configured in the existing .env or environment")
+    store = ServiceStore(args.db, agents_root=selected_env["AGENTS_ROOT"], vault_root=selected_env["AGENTS_VAULT_ROOT"])
     try:
         if args.command == "enroll":
             prompt = Path(args.prompt_file).read_text() if args.prompt_file else args.prompt
@@ -460,10 +703,10 @@ def main(argv=None):
         elif args.command == "list": value = store.list_jobs(args.state)
         elif args.command == "show": value = store.get_job(args.job_id)
         elif args.command == "verify": value = store.verify(args.job_id, args.evidence)
-        elif args.command == "run-once": value = store.run_once()
-        elif args.command == "run": value = Scheduler(store, poll_interval=args.poll).run_forever()
+        elif args.command == "run-once": value = Scheduler(store, verification_executor=default_verifier).run_once()
+        elif args.command == "run": value = Scheduler(store, poll_interval=args.poll, verification_executor=default_verifier).run_forever()
         else:
-            launchd = Launchd(store.tasks.agents_root, store.db_path)
+            launchd = Launchd(store.tasks.agents_root, store.db_path, store.tasks.vault_root)
             value = launchd.generate(args.label) if args.action == "generate" else getattr(launchd, args.action)(args.label, args.path) if args.action in ("install", "start") else launchd.status(args.label)
         if getattr(args, "json", False): print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
         elif isinstance(value, str): print(value)
