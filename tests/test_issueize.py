@@ -265,7 +265,7 @@ class IssueizationTests(unittest.TestCase):
         with self.assertRaises(DraftError):
             parse_draft({"title": "日本語", "body": "Explain.", "acceptance": ["A test."]})
         with self.assertRaises(DraftError):
-            render_issue_body("task_abc", IssueDraft("Fix", "/Users/alice/private", ["A test."]))
+            render_issue_body("task_abc", IssueDraft("Fix", "/".join(["", "Users", "fixture", "private"]), ["A test."]))
 
     def test_subscription_agent_rejects_paid_api_routes_and_high_model(self):
         with self.assertRaises(SubscriptionBoundaryError):
