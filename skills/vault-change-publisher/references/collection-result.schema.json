@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "daily_pipeline_status",
+    "run_id",
+    "summary_path",
+    "summary_sha256",
+    "advisory_path",
+    "advisory_sha256",
+    "notification_result",
+    "vault_artifacts_complete",
+    "next_action"
+  ],
+  "properties": {
+    "daily_pipeline_status": {"enum": ["complete", "blocked"]},
+    "run_id": {"type": "string", "minLength": 1},
+    "summary_path": {"type": ["string", "null"]},
+    "summary_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "advisory_path": {"type": ["string", "null"]},
+    "advisory_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "notification_result": {"type": ["string", "null"]},
+    "vault_artifacts_complete": {"type": "boolean"},
+    "next_action": {"type": ["string", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"daily_pipeline_status": {"const": "complete"}}},
+      "then": {
+        "properties": {
+          "summary_path": {"type": "string", "minLength": 1},
+          "summary_sha256": {"type": "string"},
+          "advisory_path": {"type": "string", "minLength": 1},
+          "advisory_sha256": {"type": "string"},
+          "vault_artifacts_complete": {"const": true},
+          "next_action": {"type": "null"}
+        }
+      },
+      "else": {
+        "properties": {
+          "vault_artifacts_complete": {"const": false},
+          "next_action": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  ]
+}

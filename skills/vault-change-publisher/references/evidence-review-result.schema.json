@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "outcome",
+    "target_path",
+    "evidence_diff_sha256",
+    "publication_context_sha256",
+    "review_status",
+    "next_action"
+  ],
+  "properties": {
+    "outcome": {"enum": ["approved", "blocked"]},
+    "target_path": {"type": "string", "minLength": 1},
+    "evidence_diff_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "publication_context_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "review_status": {"enum": ["quality_ok", "blocked"]},
+    "next_action": {"type": ["string", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "approved"}}},
+      "then": {
+        "properties": {
+          "review_status": {"const": "quality_ok"},
+          "next_action": {"type": "null"}
+        }
+      },
+      "else": {
+        "properties": {
+          "review_status": {"const": "blocked"},
+          "next_action": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  ]
+}

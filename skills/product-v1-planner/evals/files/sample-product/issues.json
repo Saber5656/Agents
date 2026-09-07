@@ -1,0 +1,19 @@
+{
+  "repository_snapshot": "fixture-snapshot-v1",
+  "issues": [
+    {
+      "number": 1,
+      "title": "Add JSON export",
+      "design_refs": ["REQ-EXPORT-1"],
+      "acceptance_criteria": ["Export works"],
+      "validation": []
+    },
+    {
+      "number": 2,
+      "title": "Add settings page",
+      "design_refs": [],
+      "acceptance_criteria": ["Settings page exists"],
+      "validation": ["Manual check"]
+    }
+  ]
+}

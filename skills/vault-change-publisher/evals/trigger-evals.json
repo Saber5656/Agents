@@ -1,0 +1,10 @@
+[
+  {"query":"/vault-change-publisher with a complete Publication Manifest and per-Vault Task Change Manifests","should_trigger":true},
+  {"query":"verified daily staging artifacts are ready for the separate Vault publication phase","should_trigger":true},
+  {"query":"publish both approved Vault manifests without force","should_trigger":true},
+  {"query":"today's IT newsを集めて","should_trigger":false},
+  {"query":"既存の脆弱性レポートを読むだけ","should_trigger":false},
+  {"query":"Vaultのメモを編集して","should_trigger":false},
+  {"query":"manifestなしで全部pushして","should_trigger":false},
+  {"query":"Web collectionと同じprocessでcommitして","should_trigger":false}
+]

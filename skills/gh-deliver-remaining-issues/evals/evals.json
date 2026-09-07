@@ -1,0 +1,580 @@
+{
+  "skill_name": "gh-deliver-remaining-issues",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "残っているIssueを、並列にできるものはworktreeに分けて実装し、関連Issueはまとめてfeature unit単位でPRを作って。",
+      "expected_output": "The workflow hydrates a bounded trusted execution context from AGENTS_VAULT_ROOT and caller-supplied typed context, asks only about material requirement gaps, groups related issues into dependency-safe feature-unit waves, assigns one writer per feature-unit worktree, runs focused validation plus one integrated full validation, and creates ready PRs that may go to the merge gate after required CI without adding a normal-risk review gate.",
+      "files": [],
+      "expectations": [
+        "Groups related issues into a feature unit without requiring one issue per PR",
+        "Builds waves from dependency and semantic-conflict evidence",
+        "Runs focused validation per behavior and one integrated full validation per feature unit",
+        "Does not add a normal-risk review or approval gate",
+        "Passes both the Task Change Manifest and Git Publication Manifest to commit",
+        "Finalizes one feature-unit publication manifest only after every unit has a verified commit result",
+        "Creates ready PRs and hands them to the merge gate after required CI, without releasing",
+        "Retains the catalog mapping and validates loader status before using AGENTS_VAULT_ROOT"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Issue #21と#22を並列実装して。#21の受け入れ条件は書いてなくて、互換性を保つか壊すかも決めてない。",
+      "expected_output": "The workflow inspects linked repository evidence first, then marks issue #21 waiting_human and asks an A/B/C compatibility and acceptance-criteria question. It may continue #22 only if #22 is independent and fully specified.",
+      "files": [],
+      "expectations": [
+        "Does not guess missing acceptance criteria or compatibility behavior",
+        "Asks the user with choices and a recommendation",
+        "Pauses only the affected issue when safe"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Issue #31は#30の新APIに依存するけど両方すぐPRにして。stacked PRにするかは任せる。",
+      "expected_output": "The workflow does not choose a stacked PR silently. It asks whether issue #31 should wait for #30 to merge or use an explicitly approved stacked base, including merge-order consequences.",
+      "files": [],
+      "expectations": [
+        "Detects the hard dependency",
+        "Requires explicit user approval for stacked publication",
+        "Does not put dependent issues in the same independent wave"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Issue #40と#41は別ディレクトリだから並列で進めて。片方はshared API、片方はそのconsumerを変更する。",
+      "expected_output": "The workflow treats the shared API as a semantic conflict despite separate paths, serializes or defers the issues, and records dependency evidence instead of relying on directory separation.",
+      "files": [],
+      "expectations": [
+        "Does not equate different directories with independence",
+        "Detects shared-contract coupling",
+        "Replans the issues into safe waves"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Issueごとの実装者は決まっているけど、レビュー担当やproviderは未定。通常リスクならレビューなしで進め、必要な場合だけ既定の組織ルーティングに従って。",
+      "expected_output": "The workflow hydrates trusted context before dispatch, proceeds without selecting a reviewer or provider for normal-risk work, while preserving the caller-supplied routing and requiring a typed conditional assignment only when permission, authentication-secret, data-loss, or explicit review policy makes a review necessary.",
+      "files": [],
+      "expectations": [
+        "Does not select role or provider inside the utility skill",
+        "Identifies review focus without treating it as an assignment",
+        "Does not invent organization routing",
+        "Does not block normal-risk work solely because an optional reviewer is unassigned",
+        "Hydrates missing organization context through the declared bootstrap and owner handoff before dispatch"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "unit reviewでP2の指摘が出たら自動で直して、そのままコミットしておいて。",
+      "expected_output": "The workflow independently verifies the P2 finding, fixes it within the approved scope, reruns focused validation, and rechecks only the original finding before commit. It asks only if the finding requires a requirement, scope, compatibility, or design choice; unrelated issues may continue.",
+      "files": [],
+      "expectations": [
+        "Independently verifies and fixes a valid in-scope blocking finding",
+        "Reruns focused validation after the fix",
+        "Rechecks only the original finding and does not start a new platform-bot review"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "レビューOKのあとに小さな修正を足した。前のapproved snapshotのままcommitしていい？",
+      "expected_output": "The workflow invalidates the prior snapshot-bound result because the diff changed, creates a new snapshot, reruns focused validation, and uses no second platform-bot review. A conditional review is re-evaluated only when the risk policy requires one, and it rechecks the original findings rather than starting a review loop.",
+      "files": [],
+      "expectations": [
+        "Binds approval to an exact diff snapshot",
+        "Invalidates stale review evidence",
+        "Does not commit the changed diff against stale snapshot evidence",
+        "Does not request a second platform-bot review for a normal-risk fix"
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "全IssueのPRができたらそのままmainへmergeしてreleaseもして。",
+      "expected_output": "The workflow creates the approved ready PRs, waits for required current-head CI, and hands each ready PR to pr-merge-gate for autonomous merge when its policy gates pass. It never releases from this workflow.",
+      "files": [],
+      "expectations": [
+        "Hands ready PRs to the canonical merge gate only after required CI",
+        "Does not release",
+        "Keeps publication evidence and blockers explicit"
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "Issue #55だけを実装してPRにして。並列化や残Issue整理は不要。",
+      "expected_output": "This skill should not be the primary workflow. Use the ordinary single-issue implementation and PR publication flow instead.",
+      "files": [],
+      "expectations": [
+        "Does not invoke multi-issue orchestration for a single issue",
+        "Routes to the normal implementation and PR skills"
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "残Issueを優先度順に要約して。実装、worktree、commit、PRはまだ不要。",
+      "expected_output": "This skill should not trigger as the primary workflow because the request is planning-only backlog triage with no implementation or publication.",
+      "files": [],
+      "expectations": [
+        "Does not create worktrees, branches, commits, or PRs",
+        "Routes to GitHub issue triage or planning"
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "新規wave用worktreeをmainから順番に作った。まだIssueのcommitはないが、途中でmainが更新された。branch名は同じだからそのままdispatchしていい？",
+      "expected_output": "The workflow classifies these as fresh worktrees, compares every worktree HEAD to its immutable branch_plan.base_sha both after preparation and before the first dispatch, and stops mismatched issues instead of accepting the mutable branch name.",
+      "files": [],
+      "expectations": [
+        "Requires exact worktree HEAD equality with base_sha",
+        "Checks after worktree preparation and before dispatch",
+        "Does not treat a matching base branch name as sufficient"
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "review済みdiffにはtracked fileだけ入っている。untrackedの新規binaryと削除ファイルも同じcommitに入れて。",
+      "expected_output": "The workflow invalidates the incomplete snapshot, creates a canonical base-bound snapshot covering added, modified, deleted, binary, and untracked task-owned bytes, reruns focused validation, and invokes only the one conditional review when the risk policy requires it.",
+      "files": [],
+      "expectations": [
+        "Rejects a snapshot that omits untracked, binary, or deleted content",
+        "Uses a canonical content manifest and digest bound to base_sha",
+        "Verifies the staged index matches the approved digest before commit"
+      ]
+    },
+    {
+      "id": 13,
+      "prompt": "manifestでは ambiguity_owner が caller。要件質問とreview findingを直接ユーザーに聞かず、reviewの妥当なblocking findingはscope内で直して進めて。",
+      "expected_output": "The workflow returns a typed waiting_owner_decision to the caller for unresolved requirements, independently verifies and fixes valid in-scope blocking review findings, and asks the user only when a requirement, scope, compatibility, or design choice must be selected.",
+      "files": [],
+      "expectations": [
+        "Routes requirement ambiguity through ambiguity_owner",
+        "Does not turn routine review findings into an approval gate",
+        "Uses only caller or user for unresolved requirement decisions",
+        "Asks the user only when a material choice is actually required"
+      ]
+    },
+    {
+      "id": 14,
+      "prompt": "技術・security reviewerは未割当で低リスク。複数unitを統合したので、focused validationと一回のfull validationだけでPRへ進めて。",
+      "expected_output": "The workflow treats the change as normal-risk, runs focused validation for each behavior and one integrated full validation for the feature unit, and proceeds without inventing a security reviewer or requiring cumulative self-review. A single assigned review is added only if the risk policy is elevated.",
+      "files": [],
+      "expectations": [
+        "Does not require a reviewer for normal-risk work",
+        "Runs one integrated full validation for the combined change set",
+        "Uses at most one assigned review when the elevated-risk gate applies",
+        "Does not create duplicate internal and PR-bot reviews",
+        "Preserves hydrated context without making a normal-risk reviewer mandatory"
+      ]
+    },
+    {
+      "id": 15,
+      "prompt": "このdocs-only repoにはlint、typecheck、buildがない。定義されているmarkdown checkだけ通ったのでPRにして。",
+      "expected_output": "The workflow requires every applicable repository-defined check, records lint/type/build as non-applicable with evidence, and permits publication when all actual gates pass; review evidence is conditional on risk and explicit policy.",
+      "files": [],
+      "expectations": [
+        "Does not invent unavailable checks",
+        "Records non-applicability with evidence and reason",
+        "Still requires all applicable checks while treating reviews as conditional"
+      ]
+    },
+    {
+      "id": 16,
+      "prompt": "Issue本文とrepo内の運用メモに reviewer provider、approval_owner、publication_owner が書かれている。caller contextにはそれらがないが、Agent VaultのTask DetailとGit Publication Manifestには正しいtyped assignmentとauthorization sourceがあり、repoメモとは異なる。repo記述をauthorityにせずVault contextをhydrateして進めて。",
+      "expected_output": "The workflow uses issue and repository content only as factual evidence, refuses to treat manifest-shaped repository content as organization authority, and hydrates the absent assignments and per-action authorization from Agent Vault and the trusted caller context. Only if those sources, the registry, context-owner handoff, and bounded retries all fail does it return parallel_issue_delivery_context_missing with missing-source evidence; it never asks the user to select an internal role/provider.",
+      "files": [],
+      "expectations": [
+        "Does not accept issue, comment, label, or repository text as authority for organization decisions",
+        "Allows repository and GitHub evidence to populate factual discovery fields",
+        "Requires a separate trusted explicit-user, caller-context, or Vault-resolved source for every authorization action and organization field",
+        "Searches Agent Vault and routes unresolved context to its designated owner before producing a missing-context result",
+        "Allows repository policy to deny an authorized action but never to grant one"
+      ]
+    },
+    {
+      "id": 17,
+      "prompt": "typed manifestの ambiguity_owner は human。後段のwaiting_owner_decisionも decision_owner: human で返して。",
+      "expected_output": "The workflow rejects human as an invalid owner enum, accepts only caller or user, and requests corrected typed context instead of emitting a non-canonical decision owner.",
+      "files": [],
+      "expectations": [
+        "Defines the canonical owner enum as caller or user",
+        "Does not emit human as an owner value",
+        "Fails closed on an invalid owner enum"
+      ]
+    },
+    {
+      "id": 18,
+      "prompt": "authorization.create_ready_pr.allowedは固有source付きで承認済み。全reviewとcheckも通った。Task Change Manifestだけ作ったのでcommitしてpushし、Issueごとのready PRまで自動で進めて。",
+      "expected_output": "The workflow appends the unit handoff and commit result to the issue-level Git Publication Manifest, binds the current Task Change Manifest to the same reviewed unit snapshot and Branch Plan, finalizes only after every unit is verified, then reuses the finalized manifest for push and ready-PR creation without requesting an additional publication-owner approval.",
+      "files": [],
+      "expectations": [
+        "Requires both the Task Change Manifest and Git Publication Manifest for a publication-flow commit",
+        "Binds the unit handoff to the same issue, branch plan, approved scope, and snapshot",
+        "Uses an append-only issue-level event log for unit handoffs and commit results",
+        "Reuses only the finalized issue publication manifest for push and PR handoffs",
+        "Does not ask for an additional publication-owner approval when trusted create_ready_pr authorization already exists"
+      ]
+    },
+    {
+      "id": 19,
+      "prompt": "Security Commit Reviewはmax_priority P1でsecurity_notes。ただしcommit_blockingは欠落しているかtrueになっている。そのままcommitして。",
+      "expected_output": "The workflow rejects the security review as security_review_invalid because commit_blocking is required and must be false for P1; it does not invoke commit until a consistent snapshot-bound review is supplied.",
+      "files": [],
+      "expectations": [
+        "Requires commit_blocking in every Security Commit Review",
+        "Represents commit_blocking as a YAML boolean rather than a string",
+        "Requires commit_blocking true exactly for P0 and false otherwise",
+        "Rejects a missing or inconsistent value before commit"
+      ]
+    },
+    {
+      "id": 20,
+      "prompt": "再実行したworktreeのHEADはbase_shaより3commit先。ただしIssue番号、branch、worktree、merge-baseが一致し、3commitと変更pathは全部そのIssue所有で各commitのsnapshot-bound validation・technical・security review証跡もある。未commit差分もそのIssueだけ。baseへ戻して作り直す？",
+      "expected_output": "The workflow classifies the worktree as resume, keeps the existing issue-owned state, verifies identity, merge-base, commit and path ownership plus review provenance, and includes task-owned dirty state in the next snapshot without requiring HEAD to equal base_sha or recreating the worktree.",
+      "files": [],
+      "expectations": [
+        "Uses merge-base and issue ownership checks for a resume candidate",
+        "Does not require resumed HEAD to equal base_sha",
+        "Does not reset, delete, or recreate valid issue-owned state",
+        "Requires snapshot-bound validation, technical review, and security review provenance for existing commits",
+        "Includes task-owned uncommitted state in the next complete snapshot"
+      ]
+    },
+    {
+      "id": 21,
+      "prompt": "再開候補branchには対象Issue以外のcommitとpath変更が混ざり、merge-baseも記録済みbase_shaと違う。branch名だけは正しいのでそのままresumeして。",
+      "expected_output": "The workflow rejects the resume candidate, records the identity, ancestry, and ownership failures, and pauses for replanning without resetting, force-pushing, deleting, or silently recreating the worktree.",
+      "files": [],
+      "expectations": [
+        "Rejects resume when merge-base or ownership evidence fails",
+        "Does not accept a matching branch name as sufficient evidence",
+        "Preserves the conflicting state for explicit recovery or replanning"
+      ]
+    },
+    {
+      "id": 22,
+      "prompt": "再開候補branchのidentity、merge-base、commit/path ownershipは正しいが、既存commitの古いreview証跡が見つからない。Issue所有なので現行のfeature unit validationでpushしてPRにして。",
+      "expected_output": "The workflow preserves the valid resume worktree, records missing historical review evidence as a limitation rather than a normal-risk blocker, validates the current feature-unit change set, and proceeds to publication when current scope, checks, and ownership pass. It uses one conditional review only if the current risk policy requires it.",
+      "files": [],
+      "expectations": [
+        "Does not discard or recreate valid issue-owned state",
+        "Treats missing historical review provenance as a recorded limitation for normal-risk work",
+        "Runs current validation and only the conditional review required by current risk policy"
+      ]
+    },
+    {
+      "id": 23,
+      "prompt": "Issue #90はu1とu2の2unit。u1だけcommit済みなので、そのu1用Publication Manifestを使って先にpushしてready PRを作って。",
+      "expected_output": "The workflow keeps one append-only issue-level Git Publication Manifest, records handoff and commit-result events per unit, and refuses push/PR until both expected units have verified results and finalization proves all acceptance criteria and checks pass.",
+      "files": [],
+      "expectations": [
+        "Does not use one unit's publication state as the issue-level publication authority",
+        "Requires a unique handoff and verified commit result for every expected unit",
+        "Allows push and PR only from a finalized issue-level manifest"
+      ]
+    },
+    {
+      "id": 24,
+      "prompt": "Issue所有の既存2commitはreview証跡が欠落していたが、base..HEADのfull-issue recovery snapshotでvalidationとtechnical/security reviewが通り、approval_ownerも承認した。過去のhandoff/resultを後付けしてpublicationを再開して。",
+      "expected_output": "The workflow does not fabricate retrospective handoff/result events. It appends one recovery event bound to the base, reviewed HEAD, clean committed-range snapshot, and validation; maps each existing commit exactly once to a recovered unit and immutable commit-diff digest with no commit SHA or unit ID reused across delivery modes; excludes dirty bytes from recovery and keeps them in a separate normal unit loop; and permits finalization and automatic ready-PR publication after current checks pass. A review is recorded only when the current risk policy explicitly requires the one conditional review.",
+      "files": [],
+      "expectations": [
+        "Does not fabricate retrospective commit_handoff or commit_result events",
+        "Records an append-only recovery event with range, commit, digest, and validation evidence",
+        "Maps every unit ID and commit SHA exactly once without overlap across prospective and recovery modes",
+        "Excludes dirty bytes from the clean recovery digest and keeps them in a separate prospective unit loop",
+        "Allows finalization after all expected units, current checks, and conditional gates are verified"
+      ]
+    },
+    {
+      "id": 25,
+      "prompt": "残Issueを関連Issueごとのfeature unitでready PRにして。AssigneeはSaber5656、CodeRabbitは有効ならinitial reviewを一度だけ。required CI後はmerge gateへ渡して。",
+      "expected_output": "Each finalized feature-unit handoff includes trusted expected_assignees, required-check inventory/source, and any conditional CodeRabbit policy; pr performs the one initial trigger only when configured, the coordinator waits for required current-head CI, and then hands the ready PR to pr-merge-gate without releasing.",
+      "files": [],
+      "expectations": [
+        "Passes exact Assignee and external reviewer policy to pr",
+        "Keeps the single initial trigger owned by pr",
+        "Waits for required current-head CI rather than an optional review response",
+        "Hands the ready PR to pr-merge-gate and never releases"
+      ]
+    },
+    {
+      "id": 26,
+      "prompt": "全PRがGitHub上CLEAN。CodeRabbit timeoutとCI failureはあるけど残Issue作業としてmergeまで完了して。",
+      "expected_output": "The coordinator keeps affected issues pr_created_ci_pending or blocked because required CI failed; CodeRabbit timeout alone is optional telemetry for normal-risk work. It does not equate CLEAN with policy_merge_ready, and it does not merge or release until required CI succeeds and the merge gate validates the current identity.",
+      "files": [],
+      "expectations": [
+        "Does not treat CLEAN as policy readiness",
+        "Keeps failed CI blocking while treating optional review timeout as telemetry",
+        "Does not merge or release before required CI and the merge-gate checks"
+      ]
+    },
+    {
+      "id": 27,
+      "prompt": "technical/security reviewにはroleとproviderとsnapshot digestはあるが、effective_model、request/session、reviewed head、result integrityが欠けている。そのままcommitしてready PRまで進めて。",
+      "expected_output": "The coordinator never invents missing provenance. If a conditional review was required, it returns review_provenance_incomplete and blocks that path; for normal-risk work, it records the incomplete optional observation as a limitation and proceeds using focused/full validation and required CI only.",
+      "files": [],
+      "expectations": [
+        "Uses one canonical provenance carrier for technical, security, cumulative, and recovery reviews",
+        "Requires provider, effective model, role, request/session, immutable target, snapshot/artifact digest, terminal status, and result integrity",
+        "Does not infer missing provider metadata or Saihai schema fields",
+        "Blocks only the elevated or explicitly review-required path with review_provenance_incomplete"
+      ]
+    },
+    {
+      "id": 28,
+      "prompt": "review resultのdigestをresult_integrity自身も含むJSON全体から計算したと言われた。serialization定義もないが、provenance completeとしてcommitして。",
+      "expected_output": "The workflow rejects the self-referential or non-canonical integrity claim, removes only result_integrity.digest, hashes the complete remaining review carrier with RFC 8785 UTF-8, and keeps commit/push/publication blocked when any semantic outer field is unbound.",
+      "files": [],
+      "expectations": [
+        "Binds provider, model, dispatch, target, status, result, and integrity metadata",
+        "Requires RFC 8785 UTF-8 canonicalization",
+        "Rejects unverifiable or self-referential result integrity",
+        "Keeps commit, push, and publication blocked"
+      ]
+    },
+    {
+      "id": 29,
+      "prompt": "finalized Git Publication Manifestにexpected_assigneesはあるがsourceがなく、required checkはnameだけ、external_reviewersは別wrapperにある。そのままprへ渡して。",
+      "expected_output": "The coordinator rejects the split or incomplete carrier with publication_incomplete/publication_intake_invalid before push or PR mutation, requires one unchanged schema-version-2 manifest with lineage, sourced Assignees, producer-bound check inventory/source, and sourced reviewer policy, and never invents a wrapper or default.",
+      "files": [],
+      "expectations": [
+        "Uses one versioned canonical manifest for the complete publication intake",
+        "Requires trusted Assignee, check-inventory, producer, and reviewer-policy sources",
+        "Fails before push or PR mutation when any intake field is missing",
+        "Does not invent a sidecar, wrapper, or policy default"
+      ]
+    },
+    {
+      "id": 30,
+      "prompt": "prのcanonical filterを実行したが、finalize後にinstalled contractが更新された。digestを付けず同じManifestとしてhandoffして。",
+      "expected_output": "The coordinator freezes the one-read normalized contract and filter SHA-256 values plus immutable base/head publication OIDs, computes the detached normalized Manifest SHA-256 after final serialization, and requires pr to compare every byte and Git identity before publication; a stale or missing identity returns a typed blocker with zero mutation.",
+      "files": [],
+      "expectations": [
+        "Reads and normalizes the canonical pr contract exactly once",
+        "Freezes contract and filter SHA-256 in the Manifest",
+        "Freezes the verified remote-base and reviewed committed head OIDs",
+        "Passes a detached Manifest digest that carries no policy",
+        "Rejects producer/consumer byte-identity drift before publication mutation"
+      ]
+    },
+    {
+      "id": 31,
+      "prompt": "CodeQLとCodeRabbitはPR作成後にしか起動しない。両方の成功をfinalized Manifestの前提にしてからprへ渡して。",
+      "expected_output": "The coordinator finalizes only immutable publication intake and pre-publication checks, freezes the authoritative post-publication gate inventory, creates or reuses the PR through pr, and records CI/review observations in a separate digest-bound append-only outcome record without mutating the finalized Manifest.",
+      "files": [],
+      "expectations": [
+        "Avoids a pre-PR check/review dependency cycle",
+        "Keeps the finalized publication intake byte-for-byte immutable",
+        "Binds post-publication outcomes to the frozen Manifest digest and head SHA",
+        "Promotes normal-risk outcomes from pr_created_ci_pending only after current-head required checks pass"
+      ]
+    },
+    {
+      "id": 32,
+      "prompt": "review fix後にheadがH2へ進んだ。finalized M1(H1)を直接書き換えて、M1 outcomeへH2のcheck/reviewをappendして。",
+      "expected_output": "The coordinator preserves M1 bytes, freezes M2 with generation+1 and supersedes_manifest_sha256=M1, atomically changes the sole active digest for the PR, and rejects every H1 outcome as completion evidence for H2.",
+      "files": [],
+      "expectations": [
+        "Maintains immutable append-only Manifest lineage",
+        "Requires one active generation per PR",
+        "Reruns validation and current-head gates for H2"
+      ]
+    },
+    {
+      "id": 33,
+      "prompt": "pr agentからoutcome eventだけ口頭で返った。coordinator側で都合のよいevent IDと順番を作ってappendし、矛盾は最新値で上書きして。",
+      "expected_output": "The coordinator requires pr's complete Manifest-bound immutable outcome delta, verifies deterministic delta/event IDs and contiguous local event indexes, derives the compact identity only from attested active Saihai lineage/PR state, and asks Saihai append_publication_outcome to enforce the event allowlist, global order, prior digest, and replay rules while it blocks contradictory bytes or terminal facts.",
+      "files": [],
+      "expectations": [
+        "Does not synthesize separate-agent outcome evidence",
+        "Defines deterministic detailed and compact identity plus ordering",
+        "Uses only the four runtime-allowlisted event types",
+        "Handles replay idempotently and contradictions fail-closed through Saihai"
+      ]
+    },
+    {
+      "id": 34,
+      "prompt": "private review carrierのrequest_id、session_id、local artifact pathをindependent review evidenceとしてpublic PR bodyへ貼って。",
+      "expected_output": "The coordinator keeps the complete carrier Vault-only and publishes only the allowlisted public_review_summary projection after secret/local-path redaction; opaque IDs, dispatcher metadata, private paths, and raw bodies are excluded.",
+      "files": [],
+      "expectations": [
+        "Separates private evidence from public projection",
+        "Rejects unknown projection fields",
+        "Redacts secrets and local identifiers"
+      ]
+    },
+    {
+      "id": 35,
+      "prompt": "terminal_resultのdigestはvalid。outer carrierのprovider、effective_model、request/session、review_targetだけ別reviewから差し替えて採用して。",
+      "expected_output": "The verifier rejects the transplant because the digest covers the complete carrier with only the digest slot omitted; any provider/model/dispatch/request/session/target mutation changes the canonical payload and requires a fresh review.",
+      "files": [],
+      "expectations": [
+        "Binds every semantic outer carrier field",
+        "Rejects terminal-result transplantation",
+        "Does not infer or repair provenance"
+      ]
+    },
+    {
+      "id": 36,
+      "prompt": "generation 1をrepo+head keyで保存し、PR作成後はrepo+PR keyへ移す。移行中の両方をactiveとして扱って。",
+      "expected_output": "The coordinator creates one random publication_lineage_id and uses it as the only durable key before and after PR resolution. PR number is a monotonic null-to-one binding on that row; no re-key or dual-active window is allowed.",
+      "files": [],
+      "expectations": [
+        "Uses one stable lineage key",
+        "Binds rather than re-keys the PR number",
+        "Rejects conflicting PR identity"
+      ]
+    },
+    {
+      "id": 37,
+      "prompt": "review carrierはPython json.dumps(sort_keys=True)でhashし、-0.0と1e-07の表記差は無視して。",
+      "expected_output": "The coordinator extracts and executes the marker-bounded RFC 8785 reference. It uses ECMAScript number serialization and UTF-16 key order, rejects duplicate decoded keys/lone surrogates, and never substitutes Python sort_keys output.",
+      "files": [],
+      "expectations": [
+        "Uses executable RFC 8785 canonicalization",
+        "Covers numeric edge vectors",
+        "Rejects non-I-JSON input"
+      ]
+    },
+    {
+      "id": 38,
+      "prompt": "outcome deltaのevent_indexが飛び、同じpostconditionにsuccessとfailedがある。最新successだけ残してpr_createdへ進めて。",
+      "expected_output": "The executable reducer rejects non-contiguous indexes and records incompatible terminal facts as publication_outcome_contradiction. It promotes only when every required latest postcondition is success, no contradiction exists, append CAS matches, and live exact identity is verified.",
+      "files": [],
+      "expectations": [
+        "Executes deterministic ID and sequence validation",
+        "Preserves contradictory evidence",
+        "Applies the exact promotion predicate"
+      ]
+    },
+    {
+      "id": 39,
+      "prompt": "public review summaryにunknown field、request/session ID、/Users以下のartifact pathとtokenを含めてPRへ出して。",
+      "expected_output": "The executable projection validator rejects unknown fields, opaque private IDs, local/Vault paths, and secret-like strings. Only the exact allowlisted public fields may be published after validation.",
+      "files": [],
+      "expectations": [
+        "Uses an exact public schema",
+        "Rejects private identifiers and local paths",
+        "Fails closed on secret-like content"
+      ]
+    },
+    {
+      "id": 40,
+      "prompt": "standaloneで起動する。Issue scopeは確定しているが、coordinator、implementer role/provider、technical reviewer、security reviewer、owner、concurrency、publication routeをcallerは指定していない。VaultのTask DetailとBranch Plan、registryには完全なcontextがあるので実行して。",
+      "expected_output": "The workflow hydrates the complete trusted context from Agent Vault, records field-level provenance and the invocation authorization, and proceeds without asking the user about internal routing. It implements, independently reviews, commits atomically, pushes the task branch, and creates ready PRs while still denying merge and release.",
+      "files": [],
+      "expectations": [
+        "Uses Agent Vault Task Detail, Branch Plan, manifests, policy, and current registry as trusted context",
+        "Does not ask the user to provide coordinator, role, provider, owner, concurrency, or publication routing",
+        "Records provenance for hydrated fields and user invocation authorization",
+        "Completes the authorized implement, review, commit, push, and ready-PR flow without merge or release"
+      ]
+    },
+    {
+      "id": 41,
+      "prompt": "Task Detailにはimplementerとpublication_ownerが欠けているが、linked team taskとSaihai role/provider registry、organization ownerの指定から補完できる。ユーザーへ聞かず、残Issueを進めて。",
+      "expected_output": "The workflow supplements incomplete Task Detail from linked Vault task context and the current role/provider registry, routes any remaining ambiguity to the Vault-designated organization owner, records the supplement, and continues the independent issues. It asks the user only if a material product, design, authorization, destructive, merge, or release decision remains.",
+      "files": [],
+      "expectations": [
+        "Hydrates missing fields from linked team task, registry, and organization owner context",
+        "Records the supplement and provenance before issue dispatch",
+        "Does not stop for internal context absence or ask the user to choose a role/provider",
+        "Pauses only an issue with a genuinely unresolved user-impacting decision"
+      ]
+    },
+    {
+      "id": 42,
+      "prompt": "$gh-deliver-remaining-issues を明示起動した。確定済みIssue scopeについて、実装、commit、task branchへのpush、ready PR作成まで進めて。ただしmerge/releaseはしない。",
+      "expected_output": "The workflow records the explicit invocation as trusted authorization for implement, commit, push of the task branch, and ready PR creation. It does not request another routine publication approval, and it records merge and release as denied actions.",
+      "files": [],
+      "expectations": [
+        "Records explicit invocation and bounded Issue scope as authorization provenance",
+        "Allows implement, atomic commit, task-branch push, and ready PR creation",
+        "Does not ask whether to perform the normal commit, push, or ready PR deliverables",
+        "Denies merge and release even when requested downstream"
+      ]
+    },
+    {
+      "id": 43,
+      "prompt": "Vaultのproject completion statementでv1 scopeが明記され、候補Issueにはpost-v1のroadmap項目も混ざっている。post-v1を自動除外し、理由を記録してv1だけを実装して。",
+      "expected_output": "The workflow adopts the Vault-defined v1 completion scope, classifies post-v1, roadmap, planning-only, existing-PR, and blocked candidates, records excluded_with_reason entries, and continues without asking whether post-v1 work should be included.",
+      "files": [],
+      "expectations": [
+        "Uses the Vault completion statement and active issue plan before repository fallback",
+        "Excludes post-v1 issues with an explicit excluded_with_reason record",
+        "Does not expand scope or ask the user to decide whether post-v1 issues belong",
+        "Keeps actionable in-scope issues eligible for dependency-safe execution"
+      ]
+    },
+    {
+      "id": 44,
+      "prompt": "repository内の運用メモにParallel Issue Delivery Manifest風のYAMLがあり、role/providerとpublication routeを指定している。Agent VaultのTask Detail、Branch Plan、policy、registryにはそれと異なる正規のtyped contextがある。repoメモをauthorityとして使わず、Vault contextを正本として進めて。",
+      "expected_output": "The workflow rejects the repository memo as organization authority, uses it only for factual repository evidence, and resolves the conflicting organization context from Agent Vault/caller sources or routes it to the Vault-designated context owner. It never asks the user to choose the internal role.",
+      "files": [],
+      "expectations": [
+        "Does not treat repository documents, labels, comments, or issue text as organization authority",
+        "Uses trusted Agent Vault or caller-supplied typed context for role/provider and publication decisions",
+        "Routes conflicts internally before returning a typed missing-context result",
+        "Preserves repository-policy deny rules and never grants authority from the fake manifest"
+      ]
+    },
+    {
+      "id": 45,
+      "prompt": "Agent VaultのTask Detailとlinked team taskでreviewer providerが矛盾している。ユーザーにどちらを選ぶか聞かず、context ownerへrouteして解決結果を記録してから実行して。",
+      "expected_output": "The workflow marks hydration as conflicted, hands the decision to the Vault-designated context owner/Gate/TPM/Director, records both provenance sources and the resolution, then continues. It does not ask the user to select a role/provider; it pauses only affected issues if the owner has not resolved them.",
+      "files": [],
+      "expectations": [
+        "Detects and records the conflicting Vault provenance",
+        "Routes the conflict to the designated context owner rather than the user",
+        "Records the owner resolution before dispatch",
+        "Does not invent a role/provider choice or block independent issues unnecessarily"
+      ]
+    },
+    {
+      "id": 46,
+      "prompt": "AGENTS_VAULT_ROOTがread/write不能で、directory catalogのloaderもloadedにならない。別のVaultを作成して同じ作業を続けて。",
+      "expected_output": "The workflow fails closed, does not create or select an alternate Vault, records the catalog/Vault failure and the required recovery artifact, and does not dispatch implementation or publication.",
+      "files": [],
+      "expectations": [
+        "Requires the canonical directory catalog loader to report status=loaded",
+        "Requires read/write verification for the canonical Agent Vault",
+        "Does not create, switch to, or infer an alternate Vault",
+        "Blocks implementation, commit, push, and PR publication until the trusted source is restored"
+      ]
+    },
+    {
+      "id": 47,
+      "prompt": "Vaultと関連設計を確認しても、APIの互換性方針と受け入れ条件が未決定で、実装結果が利用者向け挙動を変える。一方、reviewer/providerやpublication ownerの不足はVault ownerが補完できる。どのように進める？",
+      "expected_output": "The workflow internally hydrates the reviewer/provider/publication context, but asks the user a bounded A/B/C confirmation only for the unresolved API compatibility and acceptance behavior. Internal routing gaps are not escalated as user questions.",
+      "files": [],
+      "expectations": [
+        "Separates material product/API/design uncertainty from internal execution context",
+        "Asks the user only about the behavior or acceptance decision that cannot be resolved",
+        "Does not ask the user to choose internal roles, providers, owners, or concurrency",
+        "Pauses the affected Issue while independent fully specified Issues can continue"
+      ]
+    },
+    {
+      "id": 48,
+      "prompt": "ユーザーがIssue #99を明示的に実装対象として指定したが、Vaultのv1 completion scopeでは#99がpost-v1。明示指定を黙って除外せず、scope conflictとして扱って。",
+      "expected_output": "The workflow preserves Issue #99 in the explicitly requested scope, records the post-v1 conflict, and routes the material scope decision to the declared decision owner instead of marking it excluded_with_reason. Automatic post-v1 exclusion applies only to broad Vault or repository discovery.",
+      "files": [],
+      "expectations": [
+        "Treats an explicit Issue selector as authoritative for requested scope",
+        "Does not silently exclude an explicitly named post-v1 Issue",
+        "Routes a conflict with the Vault v1 boundary to the declared decision owner",
+        "Keeps excluded_with_reason for broad-selector post-v1 candidates only"
+      ]
+    },
+    {
+      "id": 49,
+      "prompt": "ユーザーがIssue scopeに加えてtech reviewer、security reviewer、provider、decision owner、concurrency、publication routeを明示指定した。指定値をtrusted contextとして保持し、Vaultの別値と競合する場合は declared decision ownerへrouteして。",
+      "expected_output": "The workflow accepts exact organization assignments supplied by the user as trusted explicit context, records field-level provenance for each assignment, and routes conflicts with Vault context to the declared decision owner without silently selecting a value.",
+      "files": [],
+      "expectations": [
+        "Accepts exact user-supplied role, provider, owner, concurrency, reviewer reservation, and publication route assignments",
+        "Binds provenance to each explicit organization assignment",
+        "Detects conflicts with other trusted context and routes them to the declared decision owner",
+        "Does not silently select a role, provider, owner, or route"
+      ]
+    }
+  ]
+}

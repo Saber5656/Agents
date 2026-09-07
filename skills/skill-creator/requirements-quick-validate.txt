@@ -1,0 +1,4 @@
+# Dependency for scripts/quick_validate.py.
+# Hash is for the PyYAML 6.0.3 macOS arm64 CPython 3.9 wheel used in this repo.
+PyYAML==6.0.3 \
+    --hash=sha256:c3355370a2c156cffb25e876646f149d5d68f5e0a3ce86a5084dd0b64a994917

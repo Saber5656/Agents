@@ -1,0 +1,4 @@
+title = "Vault publisher trusted Gitleaks defaults"
+
+[extend]
+useDefault = true

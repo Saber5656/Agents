@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Skill Quality"
+  short_description: "skills全体の重複・責務・trigger・品質を監査"
+  default_prompt: "Use $skill-manager to run a read-only portfolio audit of the selected canonical skill roots, distinguish deterministic failures from semantic candidates, and produce evidence-backed lifecycle handoffs without changing any skill."

@@ -1,0 +1,53 @@
+{
+  "skill_name": "pull",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "プルして",
+      "expected_output": "Uses the pull skill after task context is confirmed, loads the managed repository list, and plans fetch + safe merge with no push or reset-hard.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "全リポジトリをプルして",
+      "expected_output": "Treats the request as all managed local repositories, not only the current cwd.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "管理 repo を最新化して。push はしないで",
+      "expected_output": "Runs or plans managed repo fetch + merge and explicitly preserves the no-push boundary.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "pullして。競合したら勝手に直さないで",
+      "expected_output": "Uses the pull skill and blocks or aborts on conflict without auto-resolution.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "この repo だけ git pull して",
+      "expected_output": "Does not assume all managed repos unless the user asks for managed/all repos; asks or scopes to the current repo after task context is confirmed.",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "pushして",
+      "expected_output": "Does not use the pull skill; routes to the push skill after task context is confirmed.",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "fetch だけして",
+      "expected_output": "Does not perform merge; routes to fetch-only handling rather than pull skill execution.",
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "プルして。dirty な repo があれば止めて",
+      "expected_output": "Uses the pull skill and blocks dirty repositories that have remote updates.",
+      "files": []
+    }
+  ]
+}

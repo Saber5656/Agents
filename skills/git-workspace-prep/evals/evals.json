@@ -1,0 +1,77 @@
+{
+  "skill_name": "git-workspace-prep",
+  "evals": [
+    {
+      "id": 1,
+      "name": "source_default_creates_task_branch",
+      "prompt": "Branch Plan は repo_kind source、base_branch main、working_branch codex/TSK-1234-feature、default_branch_push_allowed false。現在 branch は main。git-workspace-prep としてどうする？",
+      "expected_output": "working_branch を作成して checkout する。prep_status complete、previous_branch main、current_branch codex/TSK-1234-feature を記録する。"
+    },
+    {
+      "id": 2,
+      "name": "existing_working_branch_checkout",
+      "prompt": "working_branch codex/TSK-1234-feature は既に存在し、現在 branch は main。git-workspace-prep としてどうする？",
+      "expected_output": "既存 working_branch へ checkout し、prep_status complete を記録する。"
+    },
+    {
+      "id": 3,
+      "name": "already_on_working_branch",
+      "prompt": "現在 branch は Branch Plan の working_branch と同じ。git-workspace-prep としてどうする？",
+      "expected_output": "branch 作成を行わず prep_status not_required または complete とし、現在 branch が一致していることを記録する。"
+    },
+    {
+      "id": 4,
+      "name": "another_task_branch_blocks",
+      "prompt": "Branch Plan の working_branch は codex/TSK-1234-a だが、現在 branch は codex/TSK-9999-b。git-workspace-prep としてどうする？",
+      "expected_output": "勝手に切り替えず branch_mismatch で blocked にし、Branch Plan owner へ確認を戻す。"
+    },
+    {
+      "id": 5,
+      "name": "vault_main_push_uses_task_worktree",
+      "prompt": "repo_kind vault、current_branch main、default_branch_push_allowed true。Branch Plan は workspace_mode task_worktree、working_branch codex/TSK-1234-vault-update、worktree_path ${TASK_WORKTREE_ROOT}/shared-task-vault/TSK-1234-vault-update、publication_flow merge_to_main_and_push。git-workspace-prep としてどうする？",
+      "expected_output": "Vault は default branch push 可能でも task worktree 作成を免除しない。planned working_branch / worktree_path を検証し、task worktree を作成または利用する。publication_flow merge_to_main_and_push を記録する。"
+    },
+    {
+      "id": 6,
+      "name": "missing_branch_plan_blocks",
+      "prompt": "task record に Branch Plan がない。ユーザーは作業開始してと言っている。git-workspace-prep としてどうする？",
+      "expected_output": "git 操作を行わず branch_plan_missing で停止する。"
+    },
+    {
+      "id": 7,
+      "name": "missing_working_branch_blocks",
+      "prompt": "Branch Plan はあるが working_branch が空。git-workspace-prep としてどうする？",
+      "expected_output": "明示的な branch_action none 例外がない限り、branch name missing として blocked にし、Branch Plan owner へ差し戻す。main-push repo であっても task worktree branch 名は必要。"
+    },
+    {
+      "id": 8,
+      "name": "callers_must_not_create_unplanned_branches",
+      "prompt": "複数の作業者が作業予定。呼び出し元の一つが独自に feature/backend を切りたいと言っている。git-workspace-prep の方針は？",
+      "expected_output": "呼び出し元の独自 branch 作成は禁止。Branch Plan にある単一 working_branch / worktree_path を共有するよう記録する。branch_action none は明示例外理由がある場合だけ許可する。"
+    },
+    {
+      "id": 9,
+      "name": "whitelisted_repo_uses_task_worktree",
+      "prompt": "repo_root は ${SKILLS_REPO} で main-push-repos.md に記載済み。Branch Plan は workspace_mode task_worktree、working_branch codex/TSK-1234-skill-update、worktree_path ${TASK_WORKTREE_ROOT}/skills-repo/TSK-1234-skill-update、publication_flow merge_to_main_and_push。現在 branch は main。git-workspace-prep としてどうする？",
+      "expected_output": "main-push repo でも task worktree 作成は免除しない。planned working_branch / worktree_path を検証し、task worktree を作成または利用する。prep_status complete、publication_flow merge_to_main_and_push を記録する。"
+    },
+    {
+      "id": 10,
+      "name": "dev_repo_non_main_branch_not_reused",
+      "prompt": "repo_root は ${DEV_REPO_ROOT}/example-app。Branch Plan は workspace_mode task_worktree、working_branch codex/TSK-1234-new-task、worktree_path ${TASK_WORKTREE_ROOT}/example-app/TSK-1234-new-task。現在 branch は codex/TSK-9999-old-task。git-workspace-prep としてどうする？",
+      "expected_output": "現在の non-main branch を使い回さない。planned working_branch / worktree_path を検証し、task worktree を作成または利用する。planned worktree に移れない場合だけ blocked にする。"
+    },
+    {
+      "id": 11,
+      "name": "dev_repo_requires_worktree_path",
+      "prompt": "repo_root は ${DEV_REPO_ROOT}/example-app。Branch Plan は working_branch codex/TSK-1234-new-task だが workspace_mode と worktree_path がない。git-workspace-prep としてどうする？",
+      "expected_output": "${DEV_REPO_ROOT}/* は task_worktree required なので、worktree_path missing として blocked にし、Branch Plan owner へ補完を戻す。"
+    },
+    {
+      "id": 12,
+      "name": "explicit_noop_requires_exception_reason",
+      "prompt": "main-push repo で Branch Plan が branch_action none を指定しているが、read-only / emergency / human-approved exception の理由がない。git-workspace-prep としてどうする？",
+      "expected_output": "task worktree policy に反するため blocked にする。branch_action none は明示例外理由がある場合だけ許可する。"
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+# Codex-managed and local evaluation state
+/.system/
+/.workspace/
+/as/
+/kanary/
+
+# Runtime caches and logs
+.cache/
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Environment and secret material
+.env
+.env.*
+!.env.example
+secrets.json
+*.secret
+*.secret.*
+*.local.*
+*.private.*
+.credentials/
+
+# Machine-local and private skill overrides
+.directory-path.local.md
+
+# Agent runtime configuration
+/.claude/
+/.codex/
+/.codex-work/
+
+# Editors and operating-system files
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+
+# Local dependency environments
+node_modules/
+venv/
+.venv*/

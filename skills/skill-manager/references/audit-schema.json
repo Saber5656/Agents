@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skill Portfolio Audit Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["audit", "inventory", "findings", "summary"],
+  "properties": {
+    "audit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "revision_sha", "scanned_at", "scope_digest", "previous_audit_id"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "revision_sha": {"type": "string", "pattern": "^([0-9a-f]{40}|unversioned)$"},
+        "scanned_at": {"type": "string", "format": "date-time"},
+        "scope_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "previous_audit_id": {"type": ["string", "null"]}
+      }
+    },
+    "inventory": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["skill_id", "path", "profile", "status", "contract_digest", "canonical_repository", "revision_sha", "copy_type", "responsibility_summary", "trigger_summary", "eval_status", "eval_count", "assertion_eval_count", "benchmark_status"],
+        "properties": {
+          "skill_id": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1},
+          "profile": {"enum": ["repo_native", "upstream_compatible", "unclassified"]},
+          "status": {"type": "string"}, "contract_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "canonical_repository": {"type": "string"}, "revision_sha": {"type": "string"},
+          "copy_type": {"enum": ["tracked_source", "cache", "plugin_copy", "worktree_copy", "unknown"]},
+          "responsibility_summary": {"type": "string"}, "trigger_summary": {"type": "string"},
+          "eval_status": {"enum": ["missing", "valid", "invalid"]}, "eval_count": {"type": "integer", "minimum": 0},
+          "assertion_eval_count": {"type": "integer", "minimum": 0},
+          "benchmark_status": {"enum": ["unverified", "verified", "stale"]}
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["finding_id", "rule_id", "category", "severity", "confidence", "skills", "evidence", "impact", "proposed_disposition", "handler", "approval_required", "baseline_state"],
+        "properties": {
+          "finding_id": {"type": "string", "pattern": "^SM-[0-9a-f]{12}$"}, "rule_id": {"type": "string", "minLength": 1},
+          "category": {"enum": ["duplicate", "responsibility", "trigger", "contract", "quality", "retirement", "provenance"]},
+          "severity": {"enum": ["blocker", "high", "medium", "low"]}, "confidence": {"enum": ["certain", "probable", "possible"]},
+          "skills": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "impact": {"type": "string", "minLength": 1},
+          "proposed_disposition": {"type": "string"}, "handler": {"enum": ["human", "skill-updater", "skill-creator"]},
+          "approval_required": {"const": true}, "baseline_state": {"enum": ["new", "existing", "improved", "unverified"]}
+        }
+      }
+    },
+    "summary": {
+      "type": "object", "additionalProperties": false, "required": ["hard_gate_pass", "metrics", "handoffs"],
+      "properties": {"hard_gate_pass": {"type": "boolean"}, "metrics": {"type": "object"}, "handoffs": {"type": "array"}}
+    }
+  }
+}

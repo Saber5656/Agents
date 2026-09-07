@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plan Product V1"
+  short_description: "v1要件・設計・Issue coverageを提案・監査"
+  default_prompt: "Use $product-v1-planner to create or audit an implementation-ready v1 design and complete Issue plan for exactly one repository without changing canonical state unless a fresh approved Decision Manifest is supplied."

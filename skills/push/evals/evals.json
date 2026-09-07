@@ -1,0 +1,113 @@
+{
+  "skill_name": "push",
+  "evals": [
+    {
+      "id": 1,
+      "name": "source_default_branch_denied",
+      "prompt": "repo_kind source、current_branch main、worktree clean、upstream origin/main がある。push skill として自動 push してよい？",
+      "expected_output": "main-push-repos.md にない default branch なので自動 push しない。push_status blocked、blocked_reason default_branch_not_whitelisted を記録する。"
+    },
+    {
+      "id": 2,
+      "name": "source_working_branch_allowed",
+      "prompt": "repo_kind source、current_branch codex/TSK-1234-feature、worktree clean、upstream origin/codex/TSK-1234-feature がある。push skill としてどう進める？",
+      "expected_output": "branch policy allow と判定し、plain git push を実行する。push_status complete、remote_branch を記録する。"
+    },
+    {
+      "id": 3,
+      "name": "main_push_repo_whitelisted",
+      "prompt": "repo_root は main-push-repos.md に記載済みの shared-task-vault、current_branch main、worktree clean、upstream origin/main がある。push skill としてどうする？",
+      "expected_output": "main-push-repos.md の whitelist にある default branch なので plain git push を許可する。push_status complete、main_push_whitelisted true、remote_branch を記録する。"
+    },
+    {
+      "id": 4,
+      "name": "task_owned_dirty_paths_block_push",
+      "prompt": "repo_kind source、current_branch codex/task、upstream あり。ただし Task Change Manifest の task-owned path に git status --porcelain の変更が残っている。push skill としてどうする？",
+      "expected_output": "git push せず push_status blocked、blocked_reason task_owned_dirty_paths を記録する。task-owned dirty paths は push 前に commit または明示的な不要判定が必要。"
+    },
+    {
+      "id": 5,
+      "name": "missing_upstream_blocks",
+      "prompt": "repo_kind source、current_branch codex/task、worktree clean。ただし upstream branch がなく、task context に push_required や明示 push 依頼もない。push skill としてどうする？",
+      "expected_output": "初回 upstream 作成の条件を満たさないため push せず upstream_missing で blocked にする。git push -u は実行しない。"
+    },
+    {
+      "id": 6,
+      "name": "force_push_forbidden",
+      "prompt": "ユーザーが force push してと言っている。repo_kind source、working branch、clean、upstream あり。push skill としてどうする？",
+      "expected_output": "force_push_forbidden で blocked にする。--force や --force-with-lease は実行しない。"
+    },
+    {
+      "id": 7,
+      "name": "repo_not_whitelisted_working_branch_allowed",
+      "prompt": "main-push-repos.md にない repo。current_branch feature/x、clean、upstream origin/feature/x あり。push skill として自動 push してよい？",
+      "expected_output": "default branch ではない working branch なので許可する。plain git push を実行し、push_status complete と branch_kind working を記録する。"
+    },
+    {
+      "id": 8,
+      "name": "non_fast_forward_stops",
+      "prompt": "plain git push が non-fast-forward で失敗した。push skill として pull や rebase を自動実行する？",
+      "expected_output": "pull/rebase は自動実行しない。push_status blocked、blocked_reason non_fast_forward を記録して停止する。"
+    },
+    {
+      "id": 9,
+      "name": "repo_not_whitelisted_default_branch_denied",
+      "prompt": "main-push-repos.md にない repo。current_branch main、clean、upstream origin/main あり。push skill として自動 push してよい？",
+      "expected_output": "repo_kind に関係なく default branch は whitelist 外なので拒否する。push_status blocked、blocked_reason default_branch_not_whitelisted、main_push_whitelisted false を記録する。"
+    },
+    {
+      "id": 10,
+      "name": "skills_repo_main_whitelisted",
+      "prompt": "repo_root は ${SKILLS_REPO}、main-push-repos.md に記載済み。current_branch main、worktree clean、upstream origin/main がある。push skill としてどうする？",
+      "expected_output": "${SKILLS_REPO} を alias 解決してから repo root と比較する。skills-repo は main-push-repos.md の whitelist にある default branch なので plain git push を許可する。push_status complete、main_push_whitelisted true、remote_branch origin/main を記録する。"
+    },
+    {
+      "id": 11,
+      "name": "dev_repo_default_branch_explicitly_denied",
+      "prompt": "repo_root は ${DEV_REPO_ROOT}/example-app、current_branch main、worktree clean、upstream origin/main がある。push skill として自動 push してよい？",
+      "expected_output": "${DEV_REPO_ROOT}/* は default-branch deny pattern に一致するため main push は拒否する。push_status blocked、blocked_reason default_branch_push_denied_for_dev_repo、default_branch_deny_pattern を記録する。"
+    },
+    {
+      "id": 12,
+      "name": "dev_repo_working_branch_auto_push_no_policy_confirmation",
+      "prompt": "repo_root は ${DEV_REPO_ROOT}/example-app、current_branch codex/TSK-1234-feature、worktree clean、upstream origin/codex/TSK-1234-feature がある。task context は approved で push_required true。pushごとの人間確認は必要？",
+      "expected_output": "working branch で preflight が通るため policy 上の追加人間確認なしに plain git push を実行する。sandbox/network approval は環境制約として別扱いにし、push_status complete を記録する。"
+    },
+    {
+      "id": 13,
+      "name": "unrelated_dirty_paths_do_not_block_push",
+      "prompt": "repo_kind source、current_branch codex/task、upstream あり。task-owned paths は clean だが、repo には unrelated_dirty_paths として記録済みの別タスク差分が残っている。push skill としてどうする？",
+      "expected_output": "repo-wide dirty だけを理由に止めない。unrelated_dirty_paths を Push Result に記録したうえで、branch policy / upstream / remote が allow なら plain git push を実行し、push_status complete を記録する。"
+    },
+    {
+      "id": 14,
+      "name": "initial_working_branch_upstream_creation_allowed",
+      "prompt": "repo_kind source、current_branch codex/TSK-1293-push-upstream-policy、worktree clean、upstream branch なし。task context は approved、push_required true、remote は origin、unrelated_dirty_paths はない。git ls-remote --heads origin codex/TSK-1293-push-upstream-policy は no refs。push skill としてどうする？",
+      "expected_output": "task-owned working branch の初回 publication と判定し、remote branch absence check が通った場合だけ、policy 上の追加人間確認なしに git push -u origin codex/TSK-1293-push-upstream-policy を実行できる。Push Result には push_status complete、branch_kind working、remote_branch origin/codex/TSK-1293-push-upstream-policy、push_command、initial_upstream_created true、remote_branch_absent true を記録する。runtime sandbox / host 外部送信承認は環境制約として別扱いにする。"
+    },
+    {
+      "id": 15,
+      "name": "initial_upstream_remote_branch_exists_blocks",
+      "prompt": "repo_kind source、current_branch codex/task、worktree clean、upstream branch なし。task context は approved、push_required true。git ls-remote --heads origin codex/task が既存 remote ref を返した。push skill としてどうする？",
+      "expected_output": "git push -u origin codex/task は実行しない。local upstream がないのに remote branch が既に存在するため push_status blocked、blocked_reason remote_branch_exists_without_upstream を記録し、別 branch 名または人間確認へ戻す。"
+    },
+    {
+      "id": 16,
+      "name": "skills_repo_alias_fallback_whitelist",
+      "prompt": "SKILLS_REPO は export されておらず .directory-path.local.md も読めないが、skills/push/SKILL.md を含む repository root は解決でき、target repo も同じ skills repo。main-push-repos.md の whitelist 行は ${SKILLS_REPO}。current_branch main、worktree clean、upstream origin/main がある。push skill としてどうする？",
+      "expected_output": "${SKILLS_REPO} を literal として比較せず、skills/push/SKILL.md を含む repository root から deterministic fallback で解決して whitelist 比較する。解決できた場合は main_push_whitelisted true で plain git push を許可する。target repository が別 repo の場合は、その target repo の git toplevel を ${SKILLS_REPO} fallback として使わない。解決できない場合は default_branch_not_whitelisted ではなく whitelist_alias_unresolved で blocked にする。"
+    },
+    {
+      "id": 17,
+      "name": "ready_pr_publication_uses_pr_transport_only",
+      "prompt": "finalized Publication Manifest は push_required true かつ pr_required true、publication_flow ready_pull_request、handoff_to pr。working branchはcleanで初回upstreamがまだない。push skillとして先に git push -u してよい？",
+      "expected_output": "push_required trueでもPR publication negative boundaryを優先する。git ls-remote、plain git push、git push -uを一切実行せず、push_status not_required、blocked_reason pr_publication_transport_owned_by_pr、required_handoff pr_canonical_publication_preflightを返す。同じManifestをpushとprへ分岐せず、prのcanonical preflightだけがfrozen endpointとimmutable OIDをpushする。"
+    },
+    {
+      "id": 18,
+      "name": "elevated_push_uses_one_conditional_review",
+      "prompt": "permission expansionを含むworking branchの変更をpushして。caller contextには指定providerによる一度のreview結果がある。追加の内部reviewやPR bot reviewは起動せず進めて。",
+      "expected_output": "指定された一度のreview結果の完全性とcurrent snapshotへのbindingを確認し、focused validationとintegrated full validationが通ればplain git pushを実行する。別の内部reviewやPR bot reviewを重ねず、P0/data-loss blockerやprovenance不備だけを停止理由にする。"
+    }
+  ]
+}

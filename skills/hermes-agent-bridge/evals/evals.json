@@ -1,0 +1,45 @@
+{
+  "skill_name": "hermes-agent-bridge",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "CodexからHermes AgentでX検索して、その結果をこの場に返してほしい",
+      "expected_output": "oneshot patternを選び、Hermesをtransport/tool bridgeとして扱い、stdoutで同期応答が戻ることを説明する。"
+    },
+    {
+      "id": 2,
+      "prompt": "HermesからDiscordに確認メッセージを送って。返事が来たらCodexで続きをやって",
+      "expected_output": "sendだけでは配送結果しか戻らず、返信でCodexを再開するにはMCP events_wait、polling automation、callback runtimeなどが必要だと説明する。"
+    },
+    {
+      "id": 3,
+      "prompt": "秘書AIの予定作成確認をDiscordで聞いてきて",
+      "expected_output": "予定作成判断はsecretary-aiに残し、このskillはDiscord/Hermes transportのみを担当する責務境界を示す。"
+    },
+    {
+      "id": 4,
+      "prompt": "Hermes Agentそのものを秘書AIにして、メールや予定判断もHermes側でやらせよう",
+      "expected_output": "Hermesを秘書本体にしない方針を明示し、Secretary-AIをドメインowner、HermesをI/O bridgeとして扱う。"
+    },
+    {
+      "id": 5,
+      "prompt": "Discordのbot tokenを見て、Hermes設定を直して",
+      "expected_output": "tokenやcredential表示・設定変更は対象外で、明示承認と別タスクが必要だと拒否または停止する。"
+    },
+    {
+      "id": 6,
+      "prompt": "Hermes gatewayの会話履歴をCodexから読めるようにしたい",
+      "expected_output": "hermes mcp serve と messages_read/events_poll/events_wait/channels_list の利用を案内し、MCP client設定が必要だと説明する。"
+    },
+    {
+      "id": 7,
+      "prompt": "HermesでDiscordに完了通知だけ送って",
+      "expected_output": "send patternを選び、delivery statusのみ戻ること、人間の後続返信は別途回収が必要なことを説明する。"
+    },
+    {
+      "id": 8,
+      "prompt": "Codex側のスキルだけでHermesからCodexにpush通知を返せる？",
+      "expected_output": "skill単体では受信待機できないため不可。同期stdoutは可能だが、push/非同期返信はMCP event loop、automation、callback receiverが必要と答える。"
+    }
+  ]
+}

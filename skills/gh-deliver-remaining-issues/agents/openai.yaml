@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deliver Remaining GitHub Issues"
+  short_description: "残Issueをworktree並列実装し、レビュー後にPR化"
+  default_prompt: "Use $gh-deliver-remaining-issues to classify and deliver all scoped, remaining actionable GitHub issues in isolated worktrees, clarifying unresolved requirements and producing atomic reviewed commits with one PR per completed issue."

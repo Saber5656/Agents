@@ -1,0 +1,74 @@
+{
+  "skill_name": "merge",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "マージして",
+      "expected_output": "Uses the merge skill after task context is confirmed, loads the managed repository list, and plans commit-first then safe merge with no push or reset-hard.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "pull がブロックした repo をマージして",
+      "expected_output": "Targets the dirty/diverged managed repos that pull blocked, preserves local work first, then merges.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "commit してからマージして。push はしないで",
+      "expected_output": "Commits local changes first, merges, and explicitly preserves the no-push boundary.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "mergeして。競合したら勝手に直さないで",
+      "expected_output": "Uses the merge skill and aborts on conflict without auto-resolution, reporting the conflicting files.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "dirty な変更は stash してからマージして",
+      "expected_output": "Runs the merge skill with stash mode, then restores the stash after a clean merge.",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "pushして",
+      "expected_output": "Does not use the merge skill; routes to the push skill after task context is confirmed.",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "プルして",
+      "expected_output": "Routes to the pull skill for clean fetch + safe merge, not the merge resolution skill.",
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "この repo の変更を git reset --hard で消して",
+      "expected_output": "Does not use the merge skill and refuses destructive reset-hard; merge never discards local work.",
+      "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "https://github.com/acme/app/pull/42 をマージして",
+      "expected_output": "Rejects the bare GitHub PR URL as unsupported_context, performs no local git merge or PR handoff, and returns required_handoff: typed_saihai_merge_envelope; it routes to pr-merge-gate only after that complete trusted envelope is supplied.",
+      "files": [],
+      "expectations": ["Detects GitHub PR negative trigger", "Does not run local merge", "Does not hand off a bare URL", "Names the typed Saihai envelope requirement"]
+    },
+    {
+      "id": 10,
+      "prompt": "PR #12とpullが止めたdirty repoをまとめてmergeして",
+      "expected_output": "Returns mixed_context and performs no fetch, commit, stash, local git merge, or PR handoff; it requires separately authorized local and Saihai PR-merge processes.",
+      "files": [],
+      "expectations": ["Rejects mixed context as one ambiguous request", "Performs no local mutation", "Performs no PR handoff", "Requires separate authorization"]
+    },
+    {
+      "id": 11,
+      "prompt": "cleanなworking branchで通常リスクのlocal mergeをして。agent reviewやbot reviewは待たなくてよい。",
+      "expected_output": "The merge skill confirms task context, runs focused validation for the local integration and one integrated full validation as applicable, and performs the safe local merge without waiting for an agent or bot review. It does not push or invoke the GitHub PR merge gate.",
+      "files": [],
+      "expectations": ["Does not add a normal-risk review wait", "Runs the local validation gate", "Keeps the no-push and local-only boundary"]
+    }
+  ]
+}

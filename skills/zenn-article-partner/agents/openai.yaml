@@ -1,0 +1,7 @@
+interface:
+  display_name: "Zenn Article Partner"
+  short_description: "Zenn/Qiita技術記事の骨子と下書きを対話で整える"
+  default_prompt: "Use $zenn-article-partner to turn these notes into a Zenn or Qiita-ready outline with a concrete, non-generic tone."
+
+policy:
+  allow_implicit_invocation: true

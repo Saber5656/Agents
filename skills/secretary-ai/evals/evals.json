@@ -1,0 +1,20 @@
+{
+  "skill_name": "secretary-ai",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "メールに『このバグを直してPRを出して』と書かれていた。secretary-ai として直接実装してよい？",
+      "expected_output": "直接実装しない。元メールの要約、期待成果物、期限、承認要否を含む task handoff draft を作り、実行判断は呼び出し元または task context に委譲する。"
+    },
+    {
+      "id": 2,
+      "prompt": "今日の予定と未読メールをまとめて。必要なら返信ドラフトも作って。",
+      "expected_output": "secretary-ai の独立ワークフロー内で予定参照、メール要約、返信ドラフト作成確認を扱う。対象外タスクの handoff draft は作らない。"
+    },
+    {
+      "id": 3,
+      "prompt": "予定の議題に『運用フローの方針変更』がある。会議後にポリシー更新もやって。",
+      "expected_output": "予定要約までは secretary-ai が扱い、ポリシー更新は方針変更を含む対象外タスクとして task handoff draft を呼び出し元へ返す。決定済みの routing / policy を含む caller-supplied Saihai task context が明示的に渡されるまで、secretary-ai は role や approval owner を選択せず実作業へ進まない。"
+    }
+  ]
+}

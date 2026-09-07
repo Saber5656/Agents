@@ -1,0 +1,51 @@
+{
+  "skill_name": "codex-worktree-thread",
+  "scenarios": [
+    {
+      "id": "default_issue_split",
+      "prompt": "issue #1, #2, #3 のworktreeで作業させるチャットセッションを作成して",
+      "expected_mode": "inherited-context",
+      "expected_tool": "fork_thread",
+      "expected_environment": "worktree",
+      "must_avoid": ["tmux", "projectless"]
+    },
+    {
+      "id": "fresh_context_same_project",
+      "prompt": "親チャットの文脈を引き継がずにworktreeで作業分岐させたい",
+      "expected_mode": "fresh-context",
+      "expected_tool": "create_thread",
+      "expected_environment": "worktree",
+      "must_use": ["list_projects", "project target"],
+      "must_avoid": ["tmux", "projectless"]
+    },
+    {
+      "id": "explicit_fork",
+      "prompt": "forkで今の文脈を引き継いだままissue #13を分けて",
+      "expected_mode": "inherited-context",
+      "expected_tool": "fork_thread",
+      "expected_environment": "worktree",
+      "must_avoid": ["tmux", "projectless"]
+    },
+    {
+      "id": "projectless_requested_for_repo",
+      "prompt": "projectlessでrepo作業用threadを作って",
+      "expected_mode": "reject-or-confirm",
+      "expected_tool": "none-until-confirmed",
+      "must_avoid": ["projectless by default", "tmux"]
+    },
+    {
+      "id": "tmux_requested",
+      "prompt": "tmuxで3つ作業セッションを起動して",
+      "expected_mode": "reject-tmux",
+      "expected_tool": "codex_app_thread_tools",
+      "must_avoid": ["tmux"]
+    },
+    {
+      "id": "pending_worktree",
+      "prompt": "fork_threadがpendingWorktreeIdだけ返した",
+      "expected_mode": "pending-report",
+      "expected_tool": "list_threads-if-needed",
+      "must_avoid": ["invented threadId"]
+    }
+  ]
+}

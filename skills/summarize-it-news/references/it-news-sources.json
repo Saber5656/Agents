@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "sources": [
+    {"name": "TechCrunch", "tier": 1, "feed_url": "https://techcrunch.com/feed/", "page_url": "https://techcrunch.com/latest/"},
+    {"name": "InfoQ", "tier": 1, "feed_url": "https://feed.infoq.com/", "page_url": "https://www.infoq.com/"},
+    {"name": "VentureBeat AI", "tier": 1, "feed_url": "https://venturebeat.com/category/ai/feed/", "page_url": "https://venturebeat.com/category/ai/"},
+    {"name": "The Decoder", "tier": 1, "feed_url": "https://the-decoder.com/feed/", "page_url": "https://the-decoder.com/"},
+    {"name": "The Hacker News", "tier": 1, "feed_url": "https://feeds.feedburner.com/TheHackersNews", "page_url": "https://thehackernews.com/"},
+    {"name": "BleepingComputer", "tier": 1, "feed_url": "https://www.bleepingcomputer.com/feed/", "page_url": "https://www.bleepingcomputer.com/"},
+    {"name": "GitHub Blog", "tier": 1, "feed_url": "https://github.blog/feed/", "page_url": "https://github.blog/"},
+    {"name": "JavaScript Weekly", "tier": 1, "feed_url": "https://javascriptweekly.com/rss/", "page_url": "https://javascriptweekly.com/"},
+    {"name": "ITmedia", "tier": 1, "feed_url": "https://rss.itmedia.co.jp/rss/2.0/itmedia_all.xml", "page_url": "https://www.itmedia.co.jp/"},
+    {"name": "Publickey", "tier": 1, "feed_url": "https://www.publickey1.jp/atom.xml", "page_url": "https://www.publickey1.jp/"},
+    {"name": "Zenn", "tier": 1, "feed_url": "https://zenn.dev/feed", "page_url": "https://zenn.dev/"},
+    {"name": "MIT News AI", "tier": 2, "feed_url": null, "page_url": "https://news.mit.edu/topic/artificial-intelligence2"},
+    {"name": "Ben's Bites", "tier": 2, "feed_url": "https://www.bensbites.com/feed", "page_url": "https://www.bensbites.com/"},
+    {"name": "KrebsOnSecurity", "tier": 2, "feed_url": "https://krebsonsecurity.com/feed/", "page_url": "https://krebsonsecurity.com/"},
+    {"name": "The CyberWire", "tier": 2, "feed_url": "https://thecyberwire.com/feeds/rss.xml", "page_url": "https://thecyberwire.com/newsletters/daily-briefing"},
+    {"name": "The New Stack", "tier": 2, "feed_url": "https://thenewstack.io/feed/", "page_url": "https://thenewstack.io/"},
+    {"name": "Laravel News", "tier": 2, "feed_url": "https://feed.laravel-news.com/", "page_url": "https://laravel-news.com/"},
+    {"name": "Changelog News", "tier": 2, "feed_url": "https://changelog.com/news/feed", "page_url": "https://changelog.com/news"},
+    {"name": "@IT", "tier": 2, "feed_url": "https://rss.itmedia.co.jp/rss/2.0/ait.xml", "page_url": "https://atmarkit.itmedia.co.jp/"},
+    {"name": "CodeZine", "tier": 2, "feed_url": "https://codezine.jp/rss/new/20/index.xml", "page_url": "https://codezine.jp/"},
+    {"name": "Gihyo.jp", "tier": 2, "feed_url": "https://gihyo.jp/feed/atom", "page_url": "https://gihyo.jp/"},
+    {"name": "窓の杜 GenAI", "tier": 2, "feed_url": null, "page_url": "https://forest.watch.impress.co.jp/category/genai/"},
+    {"name": "窓の杜 Security", "tier": 2, "feed_url": null, "page_url": "https://forest.watch.impress.co.jp/category/security/"},
+    {"name": "窓の杜 Program", "tier": 2, "feed_url": null, "page_url": "https://forest.watch.impress.co.jp/category/program/"},
+    {"name": "窓の杜 SysFile", "tier": 2, "feed_url": null, "page_url": "https://forest.watch.impress.co.jp/category/sysfile/"},
+    {"name": "窓の杜 Internet", "tier": 2, "feed_url": null, "page_url": "https://forest.watch.impress.co.jp/category/internet/"}
+  ]
+}

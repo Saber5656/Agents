@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReviewSignalEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "signal_id", "repository", "pr_number", "head_sha", "observed_at", "settled_at", "source_event", "review_ids", "review_state_digest", "actionable_thread_ids", "thread_state_digest", "workflow_url", "delivery"],
+  "properties": {
+    "schema_version": {"const": "2"},
+    "signal_id": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of schema_version, repository, pr_number, head_sha, sorted review ids, review_state_digest, sorted actionable thread ids, and thread_state_digest joined with LF."},
+    "repository": {"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"},
+    "pr_number": {"type": "integer", "minimum": 1},
+    "head_sha": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "settled_at": {"type": "string", "format": "date-time"},
+    "source_event": {"type": "string", "minLength": 1},
+    "review_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "review_state_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "actionable_thread_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "thread_state_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "workflow_url": {"type": "string", "pattern": "^https://github\\.com/"},
+    "delivery": {"enum": ["ready", "no_actionable_review", "duplicate_suppressed", "signal_delivery_blocked"]}
+  }
+}

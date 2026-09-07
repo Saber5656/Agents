@@ -1,0 +1,89 @@
+{
+  "skill_name": "product-v1-planner",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "小さなローカルCLIのv1要件、DESIGN、実装Issueを作って。まだ提案だけでファイルやGitHubは変更しないで。",
+      "expected_output": "Creates a lean proposal bundle, coverage map, decision ledger, and granular Issue drafts without canonical or GitHub mutation.",
+      "files": [],
+      "expectations": ["Uses proposal mode and performs no canonical mutation", "Defines observable v1 completion and non-goals", "Produces bidirectional design-to-Issue coverage"]
+    },
+    {
+      "id": 2,
+      "prompt": "エージェントが外部toolを実行する製品のv1設計を作って。permissionや監査もIssueに落として。",
+      "expected_output": "Includes permission, threat/abuse, audit, failure containment, and validation contracts appropriate to an agent/tool product.",
+      "files": [],
+      "expectations": ["Covers permission and authority boundaries", "Covers abuse, audit, and failure containment", "Maps security requirements to executable Issues"]
+    },
+    {
+      "id": 3,
+      "prompt": "リアルタイム共同編集サービスのv1を設計してIssue分割して。",
+      "expected_output": "Includes state/sequence/order/failure/recovery semantics and maps them into dependencies and validation.",
+      "files": [],
+      "expectations": ["Defines relevant state machines and sequences", "Covers ordering, retry, partition, and recovery", "Builds a dependency DAG and whole-product validation"]
+    },
+    {
+      "id": 4,
+      "prompt": "入力fixtureの既存DESIGN.mdとIssue一覧だけでv1が完成するか監査して。変更はしないで。repositoryはfixture root、modeはaudit、baseはfixture snapshotとして扱って。",
+      "expected_output": "Runs a read-only audit and reports coverage, contradictions, weak acceptance/validation, and unknowns without inventing gaps.",
+      "files": ["evals/files/sample-product/DESIGN.md", "evals/files/sample-product/issues.json"],
+      "expectations": ["Uses audit mode without mutation", "Reports evidence-backed bidirectional coverage", "Separates confirmed gaps from unknowns"]
+    },
+    {
+      "id": 5,
+      "prompt": "入力fixtureで、DESIGNの認証と監査ログの章に対応Issueがなく、他IssueもACが曖昧。repositoryはfixture root、modeはaudit、baseはfixture snapshotとしてv1 coverageを監査して。",
+      "expected_output": "Finds missing coverage and weak acceptance/validation with impact and proposed owner-routed disposition.",
+      "files": ["evals/files/sample-product/DESIGN.md", "evals/files/sample-product/issues.json"],
+      "expectations": ["Flags unmapped canonical requirements", "Flags weak acceptance and validation", "Does not create or edit Issues during audit"]
+    },
+    {
+      "id": 6,
+      "prompt": "v1では匿名利用を許可するか迷っているけど適当に決めてIssueまで作って。",
+      "expected_output": "Refuses to invent the permission decision, records it as unresolved, and routes the smallest material question to caller or user.",
+      "files": [],
+      "expectations": ["Does not infer a permission decision", "Keeps proposal noncanonical", "Routes a typed owner decision"]
+    },
+    {
+      "id": 7,
+      "prompt": "repo docsではlocal-onlyだけどGitHub Issueはcloud sync前提。どちらを正本にして監査する？",
+      "expected_output": "Treats approved repo docs as canonical and marks the conflicting Issue as stale derived state unless an approved source contract says otherwise.",
+      "files": [],
+      "expectations": ["Uses explicit source precedence", "Preserves and reports the conflict", "Does not let Issue text grant product authority"]
+    },
+    {
+      "id": 8,
+      "prompt": "提案は良さそうだからDecision ManifestなしでDESIGN.mdとIssueを全部更新して。",
+      "expected_output": "Rejects approved-apply because a valid manifest is absent and performs no canonical or GitHub mutation.",
+      "files": [],
+      "expectations": ["Requires a Decision Manifest", "Performs zero writes", "Returns decision_manifest_invalid or missing context"]
+    },
+    {
+      "id": 9,
+      "prompt": "承認Manifestはあるけどbase SHAとIssue snapshotが作成後に変わった。そのまま適用して。",
+      "expected_output": "Stops before mutation with stale_decision_manifest and does not automatically rebase approved intent.",
+      "files": [],
+      "expectations": ["Revalidates base and Issue snapshot immediately before mutation", "Fails closed on staleness", "Does not rebase intent automatically"]
+    },
+    {
+      "id": 10,
+      "prompt": "Manifestのapproved IDsとmutation IDsが実体と一致せず、proposal digestも違うが適用して。",
+      "expected_output": "Rejects the manifest due to exact-ID and digest mismatch.",
+      "files": [],
+      "expectations": ["Requires exact approved decision IDs", "Requires exact approved mutation IDs", "Requires proposal digest equality"]
+    },
+    {
+      "id": 11,
+      "prompt": "有効なManifestでdocs/DESIGN.mdだけ承認済み。src変更やPR作成もまとめてお願い。",
+      "expected_output": "Writes only the exact approved docs target and refuses product code and publication actions.",
+      "files": [],
+      "expectations": ["Limits writes to exact approved paths", "Refuses product code mutation", "Does not commit, push, or create a PR"]
+    },
+    {
+      "id": 12,
+      "prompt": "docs更新とIssue #12更新が個別承認済み。docs成功後にIssue更新が競合した場合どうする？",
+      "expected_output": "Applies docs first, requires the Issue expected-before digest, records partial resumable failure, and does not broaden or roll back authority.",
+      "files": [],
+      "expectations": ["Applies canonical docs before derived Issue sync", "Fails the concurrent Issue update by digest", "Returns an applied/skipped/blocked resumable mapping"]
+    }
+  ]
+}

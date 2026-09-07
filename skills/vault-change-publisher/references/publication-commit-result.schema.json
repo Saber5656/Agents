@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "outcome", "phase", "daily_pipeline_status", "summary_path",
+    "advisory_path", "notification_result", "agents_vault", "user_vault",
+    "publication_mode", "deferred_cleanup", "evidence_finalization_commit",
+    "next_action"
+  ],
+  "properties": {
+    "outcome": {"enum": ["ready_to_push", "blocked", "partial_publication"]},
+    "phase": {"const": "local_commit"},
+    "daily_pipeline_status": {"enum": ["complete", "blocked"]},
+    "summary_path": {"type": ["string", "null"]},
+    "advisory_path": {"type": ["string", "null"]},
+    "notification_result": {"type": ["string", "null"]},
+    "agents_vault": {"$ref": "#/$defs/vaultResult"},
+    "user_vault": {"$ref": "#/$defs/vaultResult"},
+    "publication_mode": {"$ref": "#/$defs/modeMap"},
+    "deferred_cleanup": {"$ref": "#/$defs/deferredMap"},
+    "evidence_finalization_commit": {"type": ["string", "null"]},
+    "next_action": {"type": ["string", "null"]},
+    "publication_context_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "resumable_state": {"type": ["object", "null"]}
+    ,"retry_disposition": {"enum": ["none", "replan"]}
+    ,"replan_vaults": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"enum": ["agents_vault", "user_vault"]}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"required": ["publication_context_sha256"]},
+      "then": {"required": ["resumable_state"]}
+    },
+    {
+      "if": {"required": ["resumable_state"]},
+      "then": {"required": ["publication_context_sha256"]}
+    },
+    {
+      "if": {
+        "required": ["retry_disposition"],
+        "properties": {"retry_disposition": {"const": "none"}}
+      },
+      "then": {"properties": {"replan_vaults": {"maxItems": 0}}}
+    },
+    {
+      "if": {
+        "required": ["retry_disposition"],
+        "properties": {"retry_disposition": {"const": "replan"}}
+      },
+      "then": {
+        "required": ["replan_vaults"],
+        "properties": {
+          "outcome": {"enum": ["blocked", "partial_publication"]},
+          "replan_vaults": {"minItems": 1}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "ready_to_push"}}},
+      "then": {
+        "properties": {
+          "daily_pipeline_status": {"const": "complete"},
+          "agents_vault": {"$ref": "#/$defs/publishableVaultResult"},
+          "user_vault": {"$ref": "#/$defs/publishableVaultResult"},
+          "evidence_finalization_commit": {"type": "null"}
+        },
+        "anyOf": [
+          {"properties": {"agents_vault": {"$ref": "#/$defs/committedVaultResult"}}},
+          {"properties": {"user_vault": {"$ref": "#/$defs/committedVaultResult"}}}
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "blocked"}}},
+      "then": {
+        "properties": {
+          "agents_vault": {"$ref": "#/$defs/blockedVaultResult"},
+          "user_vault": {"$ref": "#/$defs/blockedVaultResult"},
+          "evidence_finalization_commit": {"type": "null"},
+          "next_action": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "partial_publication"}}},
+      "then": {
+        "properties": {"next_action": {"type": "string", "minLength": 1}},
+        "anyOf": [
+          {"properties": {"agents_vault": {"$ref": "#/$defs/progressedVaultResult"}}},
+          {"properties": {"user_vault": {"$ref": "#/$defs/progressedVaultResult"}}}
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "deferredPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "modeMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agents_vault", "user_vault"],
+      "properties": {
+        "agents_vault": {"enum": ["sweep", "own_only", "blocked"]},
+        "user_vault": {"enum": ["sweep", "own_only", "blocked"]}
+      }
+    },
+    "deferredMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agents_vault", "user_vault"],
+      "properties": {
+        "agents_vault": {"type": "array", "items": {"$ref": "#/$defs/deferredPath"}},
+        "user_vault": {"type": "array", "items": {"$ref": "#/$defs/deferredPath"}}
+      }
+    },
+    "vaultResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit_status", "commit_hashes", "pre_local_head", "local_head",
+        "pre_dirty_digest", "post_dirty_digest", "clean",
+        "publication_mode", "deferred_cleanup"
+      ],
+      "properties": {
+        "commit_status": {"enum": ["complete", "not_required", "failed", "not_started"]},
+        "commit_hashes": {"type": "array", "items": {"type": "string", "pattern": "^[0-9a-f]{40}$"}},
+        "pre_local_head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "local_head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "pre_dirty_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "post_dirty_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "clean": {"type": "boolean"},
+        "publication_mode": {"enum": ["sweep", "own_only", "blocked"]},
+        "deferred_cleanup": {"type": "array", "items": {"$ref": "#/$defs/deferredPath"}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"commit_status": {"const": "complete"}}},
+          "then": {"properties": {"commit_hashes": {"minItems": 1}}}
+        }
+      ]
+    },
+    "publishableVaultResult": {
+      "anyOf": [
+        {"$ref": "#/$defs/readyVaultResult"},
+        {"$ref": "#/$defs/blockedVaultResult"}
+      ]
+    },
+    "readyVaultResult": {
+      "allOf": [
+        {"$ref": "#/$defs/vaultResult"},
+        {
+          "properties": {
+            "commit_status": {"const": "complete"},
+            "publication_mode": {"enum": ["sweep", "own_only"]}
+          }
+        },
+        {
+          "if": {"properties": {"publication_mode": {"const": "sweep"}}},
+          "then": {
+            "properties": {
+              "post_dirty_digest": {"const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+              "clean": {"const": true}
+            }
+          }
+        }
+      ]
+    },
+    "committedVaultResult": {
+      "allOf": [
+        {"$ref": "#/$defs/readyVaultResult"},
+        {"properties": {"commit_status": {"const": "complete"}}}
+      ]
+    },
+    "blockedVaultResult": {
+      "allOf": [
+        {"$ref": "#/$defs/vaultResult"},
+        {
+          "properties": {
+            "commit_status": {"enum": ["failed", "not_started", "not_required"]},
+            "commit_hashes": {"maxItems": 0},
+            "publication_mode": {"const": "blocked"}
+          }
+        }
+      ]
+    },
+    "progressedVaultResult": {
+      "allOf": [
+        {"$ref": "#/$defs/vaultResult"},
+        {
+          "anyOf": [
+            {"properties": {"commit_hashes": {"minItems": 1}}},
+            {"properties": {"clean": {"const": false}}}
+          ]
+        }
+      ]
+    }
+  }
+}

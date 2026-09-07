@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "outcome", "phase", "daily_pipeline_status", "summary_path",
+    "advisory_path", "notification_result", "agents_vault", "user_vault",
+    "publication_mode", "deferred_cleanup", "evidence_finalization_commit",
+    "next_action"
+  ],
+  "properties": {
+    "outcome": {"enum": ["success", "blocked", "partial_publication"]},
+    "phase": {"type": "string", "minLength": 1},
+    "daily_pipeline_status": {"enum": ["complete", "blocked"]},
+    "summary_path": {"type": ["string", "null"]},
+    "advisory_path": {"type": ["string", "null"]},
+    "notification_result": {"type": ["string", "null"]},
+    "agents_vault": {"$ref": "#/$defs/vaultResult"},
+    "user_vault": {"$ref": "#/$defs/vaultResult"},
+    "publication_mode": {"$ref": "#/$defs/modeMap"},
+    "deferred_cleanup": {"$ref": "#/$defs/deferredMap"},
+    "evidence_finalization_commit": {
+      "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"
+    },
+    "evidence_recovery": {"$ref": "#/$defs/evidenceRecovery"},
+    "evidence_review": {"$ref": "#/$defs/evidenceReview"},
+    "next_action": {"type": ["string", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "success"}}},
+      "then": {
+        "properties": {
+          "daily_pipeline_status": {"const": "complete"},
+          "summary_path": {"type": "string", "minLength": 1},
+          "advisory_path": {"type": "string", "minLength": 1},
+          "agents_vault": {"$ref": "#/$defs/publishedVaultResult"},
+          "user_vault": {"$ref": "#/$defs/publishedVaultResult"},
+          "evidence_finalization_commit": {
+            "type": "string", "pattern": "^[0-9a-f]{40}$"
+          },
+          "next_action": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "blocked"}}},
+      "then": {
+        "properties": {
+          "agents_vault": {"$ref": "#/$defs/blockedVaultResult"},
+          "user_vault": {"$ref": "#/$defs/blockedVaultResult"},
+          "evidence_finalization_commit": {"type": "null"},
+          "next_action": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "partial_publication"}}},
+      "then": {
+        "properties": {"next_action": {"type": "string", "minLength": 1}},
+        "anyOf": [
+          {"properties": {"agents_vault": {"$ref": "#/$defs/progressedVaultResult"}}},
+          {"properties": {"user_vault": {"$ref": "#/$defs/progressedVaultResult"}}}
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "deferredPath": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "reason"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "artifactIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity", "sha256", "size", "mode"],
+      "properties": {
+        "identity": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": {"type": "integer"}
+        },
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size": {"type": "integer"},
+        "mode": {"type": "integer"}
+      }
+    },
+    "artifactTombstone": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "directory", "directory_identity", "entry", "identity", "sha256",
+        "size", "mode"
+      ],
+      "properties": {
+        "directory": {
+          "type": "string", "minLength": 1,
+          "pattern": "^[^/\\\\\\u0000-\\u001f\\u007f]+$"
+        },
+        "directory_identity": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": {"type": "integer"}
+        },
+        "entry": {"const": "artifact"},
+        "identity": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": {"type": "integer"}
+        },
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size": {"type": "integer"},
+        "mode": {"type": "integer"}
+      }
+    },
+    "evidenceRecovery": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "target_path", "quarantine_scope", "quarantine_root_identity",
+        "base_head", "candidate_head", "original_restored",
+        "original_tombstone", "candidate", "head_updated", "index_updated"
+      ],
+      "properties": {
+        "target_path": {
+          "type": "string", "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\\\\\u0000-\\u001f\\u007f]+$"
+        },
+        "quarantine_scope": {"const": "agents_git_dir"},
+        "quarantine_root_identity": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": {"type": "integer"}
+        },
+        "base_head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "candidate_head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "original_restored": {"type": "boolean"},
+        "original_tombstone": {"$ref": "#/$defs/artifactTombstone"},
+        "candidate": {"$ref": "#/$defs/artifactIdentity"},
+        "rollback_candidate_tombstone": {"$ref": "#/$defs/artifactTombstone"},
+        "head_updated": {"type": "boolean"},
+        "index_updated": {"type": "boolean"}
+      }
+    },
+    "evidenceReview": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "process_status", "status", "reason_code", "result_present",
+        "stderr_sha256", "result_sha256"
+      ],
+      "properties": {
+        "process_status": {"type": "integer"},
+        "status": {"type": "integer"},
+        "reason_code": {
+          "enum": [
+            "approved", "input_preparation_failed", "input_too_large",
+            "process_failed", "result_missing", "canonical_validation_failed",
+            "result_rejected", "legacy_failure"
+          ]
+        },
+        "result_present": {"type": "boolean"},
+        "stderr_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "result_sha256": {
+          "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "modeMap": {
+      "type": "object", "additionalProperties": false,
+      "required": ["agents_vault", "user_vault"],
+      "properties": {
+        "agents_vault": {"enum": ["sweep", "own_only", "blocked"]},
+        "user_vault": {"enum": ["sweep", "own_only", "blocked"]}
+      }
+    },
+    "deferredMap": {
+      "type": "object", "additionalProperties": false,
+      "required": ["agents_vault", "user_vault"],
+      "properties": {
+        "agents_vault": {"type": "array", "items": {"$ref": "#/$defs/deferredPath"}},
+        "user_vault": {"type": "array", "items": {"$ref": "#/$defs/deferredPath"}}
+      }
+    },
+    "vaultResult": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "commit_status", "commit_hashes", "push_status", "local_head",
+        "remote_head", "clean", "publication_mode", "deferred_cleanup"
+      ],
+      "properties": {
+        "commit_status": {"enum": ["complete", "not_required", "failed", "not_started"]},
+        "commit_hashes": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+        },
+        "push_status": {"enum": ["complete", "not_required", "failed", "not_started"]},
+        "local_head": {
+          "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"
+        },
+        "remote_head": {
+          "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"
+        },
+        "clean": {"type": "boolean"},
+        "publication_mode": {"enum": ["sweep", "own_only", "blocked"]},
+        "deferred_cleanup": {"type": "array", "items": {"$ref": "#/$defs/deferredPath"}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"commit_status": {"const": "complete"}}},
+          "then": {"properties": {"commit_hashes": {"minItems": 1}}}
+        }
+      ]
+    },
+    "publishedVaultResult": {
+      "allOf": [
+        {"$ref": "#/$defs/vaultResult"},
+        {
+          "properties": {
+            "commit_status": {"const": "complete"},
+            "push_status": {"const": "complete"},
+            "local_head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "remote_head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "publication_mode": {"enum": ["sweep", "own_only"]}
+          }
+        },
+        {
+          "if": {"properties": {"publication_mode": {"const": "sweep"}}},
+          "then": {"properties": {"clean": {"const": true}}}
+        }
+      ]
+    },
+    "blockedVaultResult": {
+      "allOf": [
+        {"$ref": "#/$defs/vaultResult"},
+        {
+          "properties": {
+            "commit_status": {"enum": ["failed", "not_started", "not_required"]},
+            "commit_hashes": {"maxItems": 0},
+            "push_status": {"enum": ["failed", "not_started", "not_required"]},
+            "publication_mode": {"const": "blocked"}
+          }
+        }
+      ]
+    },
+    "progressedVaultResult": {
+      "allOf": [
+        {"$ref": "#/$defs/vaultResult"},
+        {
+          "anyOf": [
+            {"properties": {"commit_hashes": {"minItems": 1}}},
+            {"properties": {"push_status": {"const": "complete"}}},
+            {"properties": {"clean": {"const": false}}}
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Product V1 Decision Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "manifest_id", "mode", "repository", "proposal", "approval", "decisions", "mutations", "constraints"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "manifest_id": {"type": "string", "minLength": 1},
+    "mode": {"const": "approved-apply"},
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "base_sha", "observed_at", "issue_snapshot_digest"],
+      "properties": {
+        "root": {"type": "string", "minLength": 1},
+        "owner_repo": {"type": ["string", "null"], "pattern": "^[^/\\s]+/[^/\\s]+$"},
+        "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "observed_at": {"type": ["string", "null"], "format": "date-time"},
+        "issue_snapshot_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_id", "repository", "base_sha", "evidence_binding", "generated_at", "source_manifest_digest", "artifacts", "bundle_digest"],
+      "properties": {
+        "bundle_id": {"type": "string", "minLength": 1},
+        "repository": {"type": "string", "minLength": 1},
+        "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "evidence_binding": {"const": "bound_repository"},
+        "generated_at": {"type": "string", "minLength": 1},
+        "bundle_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_manifest_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "artifacts": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["artifact_id", "media_type", "resolver", "locator", "exact_bytes_sha256"],
+            "properties": {
+              "artifact_id": {"type": "string", "minLength": 1},
+              "media_type": {"type": "string", "minLength": 1},
+              "resolver": {"const": "repository_relative_file"},
+              "locator": {"type": "string", "minLength": 1},
+              "exact_bytes_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "approved_at", "source", "approved_decision_ids", "approved_mutation_ids"],
+      "properties": {
+        "owner": {"enum": ["caller", "user"]},
+        "approved_at": {"type": "string", "minLength": 1},
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "locator"],
+          "properties": {
+            "kind": {"enum": ["explicit_user_instruction", "typed_caller_context"]},
+            "locator": {"type": "string", "minLength": 1}
+          }
+        },
+        "approved_decision_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "approved_mutation_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "category", "statement", "rationale", "source", "approved"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "category": {"enum": ["v1_scope", "requirement", "architecture", "api", "schema", "permission", "security", "compatibility", "dependency", "defer"]},
+          "statement": {"type": "string", "minLength": 1},
+          "rationale": {"type": "string", "minLength": 1},
+          "source": {"type": "string", "minLength": 1},
+          "approved": {"const": true}
+        }
+      }
+    },
+    "mutations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "action", "exact_target", "expected_before", "proposed_after_digest", "decision_ids", "allowed"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "action": {"enum": ["create_doc", "update_doc", "create_issue", "update_issue"]},
+          "exact_target": {"type": "string", "minLength": 1},
+          "expected_before": {
+            "type": "object", "additionalProperties": false,
+            "required": ["state", "digest"],
+            "properties": {
+              "state": {"enum": ["absent", "present"]},
+              "digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+            }
+          },
+          "proposed_after_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "payload_artifact_id": {"type": "string", "minLength": 1},
+          "decision_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "allowed": {"const": true}
+        },
+        "allOf": [{
+          "if": {"properties": {"action": {"enum": ["create_doc", "update_doc"]}}, "required": ["action"]},
+          "then": {"required": ["payload_artifact_id"]}
+        }]
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exact_paths", "excluded_paths", "github_actions_allowed", "no_product_code", "no_commit_push_pr_merge_release"],
+      "properties": {
+        "exact_paths": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+"}},
+        "excluded_paths": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+"}},
+        "github_actions_allowed": {"type": "array", "uniqueItems": true, "items": {"enum": ["create_issue", "update_issue"]}},
+        "no_product_code": {"const": true},
+        "no_commit_push_pr_merge_release": {"const": true}
+      }
+    }
+  }
+}

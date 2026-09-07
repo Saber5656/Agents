@@ -1,0 +1,243 @@
+# Deprecated fail-closed reference. Runtime v1 does not authorize commit-status
+# signal writes. Do not install this workflow; use a private Saihai watch and
+# fresh github_observe operations instead.
+name: DEPRECATED - Review intake signal
+run-name: Deprecated review signal (no-op)
+
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to reconcile
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: read
+
+concurrency:
+  group: review-signal-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  signal:
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record observation time
+        id: observed
+        shell: bash
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Settle clustered review events
+        shell: bash
+        run: sleep 90
+
+      - name: Query current state and publish head-bound signal
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          OBSERVED_AT: ${{ steps.observed.outputs.at }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+        with:
+          script: |
+            const crypto = require('crypto');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const repositoryIdentity = `${owner}/${repo}`.toLowerCase();
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!Number.isInteger(prNumber) || prNumber < 1) {
+              core.setFailed('A positive PR number is required.');
+              return;
+            }
+
+            const retry = async (label, operation) => {
+              let lastError;
+              for (let attempt = 0; attempt < 3; attempt++) {
+                try { return await operation(); }
+                catch (error) {
+                  lastError = error;
+                  if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1000 * (2 ** attempt)));
+                }
+              }
+              throw new Error(`${label} failed after 3 attempts: ${lastError.message}`);
+            };
+
+            const query = `query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
+              repository(owner:$owner, name:$repo) {
+                pullRequest(number:$number) {
+                  headRefOid
+                  reviewThreads(first:100, after:$cursor) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { id isResolved isOutdated path line originalLine }
+                  }
+                }
+              }
+            }`;
+            const reviewQuery = `query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
+              repository(owner:$owner, name:$repo) {
+                pullRequest(number:$number) {
+                  headRefOid
+                  reviews(first:100, after:$cursor) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { id state submittedAt updatedAt commit { oid } }
+                  }
+                }
+              }
+            }`;
+            const headQuery = `query($owner:String!, $repo:String!, $number:Int!) {
+              repository(owner:$owner, name:$repo) { pullRequest(number:$number) { headRefOid state } }
+            }`;
+            const commentQuery = `query($id:ID!, $cursor:String) {
+              node(id:$id) {
+                ... on PullRequestReviewThread {
+                  comments(first:100, after:$cursor) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes { id updatedAt }
+                  }
+                }
+              }
+            }`;
+
+            let cursor = null;
+            let pullRequest = null;
+            let fixedHead = null;
+            const threads = [];
+            do {
+              const result = await retry('pull request query', () => github.graphql(query, {owner, repo, number: prNumber, cursor}));
+              pullRequest = result.repository.pullRequest;
+              if (!pullRequest) {
+                core.setFailed('PR not found or inaccessible.');
+                return;
+              }
+              const pageHead = pullRequest.headRefOid.toLowerCase();
+              fixedHead ??= pageHead;
+              if (pageHead !== fixedHead) {
+                core.setFailed('head_changed_during_fetch');
+                return;
+              }
+              threads.push(...pullRequest.reviewThreads.nodes);
+              const page = pullRequest.reviewThreads.pageInfo;
+              cursor = page.hasNextPage ? page.endCursor : null;
+              if (page.hasNextPage && !cursor) {
+                core.setFailed('Review thread pagination cursor is missing.');
+                return;
+              }
+            } while (cursor);
+
+            const reviews = [];
+            let reviewCursor = null;
+            do {
+              const result = await retry('review query', () => github.graphql(reviewQuery, {owner, repo, number: prNumber, cursor: reviewCursor}));
+              const reviewPullRequest = result.repository.pullRequest;
+              if (!reviewPullRequest || reviewPullRequest.headRefOid.toLowerCase() !== fixedHead) {
+                core.setFailed('head_changed_during_fetch');
+                return;
+              }
+              const connection = reviewPullRequest.reviews;
+              reviews.push(...connection.nodes);
+              reviewCursor = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null;
+              if (connection.pageInfo.hasNextPage && !reviewCursor) {
+                core.setFailed('Review pagination cursor is missing.');
+                return;
+              }
+            } while (reviewCursor);
+
+            for (const thread of threads) {
+              thread.commentMetadata = [];
+              let commentCursor = null;
+              do {
+                const result = await retry('thread comment query', () => github.graphql(commentQuery, {id: thread.id, cursor: commentCursor}));
+                const connection = result.node.comments;
+                thread.commentMetadata.push(...connection.nodes);
+                commentCursor = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null;
+                if (connection.pageInfo.hasNextPage && !commentCursor) {
+                  core.setFailed('Thread comment pagination cursor is missing.');
+                  return;
+                }
+              } while (commentCursor);
+            }
+
+            const finalResult = await retry('final head query', () => github.graphql(headQuery, {owner, repo, number: prNumber}));
+            const head = finalResult.repository.pullRequest?.headRefOid?.toLowerCase();
+            if (!head || head !== fixedHead) {
+              core.setFailed('head_changed_during_fetch');
+              return;
+            }
+            if (finalResult.repository.pullRequest.state !== 'OPEN') {
+              core.setFailed(`pr_state_${finalResult.repository.pullRequest.state.toLowerCase()}`);
+              return;
+            }
+            const actionableThreadIds = threads
+              .filter(item => !item.isResolved && !item.isOutdated)
+              .map(item => item.id).sort();
+            const reviewIds = reviews
+              .filter(item => item.commit?.oid?.toLowerCase() === head && ['COMMENTED', 'CHANGES_REQUESTED'].includes(item.state))
+              .map(item => item.id).sort();
+            const reviewLines = reviews.map(item => [
+              item.id, item.state, item.commit?.oid?.toLowerCase() || '', item.submittedAt || '', item.updatedAt || ''
+            ].join('|')).sort();
+            const reviewDigest = crypto.createHash('sha256').update(reviewLines.join('\n')).digest('hex');
+            const stateLines = threads.map(item => [
+              item.id, String(item.isResolved), String(item.isOutdated), item.path || '',
+              String(item.originalLine || item.line || ''),
+              item.commentMetadata.map(comment => `${comment.id}@${comment.updatedAt}`).sort().join(',')
+            ].join('|')).sort();
+            const threadDigest = crypto.createHash('sha256').update(stateLines.join('\n')).digest('hex');
+            const identity = ['2', repositoryIdentity, String(prNumber), head, reviewIds.join(','), reviewDigest, actionableThreadIds.join(','), threadDigest].join('\n');
+            const signalId = crypto.createHash('sha256').update(identity).digest('hex');
+            const ready = actionableThreadIds.length > 0 || reviewIds.length > 0;
+            const workflowUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const envelope = {
+              schema_version: '2', signal_id: signalId, repository: repositoryIdentity,
+              pr_number: prNumber, head_sha: head, observed_at: process.env.OBSERVED_AT,
+              settled_at: new Date().toISOString(), source_event: context.eventName,
+              review_ids: reviewIds, review_state_digest: reviewDigest, actionable_thread_ids: actionableThreadIds,
+              thread_state_digest: threadDigest, workflow_url: workflowUrl,
+              delivery: ready ? 'ready' : 'no_actionable_review'
+            };
+
+            try {
+              const immediate = await retry('pre-delivery head lookup', () => github.rest.pulls.get({owner, repo, pull_number: prNumber}));
+              if (immediate.data.head.sha.toLowerCase() !== head) {
+                core.setFailed('head_changed_during_fetch');
+                return;
+              }
+              if (immediate.data.state !== 'open') {
+                core.setFailed(`pr_state_${immediate.data.state}`);
+                return;
+              }
+              let prior = null;
+              for (let page = 1; !prior; page++) {
+                const combined = await retry('status lookup', () => github.rest.repos.getCombinedStatusForRef({owner, repo, ref: head, per_page: 100, page}));
+                prior = combined.data.statuses.find(item => item.context === 'review-intake/signal') || null;
+                if (prior || combined.data.statuses.length < 100) break;
+              }
+              const description = `${envelope.delivery}:${signalId.slice(0, 16)}`;
+              if (prior?.description === description) {
+                envelope.delivery = 'duplicate_suppressed';
+                await core.summary.addHeading('Duplicate review signal suppressed')
+                  .addCodeBlock(JSON.stringify(envelope, null, 2), 'json').write();
+                return;
+              }
+              await retry('status delivery', () => github.rest.repos.createCommitStatus({
+                owner, repo, sha: head, state: 'success', context: 'review-intake/signal',
+                description, target_url: workflowUrl
+              }));
+            } catch (error) {
+              envelope.delivery = 'signal_delivery_blocked';
+              await core.summary.addHeading('Review signal delivery blocked')
+                .addCodeBlock(JSON.stringify(envelope, null, 2), 'json').write();
+              core.setFailed(`Unable to publish commit status: ${error.message}`);
+              return;
+            }
+
+            await core.summary.addHeading('Review signal envelope')
+              .addCodeBlock(JSON.stringify(envelope, null, 2), 'json').write();
+            core.info(JSON.stringify(envelope));

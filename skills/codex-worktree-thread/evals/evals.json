@@ -1,0 +1,139 @@
+{
+  "skill_name": "codex-worktree-thread",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "issue #1, #2, #3 のworktreeで作業させるチャットセッションをカレントディレクトリに作成して",
+      "expected_output": "既定の inherited-context と判定し、fork_thread + worktree を使う。tmuxやprojectlessを使わず、issueごとのtitle、pending/thread ID、初回prompt送信状況を表で返す。",
+      "files": [],
+      "expectations": [
+        "The workflow chooses fork_thread with worktree by default.",
+        "The workflow does not use tmux.",
+        "The workflow does not use projectless for repo work.",
+        "The result maps each issue to a thread or pending worktree id."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "親チャットの文脈を引き継がずにworktreeで作業分岐させたい。issue #4 用に同じProject配下で作って。",
+      "expected_output": "fresh-context と判定し、list_projectsで既存Projectを選んだうえで create_thread + project target + worktree を使う。projectlessにしない。",
+      "files": [],
+      "expectations": [
+        "The workflow chooses create_thread with an existing project target.",
+        "The workflow uses a worktree environment.",
+        "The workflow explicitly avoids projectless.",
+        "The initial prompt includes enough context because parent history is not inherited."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "forkでいいので、今の流れを引き継いだままissue #8の別worktreeを起動して。",
+      "expected_output": "inherited-context と判定し、calling threadから fork_thread + worktree を実行する。forkは完了済み履歴だけをコピーする注意とfollow-up promptの必要性を扱う。",
+      "files": [],
+      "expectations": [
+        "The workflow chooses fork_thread with worktree.",
+        "The workflow notes that only completed source-thread history is copied.",
+        "The workflow prepares a follow-up prompt for the child thread."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "別Projectに見えてもいいからprojectlessでissue #9を作って",
+      "expected_output": "repo作業ではprojectlessを使わない方針を説明し、既存Project配下のworktree threadにするかユーザー確認する。",
+      "files": [],
+      "expectations": [
+        "The workflow refuses or challenges projectless for repo work.",
+        "The workflow proposes existing project + worktree instead.",
+        "The workflow asks for confirmation if the user truly wants a separate non-repo project."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "tmuxで3つセッション立てて、それぞれissueをやらせて",
+      "expected_output": "Codex App thread/worktree対応が崩れるためtmux起動を使わず、fork_thread/create_threadベースの代替を提示する。",
+      "files": [],
+      "expectations": [
+        "The workflow does not launch tmux.",
+        "The workflow explains the thread/worktree tracking risk.",
+        "The workflow offers Codex App thread tools as the alternative."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "同じディレクトリで会話だけforkして。worktreeはいらない。",
+      "expected_output": "worktree不要と明示されているためsame-directory forkを検討する。ただし並行実装には不向きであることを説明する。",
+      "files": [],
+      "expectations": [
+        "The workflow does not force a worktree when the user explicitly says it is unnecessary.",
+        "The workflow distinguishes same-directory fork from parallel implementation worktrees.",
+        "The workflow warns that same-directory is not suitable for concurrent edits."
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Codexのthread toolが見つからないから、シェルからcodexを起動してworktree作っておいて",
+      "expected_output": "tool_searchで再探索し、それでもCodex App thread toolがなければ停止する。シェルやtmuxでUI外の代替起動をしない。",
+      "files": [],
+      "expectations": [
+        "The workflow retries discovery with tool_search.",
+        "The workflow stops if Codex App thread tools are unavailable.",
+        "The workflow does not shell out to create unmanaged Codex sessions."
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "worktree forkしたらpendingWorktreeIdだけ返ってきた。threadIdは何？",
+      "expected_output": "threadIdを捏造せず、pendingWorktreeIdだけを記録する。必要に応じてlist_threadsで生成完了を確認する。",
+      "files": [],
+      "expectations": [
+        "The workflow does not invent a thread id.",
+        "The workflow records the pendingWorktreeId.",
+        "The workflow uses list_threads or reports that follow-up is pending."
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "startingStateでorigin/mainを指定してforkして。失敗したら適当にtmuxでやって。",
+      "expected_output": "startingState失敗時はtmuxに逃げず、plain worktree fork/createを一度だけ試す。branch作成やfetchは子threadの初回promptで指示する。",
+      "files": [],
+      "expectations": [
+        "The workflow treats startingState as optional and environment-sensitive.",
+        "The workflow retries with plain worktree once.",
+        "The workflow does not fall back to tmux."
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "新しいissue調査用threadを作りたいけど、親のOSS/security/Vaultの文脈は引き継いでほしい",
+      "expected_output": "文脈継承が必要なため fork_thread + worktree を選び、重要な制約をfollow-up promptにも再掲する。",
+      "files": [],
+      "expectations": [
+        "The workflow chooses inherited-context.",
+        "The workflow uses fork_thread with worktree.",
+        "The child prompt restates security/Vault constraints instead of relying only on inherited history."
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "AI-Theaterと別のProject候補が両方ありそう。issue #12のworktree threadを文脈なしで作って",
+      "expected_output": "list_projects結果が曖昧ならProject選択をA/B/Cで確認し、勝手にprojectlessや別Projectを選ばない。",
+      "files": [],
+      "expectations": [
+        "The workflow detects ambiguous project selection.",
+        "The workflow asks the user to choose from project candidates.",
+        "The workflow avoids projectless."
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "作ったworktree threadの対応表だけ確認したい",
+      "expected_output": "list_threadsなどで確認可能な範囲を調べ、Task、Mode、Tool、Thread/Pending ID、Title、Branch/worktree、Statusの表で返す。",
+      "files": [],
+      "expectations": [
+        "The workflow reports a mapping table.",
+        "The table includes mode, tool, id, title, branch/worktree, and status.",
+        "The workflow distinguishes unknown from confirmed values."
+      ]
+    }
+  ]
+}
