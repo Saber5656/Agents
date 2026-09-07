@@ -17,15 +17,6 @@ import tempfile
 from pathlib import Path
 
 
-# This fixture predates the current nested repository layout. It asserts that
-# generic ``*.pem`` examples are publishable and treats the tracked
-# ``skills/kanary`` symlink as a root-local directory; both assumptions are
-# incompatible with the current source tree. Keep it visible in every run.
-EXCLUDED_FIXTURES = {
-    Path("skills/tests/test_publication_hygiene.py"): "legacy fixture paths conflict with current *.pem ignore policy and tracked skills/kanary symlink",
-}
-
-
 def run(command: list[str], root: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, cwd=root, text=True, capture_output=True)
 
@@ -72,16 +63,14 @@ def main() -> int:
     if not test_paths:
         print("validation error: no test roots found", file=sys.stderr)
         return 2
-    excluded = [root / path for path in EXCLUDED_FIXTURES if (root / path).is_file()]
-    command = [sys.executable, "-m", "pytest", "-q", *[str(path) for path in test_paths]]
-    for path in excluded:
-        command.extend(["--ignore", str(path)])
+    command = [sys.executable, "-m", "pytest", "-q", "-rs", *[str(path) for path in test_paths]]
     tests = run(command, root)
     test_output = tests.stdout + tests.stderr
     counts = test_summary(test_output)
     print(f"tests: discovered={counts['collected']} passed={counts['passed']} failed={counts['failed']} errors={counts['errors']} skipped={counts['skipped']} xfailed={counts['xfailed']}")
-    for path in excluded:
-        print(f"tests: excluded={path.relative_to(root)} reason={EXCLUDED_FIXTURES[path.relative_to(root)]}")
+    for line in test_output.splitlines():
+        if line.lstrip().startswith("SKIPPED"):
+            print(f"tests: {line.strip()}")
     if tests.returncode:
         print(test_output, file=sys.stderr, end="")
         return tests.returncode
