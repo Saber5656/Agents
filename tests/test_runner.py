@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import sys
+from unittest.mock import patch
 from harness import runner as h
 
 
@@ -506,3 +508,42 @@ class ReviewFixTests(unittest.TestCase):
             result = h.run_job(job, {'PATH': os.environ.get('PATH', ''), 'HOME': str(root)}, execute)
             self.assertTrue(observed['stdout'] and observed['stderr'])
             self.assertIn('0-claude-stdout.jsonl', observed['index'])
+
+
+class ParentRecoveryRegressionTests(unittest.TestCase):
+    def test_older_terminal_attempt_cannot_hide_later_live_process(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            summary={'status':'running','mode':'run','attempts':[{'provider':'claude','status':'usage_limit'},{'provider':'codex','status':'running'}]}
+            h.save(root/'0-claude-state.json',{'attempt':0,'provider':'claude','status':'usage_limit','exit_code':1},{})
+            h.save(root/'0-claude-stdout.jsonl',json.dumps({'type':'result','is_error':True,'result':'usage limit'}),{})
+            h.save(root/'1-codex-state.json',{'attempt':1,'provider':'codex','status':'running','pid':os.getpid(),'identity':h.process_identity(os.getpid())},{})
+            active=h._reconcile_existing(root,summary,{})
+            self.assertEqual(active['status'],'alive')
+            self.assertEqual(summary['status'],'running')
+
+    def test_tool_output_model_field_is_not_provider_identity(self):
+        output='\n'.join([json.dumps({'type':'item.completed','item':{'type':'command_execution','model':'spoofed'}}),
+                            json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'done'}}),
+                            json.dumps({'type':'turn.completed','usage':{}})])
+        result=h.classify('codex',output,'',0)
+        self.assertIsNone(result.actual_model)
+        self.assertFalse(result.model_verified)
+
+    def test_slow_output_collector_preserves_success_and_complete_output(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);source='import time;time.sleep(2.2)\n'+h._COLLECTOR_SOURCE
+            with patch.object(h,'_COLLECTOR_SOURCE',source):
+                result=h.execute([sys.executable,'-c','print("retained output")'],dict(os.environ),root,'',10,
+                                 stdout_path=root/'out',stderr_path=root/'err',state_path=root/'state.json')
+            self.assertEqual(result.code,0)
+            self.assertIn('retained output',result.stdout)
+
+    def test_pending_collector_never_returns_complete(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);work=root/'work';vault=root/'vault';work.mkdir();vault.mkdir()
+            job=h.Job(work,vault,'Review')
+            result=h.run_job(job,{'PATH':os.environ.get('PATH',''),'HOME':str(root)},
+                lambda *args:h.ProcessResult(0,claude_result('{"verdict":"approve","findings":[],"limitations":[]}'),output_pending=True))
+            self.assertEqual(result['status'],'incomplete')
+            self.assertFalse(json.loads((Path(result['run_dir'])/'context-index.json').read_text())['complete'])
