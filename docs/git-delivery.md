@@ -3,7 +3,9 @@
 `harness.delivery` provides local primitives for the current Agents workflow.
 It does not require a retired runtime, role chain, manifest or approval gate.
 User-authorized delivery still requires validation and pre-commit review of the
-actual selected changes. Never push main, force push, bypass hooks or protection.
+actual selected changes. Follow [the Agents repository delivery policy](../policies/repository-delivery.md):
+reviewed minimal commits normally go directly to main under the coordinating
+agent. Never force push or bypass hooks or protection.
 
 `prepare_worktree(repo, path, branch, full_base_oid)` creates an isolated task
 checkout without touching a dirty primary checkout. Repeated setup reuses only
