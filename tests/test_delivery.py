@@ -45,7 +45,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual('local',(self.repo/'a').read_text())
 
     def test_privacy_before_transmission(self):
-        for text in ['fixture '+('/Users/'+'example/private'), 'token '+('ghp_'+'x'*30), '日本語公開本文']:
+        for text in ['fixture '+'/'.join(['','Users','example','private']), 'token '+('ghp_'+'x'*30), '日本語公開本文']:
             with self.assertRaises(DeliveryError):public_text(text,english=True)
         with self.assertRaises(DeliveryError):public_text('secret-value',env={'API_KEY':'secret-value'})
         self.assertEqual('Use $AGENTS_ROOT.',public_text('Use $AGENTS_ROOT.',english=True))
