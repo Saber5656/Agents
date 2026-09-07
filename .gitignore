@@ -7,3 +7,9 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Private task database, service state and isolated test environments
+.local/
+.venv/
+*.local.*
+*.private.*
