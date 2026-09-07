@@ -74,6 +74,11 @@ except TimeoutError as error:
     )
 ```
 
+`verified=True` is an explicit caller assertion that the batch read the remote
+record back; `readback={"repository": ..., "issue_id": ..., "url": ...}` can
+carry the checked values and is validated when supplied. The store never
+performs the remote read or Issue creation itself.
+
 Issueization states are `unissued`, `claimed`, `ambiguous`, `retry`, and
 `issued`. A claim has an owner, token, expiry, attempt count, and diagnostic.
 An expired claim is surfaced by `list_issueization_candidates()` with
