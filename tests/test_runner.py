@@ -197,6 +197,23 @@ class JobTests(unittest.TestCase):
         self.assertEqual(len(calls),0)
         self.assertEqual(result['active_process']['status'],'alive')
 
+    def test_run_directory_lock_prevents_concurrent_launch(self):
+        import fcntl
+        run_dir=self.root/'vault'/'locked';run_dir.mkdir()
+        calls=[]
+        with (run_dir/'.runner.lock').open('a') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            r=h.run_job(self.job,self.env,lambda *args:calls.append(args),run_dir=run_dir)
+        self.assertEqual('running',r['status'])
+        self.assertEqual([],calls)
+
+    def test_resume_completed_preserves_terminal_status(self):
+        run=h.run_job(self.job,self.env,self.executor([h.ProcessResult(0,claude_result('{"verdict":"approve","findings":[],"limitations":[]}'))]))
+        calls=[]
+        resumed=h.resume_job(self.job,Path(run['run_dir']),self.env,lambda *args:calls.append(args))
+        self.assertEqual('completed',resumed['status'])
+        self.assertEqual([],calls)
+
     def test_corrupt_persisted_result_is_explicitly_incomplete(self):
         run_dir=self.root/'vault'/'01-Projects'/'agent-runs'/'corrupt'
         run_dir.mkdir(parents=True)
@@ -256,6 +273,25 @@ class ProcessTests(unittest.TestCase):
             self.assertTrue(out.is_file()); self.assertTrue(err.is_file())
             self.assertNotIn('incremental-secret-value',out.read_text()+err.read_text())
             self.assertIn('[REDACTED]',out.read_text()+err.read_text())
+
+    def test_stream_redacts_multiline_key_and_split_long_secret(self):
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); secret='S'*400
+            env=dict(os.environ, API_KEY=secret)
+            payload='prefix\n-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----\n'+('x'*500)+secret+'\n'
+            script='import sys; sys.stdout.write('+repr(payload)+'); sys.stdout.flush()'
+            r=h.execute([sys.executable,'-c',script],env,Path.cwd(),'',3,
+                stdout_path=root/'out',stderr_path=root/'err',redaction_env=env)
+            self.assertEqual(0,r.code)
+            self.assertNotIn('private-key-body',r.stdout)
+            self.assertNotIn(secret,r.stdout)
+
+    def test_uninspectable_process_is_unknown_not_terminated(self):
+        from unittest.mock import patch
+        with patch.object(h.os,'kill',side_effect=PermissionError('not inspectable')):
+            result=h.reconcile_process({'pid':123,'identity':{'command':'worker'}})
+        self.assertEqual('unknown',result['status'])
 
     def test_save_is_atomic_and_private(self):
         with tempfile.TemporaryDirectory() as d:

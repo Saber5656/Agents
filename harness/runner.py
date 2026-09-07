@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -72,26 +73,42 @@ def redact_chunk(text):
                   '[REDACTED]', text)
 
 target = sys.argv[1]
+import codecs
 pending = ''
+in_key = False
+decoder = codecs.getincrementaldecoder('utf-8')('replace')
+
+def safe_line(line):
+    global in_key
+    if in_key:
+        end = re.search(r'-----END [^-]*PRIVATE KEY-----', line)
+        if end is None:
+            return ''
+        in_key = False
+        line = line[end.end():]
+    start = re.search(r'-----BEGIN [^-]*PRIVATE KEY-----', line)
+    if start:
+        end = re.search(r'-----END [^-]*PRIVATE KEY-----', line[start.end():])
+        if end:
+            return redact_chunk(line)
+        in_key = True
+        return redact_chunk(line[:start.start()]) + '[REDACTED PRIVATE KEY]\n'
+    return redact_chunk(line)
+
 with open(target, 'a', encoding='utf-8', buffering=1) as stream:
     while True:
-        # read1 returns currently available pipe data; read() may wait for a
-        # full block and would delay the durable partial-output guarantee.
         block = sys.stdin.buffer.read1(8192)
-        if not block:
-            break
-        pending += block.decode('utf-8', 'replace')
+        pending += decoder.decode(block, final=not block)
         while '\n' in pending:
             line, pending = pending.split('\n', 1)
-            stream.write(redact_chunk(line + '\n'))
+            stream.write(safe_line(line + '\n'))
             stream.flush()
-        if len(pending) > 512:
-            stream.write(redact_chunk(pending[:-256]))
-            stream.flush()
-            pending = pending[-256:]
+        if not block:
+            break
     if pending:
-        stream.write(redact_chunk(pending))
+        stream.write(safe_line(pending))
         stream.flush()
+
 '''
 
 
@@ -145,8 +162,10 @@ def process_identity(pid):
     identity = {'pid': pid}
     try:
         os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
+    except ProcessLookupError:
         return None
+    except OSError:
+        return {"pid": pid, "uninspectable": True}
     stat = Path(f'/proc/{pid}/stat')
     cmdline = Path(f'/proc/{pid}/cmdline')
     try:
@@ -165,10 +184,10 @@ def process_identity(pid):
                                       capture_output=True, text=True, timeout=2)
             line = observed.stdout.strip()
             if observed.returncode == 0 and line:
-                fields = line.split(None, 6)
-                if len(fields) >= 7:
-                    identity.setdefault('start_time', ' '.join(fields[:6]))
-                    identity.setdefault('command', fields[6])
+                fields = line.split(None, 5)
+                if len(fields) >= 6:
+                    identity.setdefault('start_time', ' '.join(fields[:5]))
+                    identity.setdefault('command', fields[5])
         except (OSError, subprocess.TimeoutExpired):
             pass
     return identity
@@ -184,6 +203,8 @@ def reconcile_process(state):
     current = process_identity(pid)
     if current is None:
         return {'status': 'terminated', 'pid': pid}
+    if current.get('uninspectable'):
+        return {'status':'unknown','pid':pid,'reason':'process_inspection_denied'}
     recorded = state.get('identity') or {}
     if not any(recorded.get(key) for key in ('start_ticks', 'start_time', 'command')):
         return {'status': 'unknown', 'pid': pid, 'reason': 'identity_unavailable', 'identity': current}
@@ -575,6 +596,23 @@ def _reconcile_existing(run_dir, summary, env):
 
 
 def run_job(job, env, executor=None, run_dir=None, resume=False):
+    if not job.vault.is_dir() or not job.workspace.is_dir():
+        raise ValueError('Existing workspace and AGENTS_VAULT_ROOT directories are required')
+    directory = Path(run_dir or job.run_dir or job.vault/'01-Projects'/'agent-runs'/
+                     (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')+'-'+uuid.uuid4().hex[:12]))
+    if not directory.resolve().is_relative_to(job.vault.resolve()):
+        raise ValueError('run_dir must remain beneath AGENTS_VAULT_ROOT')
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    with (directory/'.runner.lock').open('a') as lock:
+        os.chmod(lock.name, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {'status':'running','run_dir':str(directory),'reason':'another_runner_owns_directory'}
+        return _run_job(job, env, executor, directory, resume)
+
+
+def _run_job(job, env, executor=None, run_dir=None, resume=False):
     executor = executor or execute
     if not job.vault.is_dir() or not job.workspace.is_dir():
         raise ValueError('Existing workspace and AGENTS_VAULT_ROOT directories are required')
@@ -599,7 +637,7 @@ def run_job(job, env, executor=None, run_dir=None, resume=False):
         active = _reconcile_existing(run_dir, old_summary, env)
         if active:
             return json.loads(redact(json.dumps(old_summary, ensure_ascii=False), env))
-        if not resume and old_summary.get('status') in ('completed', 'review_findings', 'review_incomplete'):
+        if old_summary.get('status') in ('completed', 'review_findings', 'review_incomplete'):
             return json.loads(redact(json.dumps(old_summary, ensure_ascii=False), env))
     instruction = ('依頼された作業を実行する。追加エージェントの起動は行わず、現在の成果を保持する。\n')
     if job.mode == 'review':

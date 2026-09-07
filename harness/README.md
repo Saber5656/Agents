@@ -106,3 +106,12 @@ python3 -m unittest discover -s tests -v
 テストは provider を模擬し、認証保持、利用上限の分類、Codex 引き継ぎ、権限、記録、タイムアウトを検証する。実サービスの5時間枠を意図的に使い切る試験は行わない。
 
 参考: [GitHub CLI environment](https://cli.github.com/manual/gh_help_environment)、[Claude authentication](https://code.claude.com/docs/en/authentication)、[Claude CLI](https://code.claude.com/docs/en/cli-reference)。
+
+### 復旧時の検証上の境界
+
+実行ディレクトリをプロセス寿命のロックで占有し、同時の再開を防ぐ。
+プロセスの検査権限がない場合は `unknown` とし、終了済みとは判定しない。
+完了済みの実行は `--resume` でも完了状態を維持し、新しい作業を開始しない。
+ストリーム記録は完全な行ごとに秘密値を伏せて保存する。改行されていない
+末尾は EOF まで保留し、複数行の秘密鍵は本文を保存しない。ログの読み戻しは
+外部操作の exactly-once を保証しない。未知の公開結果は別途 GitHub で照合する。
