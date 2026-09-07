@@ -82,6 +82,13 @@ class DeliveryTests(unittest.TestCase):
             self.assertEqual(state,client.merge(1,'a'*40,'b'*40))
             sent.assert_not_called()
 
+    def test_home_directory_without_child_is_private(self):
+        for home in ['/'.join(['', 'home', 'fixture']), '/'.join(['', 'Users', 'fixture']),
+                     chr(92).join(['C:', 'Users', 'fixture'])]:
+            with self.subTest(home=home), self.assertRaises(DeliveryError):
+                public_text('Home: ' + home)
+
+
     def test_issue_marker_is_stable_and_english(self):
         body=issue_body('task-1','Expected result',['Run the fixture'])
         self.assertIn('<!-- agents-local-task:task-1 -->',body)

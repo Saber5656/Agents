@@ -35,7 +35,7 @@ def oid(value):
 def public_text(text,env=None,english=False):
     if redact(text,env if env is not None else os.environ) != text:
         raise DeliveryError('Secret detected in selected public content')
-    if re.search(r'/(?:Users|home)/[^/\s]+/|[A-Za-z]:\\Users\\[^\\\s]+\\',text):
+    if re.search(r'/(?:Users|home)/[^/\s]+(?:/|(?=$|[\s]))|[A-Za-z]:\\Users\\[^\\\s]+(?:\\|(?=$|[\s]))',text):
         raise DeliveryError('Personal home path detected in selected public content')
     if english and re.search(r'[\u3040-\u30ff\u3400-\u9fff]',text):
         raise DeliveryError('Public title/body must be authored in English')
