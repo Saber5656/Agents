@@ -16,6 +16,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -56,6 +57,7 @@ class ProcessResult:
     stdout: str = ''
     stderr: str = ''
     timed_out: bool = False
+    output_pending: bool = False
 
 
 _COLLECTOR_SOURCE = r'''
@@ -227,6 +229,9 @@ def execute(argv, env, cwd, prompt, timeout, *, stdout_path=None, stderr_path=No
     """
     persistent = stdout_path is not None or stderr_path is not None
     collectors = []
+    writer = None
+    started_identity = None
+    output_pending = False
     try:
         process = subprocess.Popen(argv, env=env, cwd=cwd, text=True,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -237,9 +242,13 @@ def execute(argv, env, cwd, prompt, timeout, *, stdout_path=None, stderr_path=No
         return ProcessResult(code, stderr=f'{label}: {argv[0]}: {exc}')
     if state_path is not None:
         state = dict(state or _load_record(state_path) or {})
+        started_identity = process_identity(process.pid)
         state.update({'status': 'running', 'pid': process.pid, 'pgid': process.pid,
                       'started_at': datetime.now(timezone.utc).isoformat(),
-                      'identity': process_identity(process.pid)})
+                      'identity': started_identity})
+    else:
+        started_identity = process_identity(process.pid)
+    if state_path is not None:
         save(state_path, state, redaction_env or env)
     if persistent:
         redaction_env = redaction_env or env
@@ -263,35 +272,47 @@ def execute(argv, env, cwd, prompt, timeout, *, stdout_path=None, stderr_path=No
                     pass
                 return ProcessResult(126, stderr=f'Output collector startup failed: {exc}')
             collectors.append(collector)
+            if state_path is not None:
+                state.setdefault('collectors', []).append({'pid': collector.pid, 'identity': process_identity(collector.pid)})
+                save(state_path, state, redaction_env)
         if process.stdout is not None:
             process.stdout.close()
         if process.stderr is not None:
             process.stderr.close()
-        try:
-            process.stdin.write(prompt)
-            process.stdin.close()
-        except (BrokenPipeError, OSError):
+        def write_prompt():
             try:
+                process.stdin.write(prompt)
                 process.stdin.close()
-            except OSError:
-                pass
+            except (BrokenPipeError, OSError):
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+        writer = threading.Thread(target=write_prompt, name='runner-stdin', daemon=True)
+        writer.start()
     try:
         if persistent:
             process.wait(timeout=max(.01, timeout))
             for collector in collectors:
-                collector.wait(timeout=2)
+                try:
+                    collector.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    output_pending = True
+            if writer is not None:
+                writer.join(timeout=1)
             out = Path(stdout_path).read_text(errors='replace') if stdout_path else ''
             err = Path(stderr_path).read_text(errors='replace') if stderr_path else ''
         else:
             out, err = process.communicate(prompt, timeout=max(.01, timeout))
         if state_path is not None:
             state = dict(state or {})
-            state.update({'status': 'completed', 'pid': process.pid,
+            state.update({'status': 'collecting' if output_pending else 'completed', 'pid': process.pid,
                           'exit_code': process.returncode,
                           'finished_at': datetime.now(timezone.utc).isoformat(),
-                          'identity': process_identity(process.pid)})
+                          'identity': state.get('identity') or started_identity,
+                          'final_identity': process_identity(process.pid)})
             save(state_path, state, redaction_env or env)
-        return ProcessResult(process.returncode, out, err)
+        return ProcessResult(process.returncode, out, err, output_pending=output_pending)
     except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -301,7 +322,12 @@ def execute(argv, env, cwd, prompt, timeout, *, stdout_path=None, stderr_path=No
             if persistent:
                 process.wait(timeout=2)
                 for collector in collectors:
-                    collector.wait(timeout=2)
+                    try:
+                        collector.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        collector.kill(); collector.wait()
+                if writer is not None:
+                    writer.join(timeout=1)
                 out = Path(stdout_path).read_text(errors='replace') if stdout_path else ''
                 err = Path(stderr_path).read_text(errors='replace') if stderr_path else ''
             else:
@@ -327,7 +353,8 @@ def execute(argv, env, cwd, prompt, timeout, *, stdout_path=None, stderr_path=No
             state.update({'status': 'interrupted' if isinstance(exc, KeyboardInterrupt) else 'timed_out',
                           'pid': process.pid, 'exit_code': 130 if isinstance(exc, KeyboardInterrupt) else 124,
                           'finished_at': datetime.now(timezone.utc).isoformat(),
-                          'identity': process_identity(process.pid)})
+                          'identity': state.get('identity') or started_identity,
+                          'final_identity': process_identity(process.pid)})
             save(state_path, state, redaction_env or env)
         if isinstance(exc, KeyboardInterrupt):
             return ProcessResult(130, out, err)
@@ -377,11 +404,12 @@ def _error_status(text):
 def _actual_model(events):
     """Read model identity only when the provider explicitly reports it."""
     for event in reversed(events):
+        if event.get('type') not in ('system', 'result', 'thread.started', 'turn.started', 'turn.completed'):
+            continue
         candidates = [event]
-        for key in ('result', 'metadata', 'item'):
-            value = event.get(key)
-            if isinstance(value, dict):
-                candidates.append(value)
+        metadata = event.get('metadata')
+        if isinstance(metadata, dict):
+            candidates.append(metadata)
         for candidate in candidates:
             for key in ('model', 'model_name', 'modelName'):
                 value = candidate.get(key)
@@ -571,18 +599,67 @@ def _context_index(run_dir, env, complete=False):
     return index
 
 
+def _summary_is_valid(value):
+    return (isinstance(value, dict) and isinstance(value.get('status'), str)
+            and isinstance(value.get('attempts'), list)
+            and all(isinstance(attempt, dict) for attempt in value['attempts'])
+            and all(key not in value or isinstance(value[key], str)
+                    for key in ('run_dir', 'workspace', 'mode')))
+
+
+def _reconcile_captured_attempt(run_dir, summary, state_record, env):
+    """Recover a terminal provider result written before the parent state save."""
+    attempt_no = state_record.get('attempt')
+    provider = state_record.get('provider')
+    if not isinstance(attempt_no, int) or not isinstance(provider, str):
+        return False
+    if attempt_no < 0 or attempt_no >= len(summary.get('attempts', [])):
+        return False
+    stdout_path = Path(run_dir) / f'{attempt_no}-{provider}-stdout.jsonl'
+    stderr_path = Path(run_dir) / f'{attempt_no}-{provider}-stderr.log'
+    if not stdout_path.is_file():
+        return False
+    output = stdout_path.read_text(errors='replace')
+    error = stderr_path.read_text(errors='replace') if stderr_path.is_file() else ''
+    parsed = classify(provider, output, error, state_record.get('exit_code', 0))
+    if parsed.status != 'completed':
+        return False
+    attempt = summary['attempts'][attempt_no]
+    final_status = review_verdict(parsed.text) if parsed.status == 'completed' and summary.get('mode') == 'review' else parsed.status
+    attempt.update({'status': final_status, 'exit_code': state_record.get('exit_code', 0),
+                    'usage': parsed.usage, 'usage_info': _usage_record(parsed.usage),
+                    'actual_model': parsed.actual_model, 'model_verified': parsed.model_verified,
+                    'reconciled_from_output': True})
+    state_record.update({'status': final_status, 'finished_at': state_record.get('finished_at') or
+                         datetime.now(timezone.utc).isoformat(), 'reconciled_from_output': True, 'output_pending': False})
+    save(Path(run_dir) / f'{attempt_no}-{provider}-state.json', state_record, env)
+    summary.pop('active_process', None)
+    summary['status'] = final_status
+    summary['text'] = parsed.text
+    summary['usage'] = _usage_summary(summary['attempts'])
+    save(Path(run_dir) / 'result.json', summary, env)
+    return True
+
+
 def _reconcile_existing(run_dir, summary, env):
-    """Return an active process state, if any, before a replacement is started."""
+    """Inspect all process identities; only the latest attempt may decide status."""
     states = []
+    records = []
     for path in sorted(Path(run_dir).glob('*-state.json')):
         record = _load_record(path)
-        if not record:
+        if not isinstance(record, dict) or not isinstance(record.get('status'), str):
             summary['status'] = 'incomplete'
             summary['process_reconciliation'] = [{'path': path.name, 'status': 'unknown',
                                                   'reason': 'corrupt_state_record'}]
             save(Path(run_dir)/'result.json', summary, env)
             return {'status': 'unknown', 'reason': 'corrupt_state_record'}
+        records.append(record)
         status = reconcile_process(record) if record.get('status') in ('starting', 'running') else {'status': record.get('status')}
+        for collector in record.get('collectors', []):
+            collected = reconcile_process(collector)
+            if collected['status'] in ('alive', 'unknown'):
+                status = {**collected, 'reason': 'output_collection_pending'}
+                break
         states.append({'path': path.name, **status})
         if status['status'] in ('alive', 'unknown'):
             summary['status'] = 'running' if status['status'] == 'alive' else 'incomplete'
@@ -590,6 +667,14 @@ def _reconcile_existing(run_dir, summary, env):
             summary['process_reconciliation'] = states
             save(Path(run_dir)/'result.json', summary, env)
             return status
+    latest = len(summary.get('attempts', [])) - 1
+    record = next((r for r in records if r.get('attempt') == latest), None)
+    summary.pop('active_process', None)
+    if record and _reconcile_captured_attempt(run_dir, summary, record, env):
+        summary['process_reconciliation'] = states
+        save(Path(run_dir)/'result.json', summary, env)
+        _context_index(run_dir, env, complete=True)
+        return {'status': 'reconciled_terminal'}
     if states:
         summary['process_reconciliation'] = states
     return None
@@ -630,9 +715,24 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         raise ValueError('run_dir must be a directory')
     run_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     old_summary = _load_record(run_dir/'result.json') if existing else None
-    if existing and (run_dir/'result.json').exists() and old_summary is None:
+    if existing and (run_dir/'result.json').exists() and not _summary_is_valid(old_summary):
         return {'run_dir': str(run_dir), 'status': 'incomplete',
                 'error': 'corrupt_result_record', 'recovery': 'preserved_original_record'}
+    if old_summary:
+        expected_workspace = str(job.workspace.resolve())
+        recorded_workspace = old_summary.get('workspace')
+        if recorded_workspace is not None and not isinstance(recorded_workspace, str):
+            return {'run_dir': str(run_dir), 'status': 'incomplete',
+                    'error': 'corrupt_result_record', 'recovery': 'preserved_original_record'}
+        if recorded_workspace and str(Path(recorded_workspace).resolve()) != expected_workspace:
+            return {'run_dir': str(run_dir), 'status': 'incomplete',
+                    'error': 'workspace_mismatch', 'recovery': 'preserved_original_record'}
+        for state_path in sorted(run_dir.glob('*-state.json')):
+            state = _load_record(state_path)
+            if isinstance(state, dict) and state.get('cwd') is not None:
+                if not isinstance(state['cwd'], str) or str(Path(state['cwd']).resolve()) != expected_workspace:
+                    return {'run_dir': str(run_dir), 'status': 'incomplete',
+                            'error': 'workspace_mismatch', 'recovery': 'preserved_original_record'}
     if old_summary:
         active = _reconcile_existing(run_dir, old_summary, env)
         if active:
@@ -698,6 +798,8 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         state_path = run_dir/f'{stem}-state.json'
         stdout_path = run_dir/f'{stem}-stdout.jsonl'
         stderr_path = run_dir/f'{stem}-stderr.log'
+        save(stdout_path, '', env)
+        save(stderr_path, '', env)
         save(run_dir/f'{stem}-prompt.md', prompt, env)
         save(run_dir/f'{stem}-command.json', argv, env)
         attempt = {'provider':provider, 'requested_model':model, 'status':'running',
@@ -710,6 +812,7 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         save(run_dir/'result.json', summary, env)
         _context_index(run_dir, env)
         try:
+            attempt_started = time.monotonic()
             if executor is execute:
                 result = executor(argv, env, job.workspace, prompt, remaining,
                                   stdout_path=stdout_path, stderr_path=stderr_path,
@@ -721,7 +824,8 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         if executor is not execute or not stdout_path.exists():
             save(stdout_path, result.stdout, env)
             save(stderr_path, result.stderr, env)
-        parsed = classify(provider,result.stdout,result.stderr,result.code)
+        parsed = (Result('incomplete', 'Output collection is still running') if result.output_pending
+                  else classify(provider,result.stdout,result.stderr,result.code))
         if result.timed_out:
             parsed = Result('timeout', actual_model=parsed.actual_model, model_verified=parsed.model_verified)
         elif result.code == 130:
@@ -732,14 +836,17 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
                         'usage_info': _usage_record(parsed.usage),
                         'actual_model': parsed.actual_model,
                         'model_verified': parsed.model_verified,
-                        'elapsed_seconds': max(0, time.monotonic() - (deadline - job.timeout))})
+                        'elapsed_seconds': max(0, time.monotonic() - attempt_started)})
         state_record = _load_record(state_path) or {}
+        final_status = review_verdict(parsed.text) if parsed.status == 'completed' and job.mode == 'review' else parsed.status
+        attempt['status'] = final_status
         state_record.update({'run_dir': str(run_dir), 'attempt': attempt_no, 'provider': provider,
-                             'requested_model': model, 'status': parsed.status,
-                             'exit_code': result.code,
+                             'requested_model': model, 'status': final_status,
+                             'output_pending': result.output_pending, 'exit_code': result.code,
                              'finished_at': datetime.now(timezone.utc).isoformat()})
         save(state_path, state_record, env)
-        summary['status'] = parsed.status
+        state_record['status'] = final_status
+        summary['status'] = final_status
         summary['text'] = parsed.text
         summary['usage'] = _usage_summary(summary['attempts'])
         save(run_dir/'after.json',snapshot(job.workspace),env)
@@ -756,12 +863,10 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
             summary['handoff_inline_truncated'] = len(checkpoint_text)>64000
             save(run_dir/'result.json',summary,env)
             continue
-        if parsed.status == 'completed' and job.mode == 'review':
-            summary['status'] = review_verdict(parsed.text)
         break
     save(run_dir/'result.json', summary, env)
     save(run_dir/'response.md', summary.get('text',''),env)
-    _context_index(run_dir, env, complete=summary.get('status') not in ('running', 'timeout'))
+    _context_index(run_dir, env, complete=summary.get('status') != 'running' and not any((_load_record(p) or {}).get('output_pending') for p in run_dir.glob('*-state.json')))
     save(run_dir/'README.md', '# CLI 実行記録\n\n'
          '- [依頼](request.md)\n- [開始時](before.json)\n- [終了時](after.json)\n'
          '- [結果と使用量](result.json)\n- [返却内容](response.md)\n- [コンテキスト索引](context-index.json)\n\n'
@@ -790,7 +895,7 @@ def _dotenv_keys(path):
     return keys
 
 
-def _root_diagnostics(env, current, env_file=None):
+def _root_diagnostics(env, current, env_file=None, environment_mode='current'):
     dotenv_keys = _dotenv_keys(env_file)
     roots = {}
     for key in ('AGENTS_ROOT', 'SKILLS_ROOT', 'AGENTS_VAULT_ROOT'):
@@ -801,6 +906,7 @@ def _root_diagnostics(env, current, env_file=None):
             'path': str(path) if path else None,
             'exists': path.is_dir() if path else False,
             'provenance': 'env_file' if key in dotenv_keys else
+                          'terminal_environment' if environment_mode == 'terminal' and key in env else
                           'current_environment' if key in current else 'missing',
         }
     return roots
@@ -808,7 +914,7 @@ def _root_diagnostics(env, current, env_file=None):
 
 def doctor(env, current, probe=False, *, env_file=None, environment_mode='current'):
     report = {'environment_differences':{},'tools':{}}
-    report['roots'] = _root_diagnostics(env, current, env_file)
+    report['roots'] = _root_diagnostics(env, current, env_file, environment_mode)
     report['startup'] = {
         'environment_mode': environment_mode,
         'cwd': str(ROOT),

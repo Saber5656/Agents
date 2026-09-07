@@ -26,6 +26,23 @@ class StoreTests(unittest.TestCase):
         self.addCleanup(self.patcher.stop)
         self.addCleanup(self.tmp.cleanup)
 
+
+    def test_private_database_beneath_sticky_temp_root_is_supported(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            path=Path(directory)/'tasks.sqlite3'
+            store=TaskStore(path)
+            try:
+                task=store.create_task(purpose='portable temp fixture')
+                self.assertEqual(store.get_task(task['id'])['purpose'],'portable temp fixture')
+            finally:store.close()
+
+    def test_database_parent_alias_is_canonicalized_before_sqlite_open(self):
+        real=self.root/'real';real.mkdir()
+        alias=self.root/'alias';alias.symlink_to(real,target_is_directory=True)
+        store=TaskStore(alias/'tasks.sqlite3')
+        try:self.assertEqual(store.db_path,real.resolve()/'tasks.sqlite3')
+        finally:store.close()
+
     def store(self):
         return TaskStore(self.db)
 
@@ -126,6 +143,27 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(store.list_issue_links(task["id"])), 1)
         self.assertEqual(store.get_task(task["id"])["issueization_state"], "issued")
 
+    def test_ambiguous_claim_requires_reconciliation_before_claiming_again(self):
+        store = self.store()
+        task = store.create_task(purpose="uncertain publication")
+        claim = store.claim_issueization(task["id"], "batch-a")
+        store.mark_issueization_ambiguous(task["id"], claim["claim_token"], "remote timeout")
+        with self.assertRaises(IssueizationError):
+            store.claim_issueization(task["id"], "batch-b")
+        self.assertIsNone(store.claim_next_issueization("batch-b"))
+
+    def test_link_issue_requires_active_claim_token(self):
+        store = self.store()
+        task = store.create_task(purpose="claimed publication")
+        claim = store.claim_issueization(task["id"], "batch-a")
+        with self.assertRaises(ConflictError):
+            store.link_issue(task["id"], "org/repo", 4, "https://github.com/org/repo/issues/4", verified=True)
+        linked = store.link_issue(task["id"], "org/repo", 4, "https://github.com/org/repo/issues/4",
+                                  claim_token=claim["claim_token"], verified=True,
+                                  readback={"repository": "org/repo", "issue_id": 4,
+                                            "url": "https://github.com/org/repo/issues/4"})
+        self.assertEqual(linked["issueization_state"], "issued")
+
     def test_many_to_many_work_unit_issue_pr_and_acceptance_evidence(self):
         store = self.store()
         one = store.create_task(purpose="one", acceptance_evidence=["test:one"], completion_evidence=["run:one"])
@@ -165,6 +203,18 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(detail["acceptance_records"], [{"evidence": "check", "verified": True}])
         self.assertTrue(store.completion_report()["complete"])
 
+    def test_completion_report_checks_requirement_acceptance_criteria(self):
+        store = self.store()
+        requirement = store.create_requirement("ship parser", acceptance=["parser test", "main sync"])
+        task = store.create_task(purpose="parser", acceptance_evidence=["parser test"], completion_evidence=["run"])
+        store.link_requirement_task(requirement["id"], task["id"])
+        current = store.get_task(task["id"])
+        store.update_task(task["id"], expected_version=current["version"], execution_status="completed")
+        store.add_acceptance_evidence(task["id"], "parser test", verified=True)
+        report = store.completion_report()
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["missing_tasks"][0]["reason"], "requirement acceptance not verified")
+
     def test_expired_claim_requires_reconciliation_before_new_claim(self):
         store = self.store()
         task = store.create_task(purpose="remote race")
@@ -188,6 +238,33 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(second["expected_result_history"], ["old", "corrected"])
         with self.assertRaises(ConflictError):
             store.update_task(second["id"], expected_version=first["version"], purpose="stale")
+
+    def test_update_expected_result_records_history_and_rejects_blank_purpose(self):
+        store = self.store()
+        task = store.create_task(purpose="initial", expected_result="old")
+        changed = store.update_task(task["id"], expected_version=task["version"], expected_result="new")
+        self.assertEqual(changed["expected_result_history"], ["old", "new"])
+        with self.assertRaises(ValueError):
+            store.update_task(task["id"], expected_version=changed["version"], purpose="  ")
+
+    def test_duplicate_acceptance_does_not_revoke_verified_state(self):
+        store = self.store()
+        task = store.create_task(purpose="acceptance")
+        store.add_acceptance_evidence(task["id"], "test", verified=True)
+        duplicate = store.add_acceptance_evidence(task["id"], "test")
+        self.assertEqual(duplicate["acceptance_records"], [{"evidence": "test", "verified": True}])
+
+    def test_sqlite_busy_timeout_honors_constructor_timeout(self):
+        store = TaskStore(self.db, timeout=0.1)
+        self.addCleanup(store.close)
+        value = store._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        self.assertEqual(value, 100)
+
+    def test_link_work_unit_populates_missing_purpose(self):
+        store = self.store()
+        task = store.create_task(purpose="work", work_unit="wu")
+        unit = store.link_work_unit("wu", task_ids=[task["id"]], purpose="planned unit")
+        self.assertEqual(unit["purpose"], "planned unit")
 
     def test_issue_link_requires_verified_exact_github_readback(self):
         store = self.store()
@@ -229,6 +306,32 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(imported[0]["issueization_state"], "issued")
         self.assertEqual(store.list_issue_links(imported[0]["id"])[0]["issue_id"], 77)
         self.assertEqual(len(store.list_tasks()), 1)
+
+    def test_import_existing_issue_validates_identifier_and_merges_acceptance(self):
+        store = self.store()
+        with self.assertRaises(ValueError):
+            store.import_existing_issue(repository="", issue_id=0, issue_url="https://github.com//issues/0")
+        first = store.import_existing_issue(repository="org/repo", issue_id=8,
+                                            issue_url="https://github.com/org/repo/issues/8",
+                                            acceptance_evidence=["old"])
+        second = store.import_existing_issue(repository="org/repo", issue_id=8,
+                                             issue_url="https://github.com/org/repo/issues/8",
+                                             acceptance_evidence=["new"])
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(second["acceptance_evidence"], ["old", "new"])
+
+    def test_rejects_database_parent_writable_by_other_users(self):
+        db_dir = self.root / "unsafe"; db_dir.mkdir(); db_dir.chmod(0o777)
+        with self.assertRaises(ConfigurationError):
+            TaskStore(db_dir / "tasks.sqlite3")
+
+    def test_rejects_database_symlink(self):
+        real = self.root / "real.sqlite3"
+        TaskStore(real).close()
+        link = self.root / "link.sqlite3"
+        link.symlink_to(real)
+        with self.assertRaises(OSError):
+            TaskStore(link)
 
 
 class CliTests(unittest.TestCase):
