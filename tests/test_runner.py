@@ -141,6 +141,19 @@ class JobTests(unittest.TestCase):
         self.assertLessEqual(self.calls[1][3],self.calls[0][3])
         self.assertTrue((Path(result['run_dir'])/'result.json').is_file())
 
+    def test_elapsed_seconds_is_per_attempt(self):
+        import time
+        def run(argv, env, cwd, prompt, timeout):
+            time.sleep(.02)
+            if argv[0] == 'claude':
+                return h.ProcessResult(1, claude_result("You've hit your limit", True))
+            return h.ProcessResult(0, codex_result(self.review))
+        result = h.run_job(self.job, self.env, run)
+        attempts = json.loads((Path(result['run_dir'])/'result.json').read_text())['attempts']
+        self.assertGreaterEqual(attempts[0]['elapsed_seconds'], .01)
+        self.assertGreaterEqual(attempts[1]['elapsed_seconds'], .01)
+        self.assertLess(attempts[1]['elapsed_seconds'], attempts[0]['elapsed_seconds'] + .1)
+
     def test_auth_failure_never_falls_back(self):
         run=self.executor([h.ProcessResult(1,claude_result('Please run /login',True))])
         result=h.run_job(self.job,self.env,run)
@@ -260,6 +273,28 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual(r.code,126)
         self.assertIn('blocked',r.stderr)
 
+    def test_large_persistent_stdin_is_bounded_by_timeout(self):
+        import sys, time
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            started = time.monotonic()
+            r = h.execute([sys.executable, '-c', 'import time; time.sleep(30)'], dict(os.environ),
+                          Path.cwd(), 'x' * (1024 * 1024 * 8), .05,
+                          stdout_path=root/'out', stderr_path=root/'err', redaction_env={})
+            self.assertTrue(r.timed_out)
+            self.assertLess(time.monotonic() - started, 5)
+
+    def test_completed_state_retains_start_identity_after_reap(self):
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            state_path = Path(d) / 'state.json'
+            r = h.execute([sys.executable, '-c', 'print("done")'], {}, Path.cwd(), '', 3,
+                          state_path=state_path, redaction_env={})
+            self.assertEqual(r.code, 0)
+            state = json.loads(state_path.read_text())
+            self.assertIsNotNone(state.get('identity'))
+            self.assertIn('final_identity', state)
+
     def test_incremental_output_files_are_redacted(self):
         import sys
         with tempfile.TemporaryDirectory() as d:
@@ -360,3 +395,114 @@ class ReviewFixTests(unittest.TestCase):
             self.assertTrue(report['roots']['AGENTS_VAULT_ROOT']['exists'])
             serialized=json.dumps(report)
             self.assertNotIn('secret-value',serialized)
+
+    def test_terminal_root_provenance_is_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); vault = root/'vault'; vault.mkdir()
+            env = {'AGENTS_ROOT': str(root), 'AGENTS_VAULT_ROOT': str(vault)}
+            with unittest.mock.patch.object(h, 'execute', return_value=h.ProcessResult(127, stderr='missing')):
+                report = h.doctor(env, {}, False, environment_mode='terminal')
+            self.assertEqual(report['roots']['AGENTS_ROOT']['provenance'], 'terminal_environment')
+
+    def test_review_verdict_is_persisted_atomically_with_attempt(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); work = root/'work'; vault = root/'vault'; work.mkdir(); vault.mkdir()
+            job = h.Job(work, vault, 'Review')
+            review = json.dumps({'verdict': 'request_changes', 'findings': [{'issue': 'bug'}], 'limitations': []})
+            result = h.run_job(job, {'PATH': os.environ.get('PATH', ''), 'HOME': str(root)},
+                               lambda *args: h.ProcessResult(0, claude_result(review)))
+            record = json.loads((Path(result['run_dir'])/'result.json').read_text())
+            self.assertEqual(record['status'], 'review_findings')
+            self.assertEqual(record['attempts'][0]['status'], 'review_findings')
+
+    def test_structurally_corrupt_result_is_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); work = root/'work'; vault = root/'vault'; work.mkdir(); vault.mkdir()
+            run_dir = vault/'existing'; run_dir.mkdir()
+            (run_dir/'result.json').write_text('[]')
+            job = h.Job(work, vault, 'Review')
+            result = h.resume_job(job, run_dir, {'PATH': os.environ.get('PATH', ''), 'HOME': str(root)},
+                                  lambda *args: self.fail('provider must not run'))
+            self.assertEqual(result['error'], 'corrupt_result_record')
+            self.assertEqual((run_dir/'result.json').read_text(), '[]')
+
+    def test_resume_rejects_persisted_workspace_mismatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); work_a = root/'a'; work_b = root/'b'; vault = root/'vault'
+            work_a.mkdir(); work_b.mkdir(); vault.mkdir()
+            run_dir = vault/'existing'; run_dir.mkdir()
+            h.save(run_dir/'result.json', {'run_dir': str(run_dir), 'workspace': str(work_a),
+                                           'mode': 'review', 'status': 'running', 'attempts': []}, {})
+            job = h.Job(work_b, vault, 'Review')
+            result = h.resume_job(job, run_dir, {'PATH': os.environ.get('PATH', ''), 'HOME': str(root)},
+                                  lambda *args: self.fail('provider must not run'))
+            self.assertEqual(result['error'], 'workspace_mismatch')
+
+    def test_timeout_context_index_is_terminal(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); work = root/'work'; vault = root/'vault'; work.mkdir(); vault.mkdir()
+            job = h.Job(work, vault, 'Review')
+            result = h.run_job(job, {'PATH': os.environ.get('PATH', ''), 'HOME': str(root)},
+                               lambda *args: h.ProcessResult(124, timed_out=True))
+            index = json.loads((Path(result['run_dir'])/'context-index.json').read_text())
+            self.assertEqual(result['status'], 'timeout')
+            self.assertTrue(index['complete'])
+            self.assertEqual(index['truncation'], 'none')
+
+    def test_resume_reconciles_captured_terminal_output_before_retry(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); work = root/'work'; vault = root/'vault'; work.mkdir(); vault.mkdir()
+            run_dir = vault/'existing'; run_dir.mkdir()
+            text = json.dumps({'verdict': 'approve', 'findings': [], 'limitations': []})
+            h.save(run_dir/'result.json', {'run_dir': str(run_dir), 'workspace': str(work),
+                                           'mode': 'review', 'status': 'running',
+                                           'attempts': [{'provider': 'claude', 'status': 'running'}]}, {})
+            h.save(run_dir/'0-claude-state.json', {'run_dir': str(run_dir), 'attempt': 0,
+                                                   'provider': 'claude', 'status': 'running',
+                                                   'pid': 99999999, 'identity': {'command': 'dead'}}, {})
+            h.save(run_dir/'0-claude-stdout.jsonl', claude_result(text), {})
+            h.save(run_dir/'0-claude-stderr.log', '', {})
+            job = h.Job(work, vault, 'Review')
+            calls = []
+            result = h.resume_job(job, run_dir, {'PATH': os.environ.get('PATH', ''), 'HOME': str(root)},
+                                  lambda *args: calls.append(args))
+            self.assertEqual(result['status'], 'completed')
+            self.assertEqual(calls, [])
+            record = json.loads((run_dir/'result.json').read_text())
+            self.assertTrue(record['attempts'][0]['reconciled_from_output'])
+
+    def test_resume_reconciles_terminal_state_when_result_save_was_interrupted(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); work = root/'work'; vault = root/'vault'; work.mkdir(); vault.mkdir()
+            run_dir = vault/'existing'; run_dir.mkdir()
+            text = json.dumps({'verdict': 'request_changes', 'findings': [{'issue': 'bug'}], 'limitations': []})
+            h.save(run_dir/'result.json', {'run_dir': str(run_dir), 'workspace': str(work),
+                                           'mode': 'review', 'status': 'running',
+                                           'attempts': [{'provider': 'claude', 'status': 'running'}]}, {})
+            h.save(run_dir/'0-claude-state.json', {'run_dir': str(run_dir), 'attempt': 0,
+                                                   'provider': 'claude', 'status': 'review_findings',
+                                                   'pid': 99999999, 'identity': {'command': 'dead'},
+                                                   'exit_code': 0}, {})
+            h.save(run_dir/'0-claude-stdout.jsonl', claude_result(text), {})
+            h.save(run_dir/'0-claude-stderr.log', '', {})
+            job = h.Job(work, vault, 'Review')
+            calls = []
+            result = h.resume_job(job, run_dir, {'PATH': os.environ.get('PATH', ''), 'HOME': str(root)},
+                                  lambda *args: calls.append(args))
+            self.assertEqual(result['status'], 'review_findings')
+            self.assertEqual(calls, [])
+
+    def test_context_index_lists_output_before_provider_start(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); work = root/'work'; vault = root/'vault'; work.mkdir(); vault.mkdir()
+            job = h.Job(work, vault, 'Review')
+            observed = {}
+            def execute(argv, env, cwd, prompt, timeout):
+                run_dir = next(vault.rglob('result.json')).parent
+                observed['stdout'] = (run_dir/'0-claude-stdout.jsonl').exists()
+                observed['stderr'] = (run_dir/'0-claude-stderr.log').exists()
+                observed['index'] = [x['path'] for x in json.loads((run_dir/'context-index.json').read_text())['records']]
+                return h.ProcessResult(0, claude_result('OK'))
+            result = h.run_job(job, {'PATH': os.environ.get('PATH', ''), 'HOME': str(root)}, execute)
+            self.assertTrue(observed['stdout'] and observed['stderr'])
+            self.assertIn('0-claude-stdout.jsonl', observed['index'])
