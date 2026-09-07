@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+import errno
 import hashlib
 import json
 import os
@@ -22,7 +23,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Callable
 
 from .tasks import ConflictError, TaskStore
@@ -104,6 +105,7 @@ CREATE TABLE IF NOT EXISTS service_attempts (
   attempt_number INTEGER NOT NULL,
   pid INTEGER,
   identity TEXT,
+  run_dir TEXT,
   status TEXT NOT NULL,
   started_at TEXT NOT NULL,
   ended_at TEXT,
@@ -123,8 +125,9 @@ class WorkspaceLock:
         self.lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         workspace_key = hashlib.sha256(str(self.workspace).encode()).hexdigest()
         resource_key = hashlib.sha256(str(resource).encode()).hexdigest()
-        self.paths = [self.lock_root / "workspace" / f"{workspace_key}.lock",
-                      self.lock_root / "resource" / f"{resource_key}.lock"]
+        self.paths = [self.lock_root / "workspace" / f"{workspace_key}.lock"]
+        if resource != "default":
+            self.paths.append(self.lock_root / "resource" / f"{resource_key}.lock")
         self.path = self.paths[0]
         self._files = []
 
@@ -193,14 +196,20 @@ class ServiceStore:
         else:
             path = Path(db_path)
         self.db_path = Path(path)
+        if self.db_path.is_symlink():
+            raise ValueError(f"database path must not be a symlink: {self.db_path}")
+        if self.db_path.parent.is_symlink():
+            raise ValueError(f"database parent must not be a symlink: {self.db_path.parent}")
         self.db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not self.db_path.exists():
-            fd = os.open(self.db_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(self.db_path, flags, 0o600)
             os.close(fd)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.db_path, timeout=timeout, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA busy_timeout=15000")
+        busy_ms = max(1, int(float(timeout) * 1000))
+        self._conn.execute(f"PRAGMA busy_timeout={busy_ms}")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
         self._migrate_schema()
@@ -218,6 +227,8 @@ class ServiceStore:
         attempt_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(service_attempts)")}
         if "identity" not in attempt_columns:
             self._conn.execute("ALTER TABLE service_attempts ADD COLUMN identity TEXT")
+        if "run_dir" not in attempt_columns:
+            self._conn.execute("ALTER TABLE service_attempts ADD COLUMN run_dir TEXT")
 
     def _harden(self):
         for path in (self.db_path, Path(str(self.db_path) + "-wal"), Path(str(self.db_path) + "-shm")):
@@ -280,8 +291,30 @@ class ServiceStore:
             return "dead"
         except PermissionError:
             return "unknown"
-        except OSError:
+        except OSError as exc:
+            if getattr(exc, "errno", None) == errno.ESRCH:
+                return "dead"
             return "unknown"
+
+    def _attempt_state(self, row):
+        """Include a surviving runner/provider before reclaiming a service attempt."""
+        worker_state = self._pid_state(row["pid"], row["identity"])
+        if worker_state != "dead":
+            return worker_state
+        run_dir = row["attempt_run_dir"] or str(Path(row["run_dir"]) / f"attempt-{row['attempt_number']}")
+        for path in Path(run_dir).glob("*-state.json"):
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, ValueError, TypeError):
+                return "unknown"
+            if not isinstance(record, dict):
+                return "unknown"
+            if record.get("status") not in ("starting", "running"):
+                continue
+            provider_state = self._pid_state(record.get("pid"), record.get("identity"))
+            if provider_state in ("alive", "unknown"):
+                return provider_state
+        return "dead"
 
     def recover_stale_jobs(self, reconciler=None):
         """Reconcile only jobs whose recorded worker is definitely dead.
@@ -290,22 +323,22 @@ class ServiceStore:
         reconciler runs while both resource locks are held before retrying.
         """
         with self._lock:
-            rows = list(self._conn.execute("SELECT j.*,a.id AS attempt_id,a.pid,a.identity,a.attempt_number,a.status AS attempt_status FROM service_jobs j JOIN service_attempts a ON a.job_id=j.id AND a.status='running' WHERE j.state='running'"))
+            rows = list(self._conn.execute("SELECT j.*,a.id AS attempt_id,a.pid,a.identity,a.run_dir AS attempt_run_dir,a.attempt_number,a.status AS attempt_status FROM service_jobs j JOIN service_attempts a ON a.job_id=j.id AND a.status IN ('running','reconciling') WHERE j.state IN ('running','reconciling')"))
         recovered = []
         for row in rows:
-            if self._pid_state(row["pid"], row["identity"]) != "dead":
+            if self._attempt_state(row) != "dead":
                 continue
             lock = WorkspaceLock(row["workspace"], self.tasks.agents_root / ".local" / "service-locks", row["resource"])
             if not lock.acquire(blocking=False):
                 continue
             try:
                 with self.tx() as conn:
-                    current = conn.execute("SELECT * FROM service_jobs WHERE id=? AND state='running'", (row["id"],)).fetchone()
+                    current = conn.execute("SELECT * FROM service_jobs WHERE id=? AND state IN ('running','reconciling')", (row["id"],)).fetchone()
                     if current is None:
                         continue
                     stamp = now()
                     conn.execute("UPDATE service_jobs SET state='reconciling',last_error=?,updated_at=? WHERE id=?", ("worker died; read-only reconciliation in progress", stamp, row["id"]))
-                    conn.execute("UPDATE service_attempts SET status='reconciling',ended_at=?,error=? WHERE id=? AND status='running'", (stamp, "worker process is definitely dead", row["attempt_id"]))
+                    conn.execute("UPDATE service_attempts SET status='reconciling',ended_at=?,error=? WHERE id=? AND status IN ('running','reconciling')", (stamp, "worker process is definitely dead", row["attempt_id"]))
                 try:
                     result = (reconciler or default_reconciler)(self._job(current), row)
                 except Exception as exc:
@@ -318,13 +351,36 @@ class ServiceStore:
                 task = self.tasks.get_task(row["task_id"])
                 if task is not None:
                     try:
-                        self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="needs_verification")
+                        self.tasks.update_task(task["id"], expected_version=task["version"],
+                                               execution_status="running" if state == "retry" else "needs_verification")
                     except ConflictError:
                         pass
                 recovered.append({"job_id": row["id"], "state": state})
             finally:
                 lock.release()
         return recovered
+
+    def recover_interrupted_verification(self):
+        """Return verification attempts interrupted with the service process."""
+        with self.tx() as conn:
+            rows = list(conn.execute("SELECT id FROM service_jobs WHERE state='verifying'"))
+            stamp = now()
+            for row in rows:
+                conn.execute("UPDATE service_jobs SET state='needs_verification',last_error=?,updated_at=? WHERE id=?", ("verification interrupted; retrying independent read-only review", stamp, row["id"]))
+                conn.execute("UPDATE service_attempts SET status='needs_verification' WHERE job_id=? AND status='verifying'", (row["id"],))
+        return [row["id"] for row in rows]
+
+    def _start_verification(self, job_id):
+        with self.tx() as conn:
+            changed = conn.execute("UPDATE service_jobs SET state='verifying',updated_at=? WHERE id=? AND state='needs_verification'", (now(), job_id)).rowcount
+            if changed:
+                conn.execute("UPDATE service_attempts SET status='verifying' WHERE job_id=? AND status='needs_verification'", (job_id,))
+            return changed == 1
+
+    def _reset_verification(self, job_id, diagnostic):
+        with self.tx() as conn:
+            conn.execute("UPDATE service_jobs SET state='needs_verification',last_error=?,updated_at=? WHERE id=? AND state='verifying'", (diagnostic, now(), job_id))
+            conn.execute("UPDATE service_attempts SET status='needs_verification',error=? WHERE job_id=? AND status='verifying'", (diagnostic, job_id))
 
     def _job(self, row):
         if row is None:
@@ -408,12 +464,35 @@ class ServiceStore:
             if row is None: return None
             task = self.tasks.get_task(row["task_id"])
             if task is None or not self._dependencies_ready(task): return None
-            attempt = row["attempts_count"] + 1; stamp = now()
+            previous = conn.execute(
+                "SELECT * FROM service_attempts WHERE job_id=? ORDER BY attempt_number DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            resume = False
+            if previous is not None and previous["status"] == "retry" and previous["result_json"]:
+                try:
+                    resume = json.loads(previous["result_json"]).get("safe_to_resume") is True
+                except (TypeError, ValueError, AttributeError):
+                    resume = False
+            attempt = row["attempts_count"] if resume else row["attempts_count"] + 1; stamp = now()
             conn.execute("UPDATE service_jobs SET state='running',attempts_count=?,updated_at=?,last_error=NULL WHERE id=?", (attempt, stamp, job_id))
-            aid = f"attempt_{hashlib.sha256(f'{job_id}:{attempt}'.encode()).hexdigest()[:24]}"
-            conn.execute("INSERT INTO service_attempts VALUES (?,?,?,?,?,?,?,?,?,?)", (aid, job_id, attempt, os.getpid(), json.dumps(self._process_identity(os.getpid())), "running", stamp, None, None, None))
+            if resume:
+                aid = previous["id"]
+                attempt_run_dir = previous["run_dir"] or str(Path(row["run_dir"]) / f"attempt-{attempt}")
+                conn.execute("""UPDATE service_attempts
+                    SET pid=?,identity=?,status='running',started_at=?,ended_at=NULL,error=NULL
+                    WHERE id=?""", (os.getpid(), json.dumps(self._process_identity(os.getpid())), stamp, aid))
+            else:
+                aid = f"attempt_{hashlib.sha256(f'{job_id}:{attempt}'.encode()).hexdigest()[:24]}"
+                attempt_run_dir = str(Path(row["run_dir"]) / f"attempt-{attempt}")
+                conn.execute("""INSERT INTO service_attempts
+                    (id,job_id,attempt_number,pid,identity,run_dir,status,started_at,ended_at,result_json,error)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (aid, job_id, attempt, os.getpid(),
+                    json.dumps(self._process_identity(os.getpid())), attempt_run_dir, "running", stamp,
+                    None, None, None))
             claimed = dict(conn.execute("SELECT * FROM service_jobs WHERE id=?", (job_id,)).fetchone())
             claimed["attempt_id"] = aid
+            claimed["attempt_run_dir"] = attempt_run_dir
             return claimed
 
     def _claim_next(self):
@@ -461,24 +540,32 @@ class ServiceStore:
         return {"status": terminal, "job_id": job["id"], "attempt": attempt_no}
 
     def run_once(self, executor: Callable | None = None, verifier: Callable | None = None):
-        if executor is None:
-            self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"))
         job = self._claim_next()
         if job is None:
             blocked = any(self.tasks.get_task(row["task_id"]) is not None and not self._dependencies_ready(self.tasks.get_task(row["task_id"])) for row in self._ready_rows())
             return {"status": "blocked" if blocked else "idle", **({"reason": "dependencies"} if blocked else {})}
         lock = job.pop("_lock")
         try:
-            if executor is None: executor = default_executor
+            if executor is None:
+                try:
+                    self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"))
+                except Exception as exc:
+                    return self._finish_attempt(job, result={"status": "failed", "text": str(exc)}, error=str(exc))
+                executor = default_executor
             try:
-                result = executor({"job_id": job["id"], "task_id": job["task_id"], "workspace": job["workspace"], "run_dir": job["run_dir"], "attempt_id": job["attempt_id"], "attempt": job["attempts_count"], "agents_root": str(self.tasks.agents_root), "vault_root": str(self.tasks.vault_root), "prompt": job["prompt"], "context": job["context"], "model": job["model"], "effort": job["effort"], "timeout": job["timeout"], "updates": self.get_job(job["id"])["updates"]})
+                latest = self.get_job(job["id"])
+                result = executor({"job_id": job["id"], "task_id": job["task_id"], "workspace": job["workspace"], "run_dir": job.get("attempt_run_dir") or str(Path(job["run_dir"]) / f"attempt-{job['attempts_count']}"), "attempt_id": job["attempt_id"], "attempt": job["attempts_count"], "agents_root": str(self.tasks.agents_root), "vault_root": str(self.tasks.vault_root), "prompt": job["prompt"], "context": job["context"], "model": job["model"], "effort": job["effort"], "timeout": job["timeout"], "updates": latest["updates"]})
             except Exception as exc:
                 return self._finish_attempt(job, result={"status": "failed", "text": str(exc)}, error=str(exc))
             outcome = self._finish_attempt(job, result=result)
             if outcome["status"] == "needs_verification" and verifier is not None:
+                started = self._start_verification(job["id"])
+                if not started:
+                    return outcome
                 try:
                     return self.verify_with_agent(job["id"], verifier)
                 except Exception as exc:
+                    self._reset_verification(job["id"], str(exc))
                     return {"status": "needs_verification", "job_id": job["id"], "verification_error": str(exc)}
             return outcome
         finally:
@@ -508,19 +595,45 @@ class ServiceStore:
         try:
             result = verifier({"job": job, "task": self.tasks.get_task(job["task_id"]), "agents_root": str(self.tasks.agents_root), "vault_root": str(self.tasks.vault_root)})
         except Exception as exc:
+            self._reset_verification(job_id, str(exc))
             return {"status": "needs_verification", "job_id": job_id, "verification_error": str(exc)}
+        findings = result.get("findings", []) if isinstance(result, dict) else []
+        if findings:
+            links = tuple(item for item in (result.get("evidence_links", []) if isinstance(result, dict) else []) if isinstance(item, str))
+            for finding in findings:
+                message = finding if isinstance(finding, str) else json.dumps(finding, ensure_ascii=False, sort_keys=True)
+                self.record_update(job_id, "Verification finding adopted: " + message, links)
+            with self.tx() as conn:
+                conn.execute("UPDATE service_jobs SET state='retry',next_attempt_at=?,last_error=?,updated_at=? WHERE id=?", (now(), "verification findings require repair", now(), job_id))
+                conn.execute("UPDATE service_attempts SET status='repair_required' WHERE job_id=? AND attempt_number=(SELECT MAX(attempt_number) FROM service_attempts WHERE job_id=?)", (job_id, job_id))
+            task = self.tasks.get_task(job["task_id"])
+            if task is not None:
+                try:
+                    self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="running")
+                except ConflictError:
+                    pass
+            return {"status": "retry", "job_id": job_id, "verification": result, "repair_required": True}
         if not isinstance(result, dict) or not result.get("acceptance") or not result.get("merge") or not result.get("main_sync"):
+            self._reset_verification(job_id, "verification criteria remain incomplete")
             return {"status": "needs_verification", "job_id": job_id, "verification": result or {}}
         evidence = result.get("evidence")
         if not evidence:
+            self._reset_verification(job_id, "verification returned no evidence")
             return {"status": "needs_verification", "job_id": job_id, "verification": result}
         proof = f"{evidence};merge;main-sync"
-        return {"status": "verified", "job_id": job_id, "job": self.verify(job_id, proof), "verification": result}
+        try:
+            verified = self.verify(job_id, proof)
+        except Exception as exc:
+            self._reset_verification(job_id, str(exc))
+            return {"status": "needs_verification", "job_id": job_id, "verification": result,
+                    "verification_error": str(exc)}
+        return {"status": "verified", "job_id": job_id, "job": verified, "verification": result}
 
     def verify_pending(self, verifier):
         outcomes = []
         for job in self.list_jobs("needs_verification"):
-            outcomes.append(self.verify_with_agent(job["id"], verifier))
+            if self._start_verification(job["id"]):
+                outcomes.append(self.verify_with_agent(job["id"], verifier))
         return outcomes
 
     @staticmethod
@@ -564,7 +677,7 @@ def default_executor(spec):
 
 def default_reconciler(job, attempt):
     """Read only receipt reconciliation after a definitely dead worker."""
-    run_dir = Path(job["run_dir"])
+    run_dir = Path(attempt.get("attempt_run_dir") or attempt.get("run_dir") or job["run_dir"])
     result_file = run_dir / "result.json"
     if not result_file.is_file():
         return {"safe_to_resume": False, "reason": "no durable result receipt; reconciliation required"}
@@ -578,17 +691,69 @@ def default_reconciler(job, attempt):
 
 
 def default_verifier(spec):
-    """A separate, read-only evidence stage that can be replaced by an agent."""
+    """Use an actual read-only subscription Codex turn for acceptance review."""
     task = spec["task"]
-    evidence = [str(item).lower() for item in task.get("completion_evidence", []) + task.get("evidence_links", [])]
-    acceptance = bool(task.get("acceptance_records")) and all(item["verified"] for item in task["acceptance_records"])
-    merged = any(re.search(r"\bmerge(?:d)?\b", item) or "pull request" in item or "/pull/" in item for item in evidence)
-    synced = any(("main" in item and "sync" in item) or "merged" in item for item in evidence)
-    if acceptance and merged and synced:
-        return {"acceptance": True, "merge": True, "main_sync": True,
-                "evidence": "verified:" + task["id"] + ";merge;main-sync"}
-    return {"acceptance": acceptance, "merge": merged, "main_sync": synced,
-            "reason": "acceptance, merge, or main-sync evidence is incomplete", "evidence": None}
+    env = load_agents_env(Path(spec["agents_root"]) / ".env")
+    ServiceStore.auth_guard(env)
+    prompt = json.dumps({
+        "task": task,
+        "job": spec["job"],
+        "instructions": (
+            "Act as an independent read-only verifier. Inspect the workspace, saved execution result and artifacts, "
+            "the task acceptance criteria, current git status/log, and the public commit/merge/main synchronization. "
+            "Do not edit files, run write commands, or infer completion from words alone. Return JSON only: "
+            "{acceptance:boolean, merge:boolean, main_sync:boolean, findings:[objects], evidence:string, "
+            "evidence_links:[strings]}. Every acceptance claim must cite observed evidence. "
+            "Use findings for any missing or incorrect implementation and explain the repair required."
+        ),
+    }, ensure_ascii=False)
+    argv = ["codex", "exec", "--ignore-user-config", "--ephemeral", "--json",
+            "--skip-git-repo-check", "-m", "gpt-5.6-luna", "-s", "read-only",
+            "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="low"',
+            "--disable", "multi_agent", "-"]
+    try:
+        result = subprocess.run(argv, input=prompt, env=env, cwd=spec["job"]["workspace"],
+                                capture_output=True, text=True, timeout=min(float(spec["job"].get("timeout", 300)), 300))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AuthError(f"verification agent unavailable: {type(exc).__name__}") from exc
+    if result.returncode:
+        raise AuthError("verification agent did not complete")
+    messages = []
+    completed = None
+    for line in result.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        item = event.get("item")
+        if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
+            if isinstance(item.get("text"), str): messages.append(item["text"])
+        if event.get("type") == "turn.completed": completed = event
+    # Current subscription CLI emits a completed event with no status field;
+    # returncode=0 plus that terminal event is its success signal. Explicit
+    # failure statuses remain rejected.
+    if completed is None or (completed.get("status") not in (None, "completed", "success", "succeeded")):
+        raise AuthError("verification agent turn did not complete successfully")
+    text = "\n".join(messages).strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", text, flags=re.S)
+    candidate = fenced.group(1) if fenced else text
+    try:
+        value = json.loads(candidate)
+    except (TypeError, ValueError) as exc:
+        match = re.search(r"\{.*\}", candidate, flags=re.S)
+        if not match:
+            raise ValueError("verification agent returned malformed JSON") from exc
+        try:
+            value = json.loads(match.group(0))
+        except (TypeError, ValueError) as nested:
+            raise ValueError("verification agent returned malformed JSON") from nested
+    if not isinstance(value, dict) or not all(isinstance(value.get(key), bool) for key in ("acceptance", "merge", "main_sync")):
+        raise ValueError("verification agent omitted boolean acceptance verdict")
+    if not isinstance(value.get("findings", []), list):
+        raise ValueError("verification agent findings must be a list")
+    return value
 
 
 class Scheduler:
@@ -607,26 +772,62 @@ class Scheduler:
             if self._prepared:
                 return
             self.store.recover_stale_jobs(self.reconciler)
-            if self.verification_executor is not None:
-                self.store.verify_pending(self.verification_executor)
+            self.store.recover_interrupted_verification()
             self._prepared = True
 
     def run_once(self, executor=None):
         self._prepare()
-        return self.store.run_once(executor=executor, verifier=self.verification_executor)
+        result = self.store.run_once(executor=executor, verifier=None)
+        if result.get("status") == "needs_verification" and self.verification_executor is not None:
+            if not self.store._start_verification(result["job_id"]):
+                return result
+            try:
+                return self.store.verify_with_agent(result["job_id"], self.verification_executor)
+            except Exception as exc:
+                self.store._reset_verification(result["job_id"], str(exc))
+                return {"status": "needs_verification", "job_id": result["job_id"], "verification_error": str(exc)}
+        return result
 
     def run_forever(self, executor=None):
-        pool = ThreadPoolExecutor(max_workers=self.worker_capacity, thread_name_prefix="agents-worker")
+        worker_pool = ThreadPoolExecutor(max_workers=self.worker_capacity, thread_name_prefix="agents-worker")
+        verification_pool = (ThreadPoolExecutor(max_workers=max(1, self.coordinator_reserved), thread_name_prefix="agents-verifier")
+                             if self.verification_executor is not None else None)
+        workers = {}
+        verifiers = {}
         try:
+            self._prepare()
             while not self.stop_event.is_set():
-                futures = [pool.submit(self.run_once, executor) for _ in range(self.worker_capacity)]
-                results = [future.result() for future in futures]
-                if self.verification_executor is not None:
-                    self.store.verify_pending(self.verification_executor)
-                if all(result["status"] in ("idle", "blocked", "retry", "needs_verification") for result in results):
+                while len(workers) < self.worker_capacity:
+                    future = worker_pool.submit(self.store.run_once, executor, None)
+                    workers[future] = True
+                if verification_pool is not None:
+                    for job in self.store.list_jobs("needs_verification"):
+                        if job["id"] not in verifiers and len(verifiers) < max(1, self.coordinator_reserved):
+                            if self.store._start_verification(job["id"]):
+                                verifiers[job["id"]] = verification_pool.submit(self.store.verify_with_agent, job["id"], self.verification_executor)
+                all_futures = list(workers) + list(verifiers.values())
+                if not all_futures:
+                    self._wait(self.poll_interval)
+                    continue
+                done, _ = wait(all_futures, timeout=self.poll_interval, return_when=FIRST_COMPLETED)
+                completed_results = []
+                for future in done:
+                    workers.pop(future, None)
+                    for job_id, verifier_future in list(verifiers.items()):
+                        if verifier_future is future:
+                            verifiers.pop(job_id, None)
+                            break
+                    try:
+                        completed_results.append(future.result())
+                    except Exception:
+                        completed_results.append({"status": "retry"})
+                if completed_results and all(result.get("status") in ("idle", "blocked", "retry", "needs_verification")
+                                             for result in completed_results if isinstance(result, dict)):
                     self._wait(self.poll_interval)
         finally:
-            pool.shutdown(wait=True)
+            worker_pool.shutdown(wait=True)
+            if verification_pool is not None:
+                verification_pool.shutdown(wait=True)
         return "stopped"
 
 

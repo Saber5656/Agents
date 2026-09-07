@@ -34,8 +34,12 @@ The default model is `gpt-5.6-luna` with `low` effort. `timeout` applies to
 one attempt; it is not a whole-task timeout. Failures remain retryable with
 durable exponential backoff and no fixed whole-task retry count. A successful
 provider result moves the job to `needs_verification`. It does not mark the
-task complete. Call `verify` with completion evidence only after all task
-acceptance records have been explicitly verified.
+task complete. The service then uses a separate reserved verification slot for an
+actual read-only Codex Luna/low review of the acceptance criteria, saved result
+and artifacts, workspace state, and public merge/main synchronization. A verifier
+finding is recorded as a durable update and returns the job to `retry` so the next
+attempt receives the latest instruction. Call `verify` with completion evidence
+only after all task acceptance records have been explicitly verified.
 
 ```sh
 python3 -m harness.service run-once --json
@@ -67,23 +71,28 @@ operator evidence. An expired lease alone is not evidence that a live worker
 stopped, and the batch layer must hold its process-lifetime flock around
 external create/reconcile operations to prevent overlapping creates.
 
-Each attempt acquires a workspace lock and a separate global resource lock.
-This excludes two resources in one workspace and the same resource in
-different workspaces. The scheduler uses a bounded worker pool; one configured
-coordinator slot is reserved from the worker capacity, and idle waits use an
-event rather than busy polling.
+Each attempt has a stable directory under the job run directory (`attempt-N`),
+and the latest recorded updates are passed into that attempt. Only a dead attempt
+is resumed after read-only receipt and surviving provider inspection; a live or
+unknown runner/provider remains occupied. Each attempt acquires a workspace
+lock. An explicit shared resource also acquires a global resource lock; the
+default resource does not serialize unrelated workspaces. The scheduler uses
+bounded worker and reserved verification pools, replenishes free slots as
+futures complete, and idle waits use an event rather than busy polling.
 
 The idle loop waits through a stop event rather than polling in a busy loop.
-The scheduler database retains attempts, updates, errors, and the next retry
-time across process restarts.
+The scheduler database retains attempts, updates, errors, verification and
+reconciliation states, and the next retry time across process restarts. Database
+busy timeout follows the configured `timeout`; an explicitly supplied database
+path whose file or immediate parent is a symlink is rejected.
 
 ## Authentication boundary
 
 The production worker requires `codex login status` to succeed and rejects
 API-key or API-base-url routes, including `OPENAI_API_KEY`,
-`OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL`. It has no
-paid-inference fallback. Tests may inject an executor and an auth check; that
-does not change the production guard.
+`OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, and
+`CODEX_API_KEY`. It has no paid-inference fallback. Tests may inject an
+executor and an auth check; that does not change the production guard.
 
 ## launchd
 

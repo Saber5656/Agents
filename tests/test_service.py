@@ -13,7 +13,7 @@ from unittest import mock
 
 from harness.tasks import TaskStore
 from harness.service import (AuthError, ServiceStore, WorkspaceLock,
-                             Scheduler, Launchd, load_agents_env)
+                             Scheduler, Launchd, default_verifier, load_agents_env)
 
 
 class ServiceTests(unittest.TestCase):
@@ -72,6 +72,48 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "retry")
         self.assertEqual(self.service.get_job(job["id"])["attempts_count"], 2)
 
+    def test_attempts_use_distinct_run_dirs_and_latest_updates(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)
+        seen = []
+        self.service.run_once(executor=lambda spec: (seen.append(spec) or {"status": "failed", "text": "retry"}))
+        self.service.record_update(job["id"], "latest correction", ["vault://latest"])
+        self.service.run_once(executor=lambda spec: (seen.append(spec) or {"status": "failed", "text": "retry"}))
+        self.assertNotEqual(seen[0]["run_dir"], seen[1]["run_dir"])
+        self.assertEqual(seen[1]["updates"][-1]["message"], "latest correction")
+
+    def test_auth_failure_finishes_claim_with_persisted_retry(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)
+        with mock.patch.object(self.service, "auth_guard", side_effect=AuthError("not logged in")):
+            result = self.service.run_once()
+        self.assertEqual(result["status"], "retry")
+        detail = self.service.get_job(job["id"])
+        self.assertEqual(detail["state"], "retry")
+        self.assertEqual(detail["attempts"][0]["status"], "retry")
+        self.assertIn("not logged in", detail["last_error"])
+
+    def test_safe_reconciliation_resumes_same_attempt_directory(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        claimed = self.service._claim_next(); claimed["_lock"].release()
+        with self.service.tx() as conn:
+            conn.execute("UPDATE service_attempts SET pid=?,identity=? WHERE job_id=?",
+                         (99999999, json.dumps({"pid": 99999999}), job["id"]))
+        self.assertEqual(self.service.recover_stale_jobs(
+            lambda *_: {"safe_to_resume": True, "reason": "receipt is resumable"}),
+            [{"job_id": job["id"], "state": "retry"}])
+        seen = []
+        self.service.run_once(executor=lambda spec: (seen.append(spec) or {"status": "failed"}))
+        self.assertEqual(seen[0]["attempt"], 1)
+        self.assertTrue(seen[0]["run_dir"].endswith("attempt-1"))
+        self.assertEqual(len(self.service.list_attempts(job["id"])), 1)
+
+    def test_default_resource_allows_parallel_workspaces(self):
+        lockdir = self.root / "locks"
+        first = WorkspaceLock(self.workspace, lockdir)
+        second = WorkspaceLock(self.root / "other", lockdir)
+        self.assertTrue(first.acquire(blocking=False))
+        self.assertTrue(second.acquire(blocking=False))
+        first.release(); second.release()
+
     def test_restart_keeps_live_running_attempt_and_reconciles_dead_attempt(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
         claimed = self.service._claim_next()
@@ -94,6 +136,35 @@ class ServiceTests(unittest.TestCase):
             conn.execute("UPDATE service_attempts SET pid=? WHERE job_id=?", (99999999, job["id"]))
         recovered = self.service.recover_stale_jobs(lambda *_: (_ for _ in ()).throw(RuntimeError("receipt unavailable")))
         self.assertEqual(recovered[0]["state"], "needs_verification")
+        self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
+
+    def test_recovery_detects_surviving_provider_in_dead_worker_attempt(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        claimed = self.service._claim_next(); claimed["_lock"].release()
+        run_dir = Path(claimed["attempt_run_dir"]); run_dir.mkdir(parents=True)
+        identity = self.service._process_identity(os.getpid())
+        (run_dir / "0-codex-state.json").write_text(json.dumps({
+            "status": "running", "pid": os.getpid(), "identity": identity}))
+        with self.service.tx() as conn:
+            conn.execute("UPDATE service_attempts SET pid=?, identity=? WHERE job_id=?", (99999999, json.dumps({"pid": 99999999}), job["id"]))
+        self.assertEqual(self.service.recover_stale_jobs(lambda *_: {"safe_to_resume": True}), [])
+        self.assertEqual(self.service.get_job(job["id"])["state"], "running")
+
+    def test_reconciling_job_is_recovered_after_service_interruption(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        claimed = self.service._claim_next(); claimed["_lock"].release()
+        with self.service.tx() as conn:
+            conn.execute("UPDATE service_jobs SET state='reconciling' WHERE id=?", (job["id"],))
+            conn.execute("UPDATE service_attempts SET status='reconciling',pid=? WHERE job_id=?", (99999999, job["id"]))
+        recovered = self.service.recover_stale_jobs(lambda *_: {"safe_to_resume": True, "reason": "receipt ok"})
+        self.assertEqual(recovered[0]["state"], "retry")
+
+    def test_verification_interruption_returns_to_verification_queue(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.service._start_verification(job["id"])
+        self.assertEqual(self.service.get_job(job["id"])["state"], "verifying")
+        self.assertEqual(self.service.recover_interrupted_verification(), [job["id"]])
         self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
 
     def test_workspace_process_lock_blocks_second_owner_and_releases_on_exit(self):
@@ -127,6 +198,48 @@ class ServiceTests(unittest.TestCase):
         result = scheduler.run_once(executor=lambda _: {"status": "completed", "text": "provider success"})
         self.assertEqual(result["status"], "verified")
         self.assertEqual(self.service.get_job(job["id"])["state"], "completed")
+
+    def test_verifier_findings_are_recorded_and_return_to_repair(self):
+        task = self.tasks.create_task(purpose="verify findings", acceptance_evidence=["accepted"])
+        self.tasks.add_acceptance_evidence(task["id"], "accepted", verified=True)
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        result = Scheduler(self.service, verification_executor=lambda spec: {
+            "acceptance": False, "merge": False, "main_sync": False,
+            "findings": [{"issue": "missing test"}], "evidence": None,
+        }).run_once(executor=lambda _: {"status": "completed", "text": "provider success"})
+        self.assertEqual(result["status"], "retry")
+        self.assertEqual(self.service.get_job(job["id"])["state"], "retry")
+        self.assertIn("Verification finding adopted", self.service.get_job(job["id"])["updates"][-1]["message"])
+
+    def test_default_verifier_requires_codex_terminal_and_inspects_saved_context(self):
+        task = self.tasks.create_task(purpose="verify actual", acceptance_evidence=["A test passes"])
+        self.tasks.add_acceptance_evidence(task["id"], "A test passes", verified=True)
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        events = "\n".join([
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({
+                "acceptance": True, "merge": True, "main_sync": True,
+                "findings": [], "evidence": "observed test and merged commit", "evidence_links": []})}}),
+            json.dumps({"type": "turn.completed", "status": "completed", "usage": {"input_tokens": 3}}),
+        ])
+        with mock.patch("harness.service.subprocess.run") as run:
+            run.side_effect = [mock.Mock(returncode=0, stdout="Logged in using ChatGPT", stderr=""),
+                               mock.Mock(returncode=0, stdout=events, stderr="")]
+            value = default_verifier({"job": self.service.get_job(job["id"]), "task": self.tasks.get_task(task["id"]),
+                                      "agents_root": str(self.root), "vault_root": str(self.vault)})
+        self.assertTrue(value["acceptance"])
+        command = run.call_args_list[1].args[0]
+        self.assertIn("read-only", command)
+
+    def test_verification_without_evidence_is_requeued(self):
+        task = self.tasks.create_task(purpose="verify incomplete", acceptance_evidence=["accepted"])
+        self.tasks.add_acceptance_evidence(task["id"], "accepted", verified=True)
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.service._start_verification(job["id"])
+        result = self.service.verify_with_agent(job["id"], lambda _: {
+            "acceptance": True, "merge": True, "main_sync": True, "findings": []})
+        self.assertEqual(result["status"], "needs_verification")
+        self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
 
     def test_verify_requires_merge_and_main_sync_evidence(self):
         task = self.tasks.create_task(purpose="verify evidence", acceptance_evidence=["accepted"])
@@ -189,6 +302,28 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(scheduler.run_forever(executor=lambda _: {"status": "completed"}), "stopped")
         self.assertEqual(calls, [60])
 
+    def test_idle_run_does_not_poll_authentication(self):
+        with mock.patch.object(self.service, "auth_guard", side_effect=AssertionError("auth must wait for work")):
+            self.assertEqual(self.service.run_once(executor=None)["status"], "idle")
+
+    def test_service_db_busy_timeout_honors_constructor(self):
+        other = ServiceStore(self.root / "short.sqlite3", self.tasks, timeout=0.125)
+        try:
+            value = other._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            self.assertEqual(value, 125)
+        finally:
+            other.close()
+
+    def test_service_rejects_symlink_database_parent(self):
+        target = self.root / "real"; target.mkdir()
+        link = self.root / "link"
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError:
+            self.skipTest("symlink unavailable")
+        with self.assertRaises(ValueError):
+            ServiceStore(link / "service.sqlite3", self.tasks)
+
     def test_launchd_plist_has_absolute_python_and_no_secret_values(self):
         plist = Launchd(self.root, self.root / "service.sqlite3").generate("com.example.agents")
         self.assertIn(sys.executable, plist)
@@ -223,6 +358,8 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError): load_agents_env(path, {})
         with self.assertRaises(AuthError):
             self.service.auth_guard({"OPENAI_API_KEY": "secret"}, login_check=lambda _: True)
+        with self.assertRaises(AuthError):
+            self.service.auth_guard({"CODEX_API_KEY": "secret"}, login_check=lambda _: True)
         with mock.patch("harness.service.subprocess.run", return_value=mock.Mock(returncode=0, stdout="Logged in using API key", stderr="")):
             with self.assertRaises(AuthError): self.service.auth_guard({})
         with mock.patch("harness.service.subprocess.run", return_value=mock.Mock(returncode=0, stdout="Logged in using ChatGPT", stderr="")):
