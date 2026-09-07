@@ -25,6 +25,7 @@ python3 -m harness gh -- auth status --active
 
 - 通常は `SHELL` の zsh/bash を対話ログインモードで一度起動し、その環境を CLI に渡す。PATH、HOME、設定先、既存の認証用環境変数を保持する。
 - 診断は現在の環境と選択した環境の差、CLI の実体・バージョン、認証状態を表示する。秘密値は表示しない。
+- 診断には `AGENTS_ROOT`、`SKILLS_ROOT`、`AGENTS_VAULT_ROOT` の実効パス、存在確認、`env_file` / current environment の provenance、読み込んだ共通指示の所在を含める。
 - `--probe` は Claude Sonnet にツールなしの短い推論を一度依頼する。ログイン状態が存在しても推論が401になる事例を検出するため、少量の利用枠を消費する。
 - ログインシェルも呼び出し元の環境を継承する。既に設定された古いトークンは、シェル起動だけでは消えない。alias/function は環境変数とは異なり、実行対象として取り込まない。
 - `GH_TOKEN` / `GITHUB_TOKEN` は保存済みの GitHub 認証を上書きし得る。Claude でも API key や OAuth token の環境変数が保存済みログインより優先され得る。診断を基に、意図した認証元をターミナルで確認する。
@@ -47,6 +48,14 @@ python3 -m harness review --provider codex --workspace "$AGENTS_ROOT" \
   --prompt-file "$AGENTS_VAULT_ROOT/review-request.md" --role tech-security
 ```
 
+既存の実行記録を再開する場合は、Vault 内の run directory を明示する。実行中の provider process が生きている間は同じ作業を二重起動せず、終了済みなら保存済み state と途中出力を確認してから再開する。
+
+```sh
+python3 -m harness run --workspace "$AGENTS_ROOT" \
+  --prompt-file "$AGENTS_VAULT_ROOT/request.md" \
+  --run-dir "$AGENTS_VAULT_ROOT/01-Projects/agent-runs/<run-id>" --resume
+```
+
 レビュー担当は通常 `tech-reviewer`。指定があればその role を使用する。レビュー対象の実施許可を再質問せず、不足情報は返却する JSON の `limitations` に記録する。
 
 | 項目 | 動作 |
@@ -59,7 +68,11 @@ python3 -m harness review --provider codex --workspace "$AGENTS_ROOT" \
 | Codex 作業 | workspace-write sandbox と `approval_policy=never` |
 | 待機 | CLI プロセス内で完了を待機。モデルによる短周期の進捗確認なし |
 | 実行上限 | `--timeout` は両 provider 合計の時間。タイムアウト時はプロセス群を終了 |
-| 記録 | Vault 内 `01-Projects/agent-runs/` に依頼・コマンド・stdout・stderr・変更状態・結果・使用量を保存 |
+| 記録 | Vault 内 `01-Projects/agent-runs/` に依頼・コマンド・stdout・stderr・state・変更状態・結果・使用量を保存。主要記録は同一ディレクトリ内で atomic/private save |
+
+provider の stdout / stderr は実行中から redaction collector を通して記録するため、親 runner の終了後も既に出力された内容を復元できる。`context-index.json` は利用可能な raw record と実行中・完了状態を列挙し、`result.json` は process identity と reconciliation 結果を保持する。壊れた結果 record は上書きせず `incomplete` として返す。
+
+`requested_model` は設定値、`actual_model` は provider が明示的に返した値だけを記録する。provider が model identity や usage を返さない場合、要求値や推定値で補わず `null` / `provider_did_not_report` とする。usage の集計は provider が報告した numeric fields のみを合算する。
 
 Claude は `--safe-mode`、Codex は `--ignore-user-config` で旧カスタマイズを持ち込まず、共通方針と指定 role を明示的に渡す。Claude の `--bare` は保存済み OAuth/Keychain を使わないため採用しない。これらの設定は今回の子プロセスだけに適用し、既存の CLI 設定ファイルは変更しない。Claude の管理者ポリシーは引き続き適用される。
 
