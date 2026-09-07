@@ -28,10 +28,16 @@ python3 -m harness.delivery sync --repo "$AGENTS_ROOT" \
 Merge requires live discovery of rules and branch protection, current successful
 checks, current head/base, and no unresolved current review thread or change
 request. Failed/unavailable discovery is incomplete. All review-thread pages are
-read. A previously merged matching PR is read back without another mutation.
+read twice around the final PR observation; a changed thread set requires a fresh
+review. The target branch name is verified even when branch OIDs match. Required
+check producer IDs are retained and matched against paginated authenticated
+check-run metadata for the reviewed head. A previously merged matching PR is
+read back without another mutation.
 The GitHub operation pins the expected head and respects native protection;
 GitHub has no atomic base-OID condition on this operation. Do not claim a merge
-queue or atomic base pin. A pending remote outcome must be reconciled before retry.
+queue, atomic base pin or atomic review-thread lock. Native conversation
+resolution protection is necessary for server-side enforcement against a review
+arriving after the last read; local reobservation alone cannot eliminate that race. A pending remote outcome must be reconciled before retry.
 
 Main sync verifies origin, requires the intended clean attached branch, fetches
 and checks that remote main contains the merge, then fast-forwards. Dirty,
