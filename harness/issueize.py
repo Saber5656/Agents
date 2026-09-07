@@ -410,8 +410,9 @@ class IssueizationBatch:
         path = self._receipt_path(task_id)
         try:
             value = json.loads(path.read_text())
-            if not isinstance(value, dict):
-                raise ValueError("receipt must be an object")
+            if (not isinstance(value, dict) or value.get('task_id') != task_id
+                    or value.get('status') not in {'prepare','creating','linking','ambiguous','incomplete','linked','retry'}):
+                raise ValueError("receipt identity or state is invalid")
             return value
         except FileNotFoundError:
             return None
@@ -522,8 +523,10 @@ class IssueizationBatch:
         except ReceiptCorruptError as exc:
             return self._mark_corrupt_receipt(candidate, exc)
         existing = None
-        uncertain_receipt = bool(receipt and receipt.get("status") in
+        uncertain_receipt = bool((receipt and receipt.get("status") in
                                   ("creating", "linking", "ambiguous", "incomplete", "linked"))
+                                 or candidate.get('issueization_state') == 'ambiguous'
+                                 or (candidate.get('reconciliation_required') and not receipt))
         if candidate.get("reconciliation_required"):
             # Inspect the remote while the expired token still identifies the
             # old attempt, then transition it to ambiguous under our lifetime

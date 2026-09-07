@@ -96,6 +96,27 @@ class IssueizationTests(unittest.TestCase):
         return [self.store.create_task(purpose=f"follow-up-{i}", repository="org/repo")
                 for i in range(count)]
 
+
+    def test_structurally_corrupt_receipt_never_creates(self):
+        task=self.make_tasks(1)[0];remote=FakeGitHub();agent=FakeAgent()
+        batch=IssueizationBatch(self.store,remote,agent,env=self.env)
+        receipt=batch._receipt_path(task['id']);receipt.parent.mkdir(parents=True)
+        receipt.write_text('{}')
+        result=batch.run()
+        self.assertEqual(remote.creates,0)
+        self.assertEqual(result['incomplete'],1)
+        self.assertEqual(receipt.read_text(),'{}')
+
+    def test_ambiguous_state_without_receipt_never_creates(self):
+        task=self.make_tasks(1)[0];remote=FakeGitHub();agent=FakeAgent()
+        claim=self.store.claim_issueization(task['id'],'lost')
+        self.store.mark_issueization_ambiguous(task['id'],claim['claim_token'],'unknown remote effect')
+        batch=IssueizationBatch(self.store,remote,agent,env=self.env)
+        result=batch.run()
+        self.assertEqual(remote.creates,0)
+        self.assertEqual(agent.calls,[])
+        self.assertEqual(result['ambiguous'],1)
+
     def test_three_unissued_tasks_and_one_issued_are_processed(self):
         tasks = self.make_tasks()
         issued = self.store.create_task(purpose="already", repository="org/repo")
@@ -228,13 +249,13 @@ class IssueizationTests(unittest.TestCase):
         self.assertEqual(remote.creates, 1)
         self.assertEqual(self.store.get_task(task["id"])["issueization_state"], "retry")
 
-    def test_expired_claim_is_reconciled_before_reclaim(self):
+    def test_expired_claim_without_receipt_cannot_prove_create_was_unsent(self):
         task = self.make_tasks(1)[0]
         claim = self.store.claim_issueization(task["id"], "dead-batch", lease_seconds=-1)
         remote, agent = FakeGitHub(), FakeAgent()
         result = IssueizationBatch(self.store, remote, agent, owner="live-batch").run()
-        self.assertEqual(result["issued"], 1)
-        self.assertEqual(remote.creates, 1)
+        self.assertEqual(result["ambiguous"], 1)
+        self.assertEqual(remote.creates, 0)
 
     def test_public_draft_requires_english_and_stable_marker(self):
         draft = parse_draft({"title": "Fix parser", "body": "Explain behavior.",
