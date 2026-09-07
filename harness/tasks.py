@@ -211,6 +211,14 @@ class TaskStore:
         self.db_path = Path(db_path)
         if not self._memory:
             self.db_path.parent.mkdir(mode=0o700, exist_ok=True)
+            # Create privately before SQLite can create a journal; preserve the
+            # permissions of an explicitly selected shared parent directory.
+            flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(self.db_path, flags, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(":memory:" if self._memory else self.db_path,
                                      timeout=timeout, check_same_thread=False)
@@ -249,7 +257,6 @@ class TaskStore:
         # The database may be supplied in an already-existing permissive
         # directory. Keep the store and SQLite sidecars private regardless of
         # the process umask or the directory's previous mode.
-        self.db_path.parent.chmod(0o700)
         for path in (self.db_path, Path(str(self.db_path) + "-wal"), Path(str(self.db_path) + "-shm")):
             if path.exists():
                 path.chmod(0o600)

@@ -29,6 +29,12 @@ class StoreTests(unittest.TestCase):
     def store(self):
         return TaskStore(self.db)
 
+    def test_explicit_database_keeps_parent_permissions(self):
+        self.root.chmod(0o755)
+        with self.store():
+            self.assertEqual(0o755, stat.S_IMODE(self.root.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(self.db.stat().st_mode))
+
     def test_roots_are_required_and_no_vault_is_guessed(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ConfigurationError):
@@ -200,7 +206,7 @@ class StoreTests(unittest.TestCase):
         store = TaskStore(db_path)
         store.create_task(purpose="private")
         store.close()
-        self.assertEqual(stat.S_IMODE(db_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(db_dir.stat().st_mode), 0o755)
         for path in db_dir.glob("tasks.sqlite3*"):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600, path)
 
