@@ -51,7 +51,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual('Use $AGENTS_ROOT.',public_text('Use $AGENTS_ROOT.',english=True))
 
     def state(self):
-        return {'number':1,'state':'OPEN','isDraft':False,'headRefOid':'a'*40,'baseRefOid':'b'*40,
+        return {'number':1,'baseRefName':'main','state':'OPEN','isDraft':False,'headRefOid':'a'*40,'baseRefOid':'b'*40,
             'reviewDecision':'','mergeable':'MERGEABLE','statusCheckRollup':[
                 {'name':'test','status':'COMPLETED','conclusion':'SUCCESS'}]}
 
@@ -80,6 +80,57 @@ class DeliveryTests(unittest.TestCase):
         state=self.state()|{'state':'MERGED','mergeCommit':{'oid':'d'*40}}
         with patch.object(client,'pr',return_value=state), patch('harness.delivery.command') as sent:
             self.assertEqual(state,client.merge(1,'a'*40,'b'*40))
+            sent.assert_not_called()
+
+
+    def test_home_directory_without_child_is_private(self):
+        for home in ['/'.join(['', 'home', 'fixture']), '/'.join(['', 'Users', 'fixture']),
+                     chr(92).join(['C:', 'Users', 'fixture'])]:
+            with self.subTest(home=home), self.assertRaises(DeliveryError):
+                public_text('Home: ' + home)
+
+    def test_sync_uses_fresh_fetch_without_tracking_refspec(self):
+        remote=self.root/'remote.git';git(self.root,'init','--bare',str(remote))
+        git(self.repo,'remote','add','origin',str(remote));git(self.repo,'push','origin','main')
+        git(self.repo,'config','--unset-all','remote.origin.fetch')
+        other=self.root/'other';git(self.root,'clone','--branch','main',str(remote),str(other))
+        git(other,'config','user.name','Fixture');git(other,'config','user.email','fixture@example.invalid')
+        (other/'b').write_text('new');git(other,'add','b');git(other,'commit','-m','new');git(other,'push','origin','main')
+        latest=git(other,'rev-parse','HEAD')
+        self.assertEqual(latest,sync_main(self.repo,'main',self.base,str(remote)))
+
+    def test_other_base_branch_never_mutates_even_with_same_oid(self):
+        client=GitHub('fixture/repository')
+        for status in ['OPEN','MERGED']:
+            state=self.state()|{'state':status,'baseRefName':'release','mergeCommit':{'oid':'d'*40}}
+            with patch.object(client,'pr',return_value=state), patch.object(client,'required_checks',return_value=[]), \
+                 patch.object(client,'threads',return_value=[]), patch('harness.delivery.command') as sent:
+                with self.assertRaises(DeliveryError):client.merge(1,'a'*40,'b'*40)
+                sent.assert_not_called()
+
+    def test_required_producer_cannot_be_impersonated_by_name(self):
+        state=self.state()
+        requirement={'context':'test','app_id':42}
+        state['checkRuns']=[{'name':'test','head_sha':'a'*40,'app':{'id':7},'conclusion':'SUCCESS'}]
+        with self.assertRaises(DeliveryError):merge_ready(state,'a'*40,'b'*40,[requirement],[])
+        state['checkRuns'][0]['app']['id']=42
+        merge_ready(state,'a'*40,'b'*40,[requirement],[])
+        state['checkRuns'][0]['head_sha']='c'*40
+        with self.assertRaises(DeliveryError):merge_ready(state,'a'*40,'b'*40,[requirement],[])
+
+    def test_required_check_discovery_preserves_producer_identity(self):
+        client=GitHub('fixture/repository')
+        rules=[{'type':'required_status_checks','parameters':{'required_status_checks':[{'context':'test','integration_id':42}]}}]
+        protection={'required_status_checks':{'contexts':['build'],'checks':[{'context':'build','app_id':7}]}}
+        with patch.object(client,'api',side_effect=[rules,{'protected':True},protection]):
+            self.assertEqual([{'context':'build','app_id':7},{'context':'test','app_id':42}],client.required_checks('main'))
+
+    def test_findings_added_after_final_pr_read_block_merge(self):
+        client=GitHub('fixture/repository');state=self.state()
+        with patch.object(client,'pr',return_value=state), patch.object(client,'required_checks',return_value=[]), \
+             patch.object(client,'threads',side_effect=[[],[{'id':'new','isResolved':False,'isOutdated':False}]]), \
+             patch('harness.delivery.command') as sent:
+            with self.assertRaises(DeliveryError):client.merge(1,'a'*40,'b'*40)
             sent.assert_not_called()
 
     def test_issue_marker_is_stable_and_english(self):

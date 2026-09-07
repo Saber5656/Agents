@@ -25,6 +25,7 @@ python3 -m harness gh -- auth status --active
 
 - 通常は `SHELL` の zsh/bash を対話ログインモードで一度起動し、その環境を CLI に渡す。PATH、HOME、設定先、既存の認証用環境変数を保持する。
 - 診断は現在の環境と選択した環境の差、CLI の実体・バージョン、認証状態を表示する。秘密値は表示しない。
+- `--environment terminal` で login shell から得た root は `terminal_environment` provenance として記録し、呼び出し元の環境と混同しない。
 - 診断には `AGENTS_ROOT`、`SKILLS_ROOT`、`AGENTS_VAULT_ROOT` の実効パス、存在確認、`env_file` / current environment の provenance、読み込んだ共通指示の所在を含める。
 - `--probe` は Claude Sonnet にツールなしの短い推論を一度依頼する。ログイン状態が存在しても推論が401になる事例を検出するため、少量の利用枠を消費する。
 - ログインシェルも呼び出し元の環境を継承する。既に設定された古いトークンは、シェル起動だけでは消えない。alias/function は環境変数とは異なり、実行対象として取り込まない。
@@ -70,7 +71,7 @@ python3 -m harness run --workspace "$AGENTS_ROOT" \
 | 実行上限 | `--timeout` は両 provider 合計の時間。タイムアウト時はプロセス群を終了 |
 | 記録 | Vault 内 `01-Projects/agent-runs/` に依頼・コマンド・stdout・stderr・state・変更状態・結果・使用量を保存。主要記録は同一ディレクトリ内で atomic/private save |
 
-provider の stdout / stderr は実行中から redaction collector を通して記録するため、親 runner の終了後も既に出力された内容を復元できる。`context-index.json` は利用可能な raw record と実行中・完了状態を列挙し、`result.json` は process identity と reconciliation 結果を保持する。壊れた結果 record は上書きせず `incomplete` として返す。
+provider の stdout / stderr は実行中から redaction collector を通して記録するため、親 runner の終了後も既に出力された内容を復元できる。再開時は終了済み provider の terminal output を先に照合し、成功記録があれば再実行せずに結果を確定する。`context-index.json` は利用可能な raw record と実行中・完了状態を列挙し、`result.json` は process identity と reconciliation 結果を保持する。壊れた結果 record は上書きせず `incomplete` として返す。stdin 配信も provider の実行 timeout の範囲で行う。
 
 `requested_model` は設定値、`actual_model` は provider が明示的に返した値だけを記録する。provider が model identity や usage を返さない場合、要求値や推定値で補わず `null` / `provider_did_not_report` とする。usage の集計は provider が報告した numeric fields のみを合算する。
 

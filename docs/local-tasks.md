@@ -51,7 +51,9 @@ current = store.update_task(
 
 A stale `expected_version` raises `ConflictError`, so a worker cannot silently
 overwrite a newer result. Execution status and issueization state are separate;
-linking an Issue does not mark execution complete.
+linking an Issue does not mark execution complete. Updating `expected_result`
+adds a revision, and a purpose update must remain nonblank. Duplicate
+acceptance capture preserves an existing verified record.
 
 ## Separate issueization batch API
 
@@ -75,9 +77,14 @@ except TimeoutError as error:
 ```
 
 `verified=True` is an explicit caller assertion that the batch read the remote
-record back; `readback={"repository": ..., "issue_id": ..., "url": ...}` can
-carry the checked values and is validated when supplied. The store never
-performs the remote read or Issue creation itself.
+record back; the URL must exactly be
+`https://github.com/{repository}/issues/{issue_id}`. A
+`readback={"repository": ..., "issue_id": ..., "url": ...}` object can carry
+the checked values and is validated when supplied. While a task is actively
+`claimed`, `claim_token` is mandatory for `link_issue`; an ambiguous task has
+no active token and may be linked only after the batch has read back the
+existing remote Issue. The store never performs the remote read or Issue
+creation itself.
 
 Issueization states are `unissued`, `claimed`, `ambiguous`, `retry`, and
 `issued`. A claim has an owner, token, expiry, attempt count, and diagnostic.
@@ -85,21 +92,33 @@ An expired claim is surfaced by `list_issueization_candidates()` with
 `reconciliation_required=True` and cannot be reclaimed by expiry alone. The
 batch must reconcile the remote outcome first (using `reconcile_expired_claim`)
 and must hold its process lifetime flock around external create/reconcile work
-so two live batches cannot create concurrently. An ambiguous remote result is retained and can be reconciled before a retry;
+so two live batches cannot create concurrently. An ambiguous remote result is
+retained and cannot be claimed directly: after a remote marker is found, link
+that existing Issue with verified readback; when no marker is found, call
+`retry_issueization()` and then claim the returned `retry` task. This prevents
+an uncertain remote create from being replayed blindly;
 the local task remains available when authentication, network, rate-limit, or
 agent-output failures occur. `import_existing_issue` and `import_backlog`
-link existing Issues without creating them.
+link existing Issues without creating them. Re-importing an existing Issue
+merges newly discovered acceptance criteria while retaining prior verified
+criteria.
 
 Tasks can have many Issue and PR links. `link_work_unit` joins any number of
 tasks, Issues, and PRs under one work unit while each task retains its own
 acceptance and completion evidence (`add_acceptance_evidence` with
-`verified=True`, and
-`add_completion_evidence`). `completion_report()` remains false when a linked
-unit, unverified acceptance result, acceptance result, or completion result is missing. Requirements are
-also durable records: use
+`verified=True`, and `add_completion_evidence`). `completion_report()` remains
+false when a linked unit, unverified acceptance result, acceptance result, or
+completion result is missing. For a requirement with acceptance criteria,
+every criterion must match a verified acceptance record on one of its linked
+tasks. Requirements are also durable records: use
 `create_requirement`, `link_requirement_task`, and `add_requirement_revision`
 to preserve all original requirements and later scope corrections through a
 partial completion or coordinator restart.
+
+The store keeps the SQLite file and sidecars private. An explicit database
+parent may be mode `0755`, but group- or world-writable parent directories are
+rejected because SQLite must not follow a pathname that another local user can
+replace.
 
 ## CLI
 

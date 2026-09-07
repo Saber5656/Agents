@@ -35,7 +35,7 @@ def oid(value):
 def public_text(text,env=None,english=False):
     if redact(text,env if env is not None else os.environ) != text:
         raise DeliveryError('Secret detected in selected public content')
-    if re.search(r'/(?:Users|home)/[^/\s]+/|[A-Za-z]:\\Users\\[^\\\s]+\\',text):
+    if re.search(r'/(?:Users|home)/[^/\s]+(?:/|(?=$|[\s]))|[A-Za-z]:\\Users\\[^\\\s]+(?:\\|(?=$|[\s]))',text):
         raise DeliveryError('Personal home path detected in selected public content')
     if english and re.search(r'[\u3040-\u30ff\u3400-\u9fff]',text):
         raise DeliveryError('Public title/body must be authored in English')
@@ -75,7 +75,7 @@ def sync_main(repo,branch,merge_sha,remote):
     if git(repo,'status','--porcelain=v1','-uall'):
         raise DeliveryError('Canonical checkout is dirty; preserve local state')
     git(repo,'fetch','origin',branch)
-    target=git(repo,'rev-parse','refs/remotes/origin/'+branch)
+    target=git(repo,'rev-parse','FETCH_HEAD')
     if git(repo,'merge-base',merge_sha,target)!=merge_sha:
         raise DeliveryError('Remote branch does not contain verified merge')
     if git(repo,'merge-base','HEAD',target)!=git(repo,'rev-parse','HEAD'):
@@ -95,15 +95,21 @@ def merge_ready(state,head,base,required,threads):
     if any(not r.get('isResolved') and not r.get('isOutdated') for r in threads):
         raise DeliveryError('Unresolved current review findings')
     checks=state.get('statusCheckRollup') or []
-    for name in required:
-        matches=[c for c in checks if (c.get('name') or c.get('context'))==name]
+    for requirement in required:
+        name=requirement if isinstance(requirement,str) else requirement['context']
+        app_id=None if isinstance(requirement,str) else requirement.get('app_id')
+        if app_id not in (None,-1):
+            matches=[c for c in state.get('checkRuns',[]) if c.get('name')==name
+                     and (c.get('app') or {}).get('id')==app_id and c.get('head_sha')==head]
+        else:
+            matches=[c for c in checks if (c.get('name') or c.get('context'))==name]
         if not matches:raise DeliveryError('Missing required check: '+name)
         for check in matches:
-            if check.get('conclusion') not in ('SUCCESS','NEUTRAL','SKIPPED') and check.get('state')!='SUCCESS':
+            if str(check.get('conclusion','')).upper() not in ('SUCCESS','NEUTRAL','SKIPPED') and str(check.get('state','')).upper()!='SUCCESS':
                 raise DeliveryError('Required check not successful: '+name)
     # A reported failed/pending check is not silently ignored even if unprotected.
     for check in checks:
-        if check.get('conclusion') not in ('SUCCESS','NEUTRAL','SKIPPED') and check.get('state')!='SUCCESS':
+        if str(check.get('conclusion','')).upper() not in ('SUCCESS','NEUTRAL','SKIPPED') and str(check.get('state','')).upper()!='SUCCESS':
             raise DeliveryError('Observed check not successful')
 
 
@@ -123,27 +129,38 @@ class GitHub:
 
     def pr(self,number):
         return json.loads(command(['gh','pr','view',str(number),'--repo',self.repo,'--json',
-            'number,state,isDraft,headRefOid,baseRefOid,reviewDecision,mergeable,statusCheckRollup,mergeCommit']))
+            'number,state,isDraft,headRefOid,baseRefOid,baseRefName,reviewDecision,mergeable,statusCheckRollup,mergeCommit']))
 
     def required_checks(self,branch):
         # Both modern rules and legacy branch protection must be observed.
         from urllib.parse import quote
         name=quote(branch,safe='');rules=self.api('rules/branches/'+name)
-        detail=self.api('branches/'+name);names=[]
+        detail=self.api('branches/'+name);requirements=[]
         for rule in rules:
             if rule['type']=='required_status_checks':
-                names.extend(x['context'] for x in rule['parameters']['required_status_checks'])
+                requirements.extend((x['context'],x.get('integration_id'))
+                    for x in rule['parameters']['required_status_checks'])
         if detail.get('protected'):
-            # An unavailable endpoint is an incomplete discovery, never zero checks.
+            # Unavailable discovery remains incomplete, never an empty policy.
             protection=self.api('branches/'+name+'/protection')
             required=protection.get('required_status_checks') or {}
-            names.extend(required.get('contexts',[]))
-            names.extend(x['context'] for x in required.get('checks',[]))
-        return sorted(set(names))
+            bound=required.get('checks',[])
+            requirements.extend((x['context'],x.get('app_id')) for x in bound)
+            requirements.extend((context,None) for context in required.get('contexts',[])
+                                if context not in {x['context'] for x in bound})
+        unique=set(requirements)
+        return [{'context':context,'app_id':app} for context,app in
+                sorted(unique,key=lambda item:(item[0],str(item[1])))]
+
+    def check_runs(self,head):
+        oid(head)
+        pages=json.loads(command(['gh','api','--paginate','--slurp',
+            f'repos/{self.repo}/commits/{head}/check-runs?per_page=100&filter=latest']))
+        return [run for page in pages for run in page['check_runs']]
 
     def threads(self,number):
         owner,name=self.repo.split('/')
-        query='''query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved isOutdated} pageInfo{hasNextPage endCursor}}}}}'''
+        query='''query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{id isResolved isOutdated} pageInfo{hasNextPage endCursor}}}}}'''
         rows=[];cursor=None
         while True:
             args=['gh','api','graphql','-f','query='+query,'-f','owner='+owner,'-f','name='+name,'-F','number='+str(number)]
@@ -157,18 +174,25 @@ class GitHub:
     def merge(self,number,head,base,branch='main'):
         oid(head);oid(base)
         first=self.pr(number)
+        if first.get('baseRefName')!=branch:raise DeliveryError('PR targets a different branch')
         if first['state']=='MERGED':
             if first['headRefOid']!=head:raise DeliveryError('Merged PR has different head')
             return first
         required=self.required_checks(branch)
         threads=self.threads(number)
         current=self.pr(number)
-        merge_ready(current,head,base,required,threads)
+        if current.get('baseRefName')!=branch:raise DeliveryError('PR targets a different branch')
+        if any(isinstance(r,dict) and r.get('app_id') not in (None,-1) for r in required):
+            current['checkRuns']=self.check_runs(head)
+        fresh_threads=self.threads(number)
+        if sorted(threads,key=lambda r:r.get('id',''))!=sorted(fresh_threads,key=lambda r:r.get('id','')):
+            raise DeliveryError('Review threads changed; reobserve before merge')
+        merge_ready(current,head,base,required,fresh_threads)
         # GitHub enforces native protection and the expected head. The API has no
         # compare-and-swap for base; do not claim an atomic base pin/queue guarantee.
         command(['gh','pr','merge',str(number),'--repo',self.repo,'--merge','--match-head-commit',head])
         result=self.pr(number)
-        if result['state']!='MERGED' or not result.get('mergeCommit'):
+        if result['state']!='MERGED' or not result.get('mergeCommit') or result.get('baseRefName')!=branch or result.get('headRefOid')!=head:
             raise DeliveryError('Merge pending; reconcile before retry')
         return result
 
