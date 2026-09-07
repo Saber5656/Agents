@@ -75,7 +75,7 @@ def sync_main(repo,branch,merge_sha,remote):
     if git(repo,'status','--porcelain=v1','-uall'):
         raise DeliveryError('Canonical checkout is dirty; preserve local state')
     git(repo,'fetch','origin',branch)
-    target=git(repo,'rev-parse','refs/remotes/origin/'+branch)
+    target=git(repo,'rev-parse','FETCH_HEAD')
     if git(repo,'merge-base',merge_sha,target)!=merge_sha:
         raise DeliveryError('Remote branch does not contain verified merge')
     if git(repo,'merge-base','HEAD',target)!=git(repo,'rev-parse','HEAD'):

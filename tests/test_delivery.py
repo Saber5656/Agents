@@ -89,6 +89,17 @@ class DeliveryTests(unittest.TestCase):
                 public_text('Home: ' + home)
 
 
+    def test_sync_uses_fresh_fetch_without_tracking_refspec(self):
+        remote=self.root/'remote.git';git(self.root,'init','--bare',str(remote))
+        git(self.repo,'remote','add','origin',str(remote));git(self.repo,'push','origin','main')
+        git(self.repo,'config','--unset-all','remote.origin.fetch')
+        other=self.root/'other';git(self.root,'clone','--branch','main',str(remote),str(other))
+        git(other,'config','user.name','Fixture');git(other,'config','user.email','fixture@example.invalid')
+        (other/'b').write_text('new');git(other,'add','b');git(other,'commit','-m','new');git(other,'push','origin','main')
+        latest=git(other,'rev-parse','HEAD')
+        self.assertEqual(latest,sync_main(self.repo,'main',self.base,str(remote)))
+
+
     def test_issue_marker_is_stable_and_english(self):
         body=issue_body('task-1','Expected result',['Run the fixture'])
         self.assertIn('<!-- agents-local-task:task-1 -->',body)
