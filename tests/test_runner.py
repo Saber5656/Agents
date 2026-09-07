@@ -87,6 +87,9 @@ class ClassifierTests(unittest.TestCase):
     def test_missing_terminal_result_not_success(self):
         self.assertEqual(h.classify('codex',event(type='thread.started'),' ',0).status,'failed')
 
+    def test_empty_claude_terminal_result_is_not_success(self):
+        self.assertEqual(h.classify('claude',claude_result(''),'',0).status,'failed')
+
     def test_codex_success(self):
         r=h.classify('codex',codex_result(),' ',0)
         self.assertEqual(r.status,'completed'); self.assertEqual(r.text,'OK')
@@ -181,6 +184,56 @@ class JobTests(unittest.TestCase):
         for p in Path(result['run_dir']).rglob('*'):
             if p.is_file(): self.assertNotIn(self.env['GH_TOKEN'],p.read_text())
 
+    def test_existing_live_process_is_not_duplicated(self):
+        run_dir=self.root/'vault'/'01-Projects'/'agent-runs'/'existing'
+        run_dir.mkdir(parents=True)
+        state={'status':'running','pid':os.getpid(),'identity':h.process_identity(os.getpid())}
+        h.save(run_dir/'0-claude-state.json',state,self.env)
+        h.save(run_dir/'result.json',{'run_dir':str(run_dir),'workspace':str(self.job.workspace),
+                                      'mode':'review','status':'running','attempts':[]},self.env)
+        calls=[]
+        result=h.run_job(self.job,self.env,lambda *args: calls.append(args),run_dir=run_dir)
+        self.assertEqual(result['status'],'running')
+        self.assertEqual(len(calls),0)
+        self.assertEqual(result['active_process']['status'],'alive')
+
+    def test_run_directory_lock_prevents_concurrent_launch(self):
+        import fcntl
+        run_dir=self.root/'vault'/'locked';run_dir.mkdir()
+        calls=[]
+        with (run_dir/'.runner.lock').open('a') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            r=h.run_job(self.job,self.env,lambda *args:calls.append(args),run_dir=run_dir)
+        self.assertEqual('running',r['status'])
+        self.assertEqual([],calls)
+
+    def test_resume_completed_preserves_terminal_status(self):
+        run=h.run_job(self.job,self.env,self.executor([h.ProcessResult(0,claude_result('{"verdict":"approve","findings":[],"limitations":[]}'))]))
+        calls=[]
+        resumed=h.resume_job(self.job,Path(run['run_dir']),self.env,lambda *args:calls.append(args))
+        self.assertEqual('completed',resumed['status'])
+        self.assertEqual([],calls)
+
+    def test_corrupt_persisted_result_is_explicitly_incomplete(self):
+        run_dir=self.root/'vault'/'01-Projects'/'agent-runs'/'corrupt'
+        run_dir.mkdir(parents=True)
+        (run_dir/'result.json').write_text('{"status":')
+        result=h.resume_job(self.job,run_dir,self.env,self.executor([]))
+        self.assertEqual(result['status'],'incomplete')
+        self.assertEqual(result['error'],'corrupt_result_record')
+
+    def test_corrupt_process_state_blocks_replacement(self):
+        run_dir=self.root/'vault'/'01-Projects'/'agent-runs'/'bad-state'
+        run_dir.mkdir(parents=True)
+        h.save(run_dir/'result.json',{'run_dir':str(run_dir),'workspace':str(self.job.workspace),
+                                      'mode':'review','status':'running','attempts':[]},self.env)
+        (run_dir/'0-claude-state.json').write_text('{"status":')
+        calls=[]
+        result=h.resume_job(self.job,run_dir,self.env,lambda *args: calls.append(args))
+        self.assertEqual(result['status'],'incomplete')
+        self.assertEqual(result['process_reconciliation'][0]['reason'],'corrupt_state_record')
+        self.assertEqual(len(calls),0)
+
 if __name__=='__main__': unittest.main()
 
 class ProcessTests(unittest.TestCase):
@@ -199,6 +252,55 @@ class ProcessTests(unittest.TestCase):
     def test_missing_executable(self):
         r=h.execute(['agents-test-nonexistent-executable'],dict(os.environ),Path.cwd(),'',1)
         self.assertEqual(r.code,127)
+
+    def test_startup_oserror_is_a_process_failure(self):
+        from unittest.mock import patch
+        with patch.object(h.subprocess, 'Popen', side_effect=PermissionError('blocked')):
+            r=h.execute(['blocked'],dict(os.environ),Path.cwd(),'',1)
+        self.assertEqual(r.code,126)
+        self.assertIn('blocked',r.stderr)
+
+    def test_incremental_output_files_are_redacted(self):
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            out=root/'stdout.jsonl'; err=root/'stderr.log'
+            env=dict(os.environ, GH_TOKEN='incremental-secret-value')
+            script="import sys,time; print('part incremental-secret-value', flush=True); print('problem incremental-secret-value', file=sys.stderr, flush=True); time.sleep(0.01)"
+            r=h.execute([sys.executable,'-c',script],env,Path.cwd(),'',2,
+                        stdout_path=out,stderr_path=err,redaction_env=env)
+            self.assertEqual(r.code,0)
+            self.assertTrue(out.is_file()); self.assertTrue(err.is_file())
+            self.assertNotIn('incremental-secret-value',out.read_text()+err.read_text())
+            self.assertIn('[REDACTED]',out.read_text()+err.read_text())
+
+    def test_stream_redacts_multiline_key_and_split_long_secret(self):
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); secret='S'*400
+            env=dict(os.environ, API_KEY=secret)
+            begin=('-'*5)+'BEGIN PRIVATE KEY'+('-'*5); end=('-'*5)+'END PRIVATE KEY'+('-'*5)
+            payload='\n'.join(['prefix',begin,'private-key-body',end,('x'*500)+secret,''])
+            script='import sys; sys.stdout.write('+repr(payload)+'); sys.stdout.flush()'
+            r=h.execute([sys.executable,'-c',script],env,Path.cwd(),'',3,
+                stdout_path=root/'out',stderr_path=root/'err',redaction_env=env)
+            self.assertEqual(0,r.code)
+            self.assertNotIn('private-key-body',r.stdout)
+            self.assertNotIn(secret,r.stdout)
+
+    def test_uninspectable_process_is_unknown_not_terminated(self):
+        from unittest.mock import patch
+        with patch.object(h.os,'kill',side_effect=PermissionError('not inspectable')):
+            result=h.reconcile_process({'pid':123,'identity':{'command':'worker'}})
+        self.assertEqual('unknown',result['status'])
+
+    def test_save_is_atomic_and_private(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'state.json'
+            h.save(p,{'status':'ok'},{})
+            self.assertEqual(json.loads(p.read_text())['status'],'ok')
+            self.assertEqual(p.stat().st_mode & 0o777,0o600)
+            self.assertFalse(any(x.name.startswith('.state.json.') for x in Path(d).iterdir()))
 
     def test_doctor_failed_inference_is_failure(self):
         from unittest.mock import patch
@@ -235,3 +337,26 @@ class ReviewFixTests(unittest.TestCase):
         probe=calls[-1]
         self.assertEqual(probe[probe.index('--tools')+1],'')
         self.assertNotIn('--allowedTools',probe)
+
+    def test_classify_keeps_actual_model_unknown_when_provider_omits_it(self):
+        result=h.classify('claude',claude_result(),'',0)
+        self.assertIsNone(result.actual_model)
+        self.assertFalse(result.model_verified)
+
+    def test_classify_records_provider_model_when_present(self):
+        result=h.classify('claude',claude_result(model='claude-sonnet-4-5'),'',0)
+        self.assertEqual(result.actual_model,'claude-sonnet-4-5')
+        self.assertTrue(result.model_verified)
+
+    def test_doctor_reports_root_provenance_without_secret_values(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); vault=root/'vault'; vault.mkdir()
+            env_file=root/'.env'; env_file.write_text('AGENTS_ROOT='+str(root)+'\nAGENTS_VAULT_ROOT='+str(vault)+'\nGH_TOKEN=secret-value\n')
+            env=h.load_dotenv(env_file,{'PATH':os.environ.get('PATH',''),'HOME':str(root)})
+            with patch.object(h,'execute',return_value=h.ProcessResult(127,stderr='missing')):
+                report=h.doctor(env,dict(os.environ),False,env_file=env_file)
+            self.assertEqual(report['roots']['AGENTS_ROOT']['provenance'],'env_file')
+            self.assertTrue(report['roots']['AGENTS_VAULT_ROOT']['exists'])
+            serialized=json.dumps(report)
+            self.assertNotIn('secret-value',serialized)
