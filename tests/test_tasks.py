@@ -26,6 +26,23 @@ class StoreTests(unittest.TestCase):
         self.addCleanup(self.patcher.stop)
         self.addCleanup(self.tmp.cleanup)
 
+
+    def test_private_database_beneath_sticky_temp_root_is_supported(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            path=Path(directory)/'tasks.sqlite3'
+            store=TaskStore(path)
+            try:
+                task=store.create_task(purpose='portable temp fixture')
+                self.assertEqual(store.get_task(task['id'])['purpose'],'portable temp fixture')
+            finally:store.close()
+
+    def test_database_parent_alias_is_canonicalized_before_sqlite_open(self):
+        real=self.root/'real';real.mkdir()
+        alias=self.root/'alias';alias.symlink_to(real,target_is_directory=True)
+        store=TaskStore(alias/'tasks.sqlite3')
+        try:self.assertEqual(store.db_path,real.resolve()/'tasks.sqlite3')
+        finally:store.close()
+
     def store(self):
         return TaskStore(self.db)
 

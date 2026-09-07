@@ -214,9 +214,14 @@ class TaskStore:
             parent = self.db_path.parent
             parent.mkdir(mode=0o700, exist_ok=True)
             current = parent.resolve()
+            self.db_path = current / self.db_path.name
+            immediate_parent = current
             while True:
-                mode = stat.S_IMODE(current.stat().st_mode)
-                if mode & 0o022:
+                info = current.stat()
+                mode = stat.S_IMODE(info.st_mode)
+                trusted_owner = not hasattr(os, "geteuid") or info.st_uid in (0, os.geteuid())
+                sticky_ancestor = current != immediate_parent and bool(mode & stat.S_ISVTX) and trusted_owner
+                if not trusted_owner or (mode & 0o022 and not sticky_ancestor):
                     raise ConfigurationError(f"database parent must not be writable by other users: {current}")
                 if current == current.parent:
                     break
