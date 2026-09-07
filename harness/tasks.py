@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import threading
 import uuid
 
@@ -210,20 +211,33 @@ class TaskStore:
         self._memory = str(db_path) == ":memory:"
         self.db_path = Path(db_path)
         if not self._memory:
-            self.db_path.parent.mkdir(mode=0o700, exist_ok=True)
+            parent = self.db_path.parent
+            parent.mkdir(mode=0o700, exist_ok=True)
+            current = parent.resolve()
+            while True:
+                mode = stat.S_IMODE(current.stat().st_mode)
+                if mode & 0o022:
+                    raise ConfigurationError(f"database parent must not be writable by other users: {current}")
+                if current == current.parent:
+                    break
+                current = current.parent
             # Create privately before SQLite can create a journal; preserve the
             # permissions of an explicitly selected shared parent directory.
             flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
             fd = os.open(self.db_path, flags, 0o600)
             try:
                 os.fchmod(fd, 0o600)
+                opened = os.fstat(fd)
+                actual = os.stat(self.db_path, follow_symlinks=False)
+                if (opened.st_dev, opened.st_ino) != (actual.st_dev, actual.st_ino):
+                    raise ConfigurationError("database path changed while opening")
             finally:
                 os.close(fd)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(":memory:" if self._memory else self.db_path,
                                      timeout=timeout, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA busy_timeout=15000")
+        self._conn.execute(f"PRAGMA busy_timeout={max(0, int(float(timeout) * 1000))}")
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
@@ -388,7 +402,9 @@ class TaskStore:
     def add_acceptance_evidence(self, task_id, evidence, *, verified=False):
         with self._tx() as conn:
             self._require_task(conn, task_id)
-            conn.execute("INSERT OR REPLACE INTO task_acceptance VALUES (?,?,?,?)",
+            conn.execute("""INSERT INTO task_acceptance(task_id,evidence,verified,created_at)
+                         VALUES (?,?,?,?) ON CONFLICT(task_id,evidence) DO UPDATE SET
+                         verified=MAX(task_acceptance.verified, excluded.verified)""",
                          (task_id, evidence, int(bool(verified)), _now()))
             conn.execute("UPDATE tasks SET version=version+1,updated_at=? WHERE id=?", (_now(), task_id))
         return self.get_task(task_id)
@@ -416,10 +432,16 @@ class TaskStore:
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError("unknown task fields: " + ", ".join(sorted(unknown)))
+        if "purpose" in fields and (not fields["purpose"] or not str(fields["purpose"]).strip()):
+            raise ValueError("purpose is required")
         if not fields:
             return self.get_task(task_id)
         with self._tx() as conn:
             self._require_task(conn, task_id)
+            if "expected_result" in fields:
+                current = conn.execute("SELECT expected_result FROM tasks WHERE id=?", (task_id,)).fetchone()
+                if fields["expected_result"] != current[0]:
+                    self._record_task_revision(conn, task_id, "expected_result", fields["expected_result"], _now())
             values = [fields[key] for key in fields]
             values += [_now(), task_id, expected_version]
             query = "UPDATE tasks SET " + ", ".join(f"{key}=?" for key in fields)
@@ -441,6 +463,9 @@ class TaskStore:
 
     def _ensure_work_unit(self, conn, work_unit, purpose=None):
         conn.execute("INSERT OR IGNORE INTO work_units VALUES (?,?,?)", (work_unit, purpose, _now()))
+        if purpose is not None and str(purpose).strip():
+            conn.execute("UPDATE work_units SET purpose=? WHERE id=? AND (purpose IS NULL OR TRIM(purpose)='')",
+                         (purpose, work_unit))
 
     def _ensure_issue(self, conn, repository, issue_id, issue_url, title=None, body=None):
         conn.execute("""INSERT INTO issues(repository,issue_id,issue_url,title,body,created_at)
@@ -467,7 +492,9 @@ class TaskStore:
             task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if task is None:
                 raise KeyError(f"unknown task: {task_id}")
-            if claim_token is not None and task["claim_token"] != claim_token:
+            if task["issueization_state"] == "claimed" and (not claim_token or task["claim_token"] != claim_token):
+                raise ConflictError("issueization claim is missing or stale")
+            if task["issueization_state"] != "claimed" and claim_token is not None and task["claim_token"] != claim_token:
                 raise ConflictError("issueization claim is missing or stale")
             self._ensure_issue(conn, repository, int(issue_id), issue_url, title, body)
             conn.execute("INSERT OR IGNORE INTO task_issues VALUES (?,?,?,?)",
@@ -494,7 +521,7 @@ class TaskStore:
             task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if task is None:
                 raise KeyError(f"unknown task: {task_id}")
-            if task["issueization_state"] == "issued" or task["issueization_state"] == "claimed":
+            if task["issueization_state"] not in ("unissued", "retry"):
                 raise IssueizationError(f"task is not claimable: {task['issueization_state']}")
             conn.execute("""UPDATE tasks SET issueization_state='claimed',claim_token=?,claim_owner=?,
                          claim_expires_at=?,issueization_attempts=issueization_attempts+1,
@@ -575,6 +602,7 @@ class TaskStore:
 
     def import_existing_issue(self, *, repository, issue_id, issue_url, title=None, body=None,
                               purpose=None, source="github-import", acceptance_evidence=None):
+        self._validate_issue_reference(repository, issue_id, issue_url)
         with self._tx() as conn:
             existing = conn.execute("""SELECT t.id FROM tasks t JOIN task_issues ti ON ti.task_id=t.id
                                       WHERE ti.repository=? AND ti.issue_id=? LIMIT 1""",
@@ -589,11 +617,24 @@ class TaskStore:
                              issueization_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)""",
                              (task_id, purpose, source, repository, "planned", "issued", now, now))
                 self._ensure_issue(conn, repository, int(issue_id), issue_url, title, body)
-                for evidence in dict.fromkeys(acceptance_evidence or []):
-                    conn.execute("INSERT INTO task_acceptance VALUES (?,?,0,?)", (task_id, evidence, now))
+            for evidence in dict.fromkeys(acceptance_evidence or []):
+                conn.execute("INSERT OR IGNORE INTO task_acceptance VALUES (?,?,0,?)", (task_id, evidence, _now()))
+            conn.execute("UPDATE tasks SET version=version+1,updated_at=? WHERE id=?", (_now(), task_id))
             conn.execute("INSERT OR IGNORE INTO task_issues VALUES (?,?,?,?)",
                          (task_id, repository, int(issue_id), _now()))
         return self.get_task(task_id)
+
+    @staticmethod
+    def _validate_issue_reference(repository, issue_id, issue_url):
+        try:
+            number = int(issue_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("repository, positive issue_id, and issue_url are required") from exc
+        if not repository or not str(repository).strip() or number <= 0 or not issue_url:
+            raise ValueError("repository, positive issue_id, and issue_url are required")
+        expected_url = f"https://github.com/{repository}/issues/{number}"
+        if issue_url != expected_url:
+            raise ValueError("issue_url must exactly identify the GitHub Issue")
 
     def import_backlog(self, path, *, default_repository=None):
         data = json.loads(Path(path).read_text())
@@ -720,6 +761,18 @@ class TaskStore:
                     missing_tasks.append({"task_id": task_id, "reason": "acceptance evidence not verified"})
                 elif not task["completion_evidence"]:
                     missing_tasks.append({"task_id": task_id, "reason": "completion evidence missing"})
+            for requirement in requirements:
+                verified_acceptance = {
+                    record["evidence"]
+                    for task_id in requirement["task_ids"]
+                    for record in (by_id.get(task_id) or {}).get("acceptance_records", [])
+                    if record["verified"]
+                }
+                for criterion in requirement["acceptance"]:
+                    if criterion not in verified_acceptance:
+                        missing_tasks.append({"requirement_id": requirement["id"],
+                                              "reason": "requirement acceptance not verified",
+                                              "acceptance": criterion})
             return {"complete": not missing_requirements and not missing_tasks,
                     "missing_requirements": missing_requirements, "missing_tasks": missing_tasks,
                     "requirements": requirements}
