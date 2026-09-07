@@ -48,9 +48,12 @@ class FakeGitHub:
         self.creates = 0
         self.lock = threading.Lock()
         self.fail_create = None
+        self.hide_from_listing = False
 
     def list_issues(self, repository):
         with self.lock:
+            if self.hide_from_listing:
+                return []
             return [dict(issue) for issue in self.issues]
 
     def create_issue(self, repository, title, body):
@@ -135,9 +138,84 @@ class IssueizationTests(unittest.TestCase):
         self.assertEqual(self.store.get_task(task["id"])["issueization_state"], "ambiguous")
         receipt = self.vault / "01-Projects" / "issueization" / "receipts" / f"{task['id']}.json"
         self.assertEqual(json.loads(receipt.read_text())["status"], "ambiguous")
+        remote.hide_from_listing = True
         second = IssueizationBatch(self.store, remote, agent, owner="batch-b").run()
-        self.assertEqual(second["issued"], 1)
+        self.assertEqual(second["ambiguous"], 1)
         self.assertEqual(remote.creates, 1)
+        remote.hide_from_listing = False
+        third = IssueizationBatch(self.store, remote, agent, owner="batch-c").run()
+        self.assertEqual(third["issued"], 1)
+        self.assertEqual(remote.creates, 1)
+
+    def test_corrupt_receipt_is_preserved_and_never_creates(self):
+        task = self.make_tasks(1)[0]
+        receipt = self.vault / "01-Projects" / "issueization" / "receipts" / f"{task['id']}.json"
+        receipt.parent.mkdir(parents=True)
+        original = "{corrupt receipt"
+        receipt.write_text(original)
+        remote, agent = FakeGitHub(), FakeAgent()
+        result = IssueizationBatch(self.store, remote, agent, owner="batch-a").run()
+        self.assertEqual(result["incomplete"], 1)
+        self.assertEqual(remote.creates, 0)
+        self.assertEqual(agent.calls, [])
+        self.assertEqual(receipt.read_text(), original)
+        self.assertEqual(self.store.get_task(task["id"])["issueization_state"], "ambiguous")
+
+    def test_remote_readback_body_mismatch_stays_incomplete(self):
+        task = self.make_tasks(1)[0]
+        remote, agent = FakeGitHub(), FakeAgent()
+        remote.create_issue = mock.Mock(side_effect=lambda repository, title, body: {
+            "number": 1, "title": title, "body": body,
+            "html_url": f"https://github.com/{repository}/issues/1"})
+        remote.read_issue = mock.Mock(return_value={
+            "number": 1, "title": "altered", "body": "<!-- agents-local-task:%s --> altered" % task["id"],
+            "html_url": "https://github.com/org/repo/issues/1"})
+        result = IssueizationBatch(self.store, remote, agent, owner="batch-a").run()
+        self.assertEqual(result["incomplete"], 1)
+        self.assertEqual(self.store.get_task(task["id"])["issueization_state"], "ambiguous")
+
+    def test_codex_jsonl_requires_successful_turn_completion(self):
+        agent = CodexDraftAgent(env={})
+        task = {"id": "task_1", "purpose": "test"}
+        with mock.patch("harness.issueize.subprocess.run") as run:
+            run.side_effect = [mock.Mock(returncode=0, stdout="Logged in using ChatGPT", stderr=""),
+                               mock.Mock(returncode=0, stdout=json.dumps({
+                                   "type": "item.completed", "item": {"type": "agent_message", "text": "{}"}}),
+                                          stderr="")]
+            with self.assertRaises(DraftError):
+                agent.draft(task)
+
+    def test_codex_observation_keeps_redacted_prompt_streams_and_usage(self):
+        agent = CodexDraftAgent(env={"SECRET_TOKEN": "supersecret"})
+        task = {"id": "task_1", "purpose": "test"}
+        artifact_dir = self.root / "vault" / "private-agent-runs"
+        events = "\n".join([
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message",
+                        "text": json.dumps({"title": "Fix parser", "body": "Explain behavior.",
+                                             "acceptance": ["A test passes."]})}}),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 2, "output_tokens": 3}}),
+        ])
+        with mock.patch("harness.issueize.subprocess.run") as run:
+            run.side_effect = [mock.Mock(returncode=0, stdout="Logged in using ChatGPT", stderr=""),
+                               mock.Mock(returncode=0, stdout=events, stderr="supersecret")]
+            result = agent.draft(task, artifact_dir=artifact_dir)
+        self.assertIn('"title": "Fix parser"', result)
+        files = list(artifact_dir.glob("*.json"))
+        self.assertEqual(len(files), 1)
+        observation = json.loads(files[0].read_text())
+        self.assertEqual(observation["usage"]["output_tokens"], 3)
+        self.assertNotIn("supersecret", observation["stderr"])
+        self.assertNotIn("actual_model", observation)
+        with mock.patch("harness.issueize.subprocess.run") as run:
+            run.side_effect = [mock.Mock(returncode=0, stdout="Logged in using ChatGPT", stderr=""),
+                               mock.Mock(returncode=0, stdout=json.dumps({
+                                   "type": "turn.completed", "status": "failed"}), stderr="")]
+            with self.assertRaises(DraftError):
+                agent.draft(task)
+
+    def test_codex_api_key_is_rejected(self):
+        with self.assertRaises(SubscriptionBoundaryError):
+            CodexDraftAgent(env={"CODEX_API_KEY": "secret"})
 
     def test_auth_failure_and_malformed_agent_output_remain_retryable(self):
         task = self.make_tasks(1)[0]

@@ -59,6 +59,14 @@ class RemoteNetworkError(AmbiguousRemoteError):
     pass
 
 
+class ReadbackMismatchError(RemoteMalformedError):
+    """The remote object exists but is not the exact persisted public draft."""
+
+
+class ReceiptCorruptError(IssueizationErrorBase):
+    """A durable receipt exists but cannot be parsed safely."""
+
+
 @dataclass(frozen=True)
 class IssueDraft:
     title: str
@@ -134,6 +142,7 @@ _PAID_ROUTE_KEYS = {
     "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE",
     "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "CODEX_API_KEY",
 }
 
 
@@ -144,27 +153,47 @@ def validate_subscription_environment(env):
             "paid API credentials/routes are not allowed: " + ", ".join(present))
 
 
-def _codex_text(output: str) -> str:
-    """Extract agent messages from Codex JSONL while retaining direct JSON mocks."""
-    try:
-        value = json.loads(output.strip())
-        if isinstance(value, dict) and {"title", "body", "acceptance"}.issubset(value):
-            return output
-    except (ValueError, TypeError):
-        pass
+def _codex_result(output: str):
+    """Extract agent messages only from a successfully completed Codex turn."""
     messages = []
+    completion = None
     for line in output.splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(event, dict):
+            continue
         item = event.get("item") if isinstance(event, dict) else None
         if event.get("type") == "item.completed" and isinstance(item, dict):
             if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
                 messages.append(item["text"])
+        if event.get("type") == "turn.completed":
+            completion = event
+    if completion is None:
+        raise DraftError("Codex did not report turn.completed")
+    status = completion.get("status")
+    if status is not None and status not in ("completed", "success", "succeeded"):
+        raise DraftError("Codex turn did not complete successfully")
     if not messages:
         raise DraftError("Codex returned no agent message")
-    return "\n".join(messages)
+    return "\n".join(messages), completion.get("usage")
+
+
+def _codex_usage(output: str):
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "turn.completed":
+            return event.get("usage")
+    return None
+
+
+def _codex_text(output: str) -> str:
+    """Compatibility helper returning the validated Codex agent text."""
+    return _codex_result(output)[0]
 
 
 class CodexDraftAgent:
@@ -177,7 +206,36 @@ class CodexDraftAgent:
         self.env = dict(env or os.environ)
         validate_subscription_environment(self.env)
 
-    def draft(self, task):
+    def _verify_subscription_login(self):
+        try:
+            result = subprocess.run(["codex", "login", "status"], env=self.env,
+                                    capture_output=True, text=True, timeout=min(self.timeout, 30))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AuthorizationError(f"Codex login status unavailable: {type(exc).__name__}") from exc
+        detail = redact((result.stdout or "") + "\n" + (result.stderr or ""), self.env)
+        lower = detail.lower()
+        if result.returncode or "chatgpt" not in lower:
+            raise AuthorizationError("Codex must be logged in through ChatGPT subscription")
+        if any(term in lower for term in ("api key", "api_key", "apikey")):
+            raise SubscriptionBoundaryError("Codex API-key authentication is not allowed")
+
+    def _save_observation(self, artifact_dir, task_id, prompt, stdout, stderr, usage):
+        if artifact_dir is None:
+            return
+        directory = Path(artifact_dir)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        payload = {
+            "task_id": task_id,
+            "prompt": redact(json.dumps(prompt, ensure_ascii=False), self.env),
+            "stdout": redact(stdout or "", self.env),
+            "stderr": redact(stderr or "", self.env),
+            "usage": usage,
+        }
+        _atomic_json(directory / f"{task_id}-{stamp}.json", payload)
+
+    def draft(self, task, *, artifact_dir=None):
+        self._verify_subscription_login()
         prompt = {
             "task_id": task["id"],
             "purpose": task.get("purpose"),
@@ -200,13 +258,22 @@ class CodexDraftAgent:
                                     env=self.env, capture_output=True, text=True,
                                     timeout=self.timeout)
         except (OSError, subprocess.TimeoutExpired) as exc:
+            self._save_observation(artifact_dir, task["id"], prompt, "", str(exc), None)
             raise RemoteNetworkError(f"Codex draft execution incomplete: {type(exc).__name__}") from exc
         if result.returncode:
+            self._save_observation(artifact_dir, task["id"], prompt, result.stdout, result.stderr, _codex_usage(result.stdout))
             detail = redact((result.stderr or result.stdout or "Codex draft failed").strip(), self.env)
             if any(term in detail.lower() for term in ("login", "unauthorized", "authentication", "not logged")):
                 raise AuthorizationError(detail[:1000])
             raise RemoteError(detail[:1000])
-        return _codex_text(result.stdout)
+        try:
+            text, usage = _codex_result(result.stdout)
+        except DraftError:
+            self._save_observation(artifact_dir, task["id"], prompt, result.stdout, result.stderr,
+                                    _codex_usage(result.stdout))
+            raise
+        self._save_observation(artifact_dir, task["id"], prompt, result.stdout, result.stderr, usage)
+        return text
 
 
 def _remote_error(detail: str, *, create=False):
@@ -291,7 +358,6 @@ class GitHubIssueAdapter:
 
 def _atomic_json(path: Path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
@@ -310,7 +376,6 @@ def _atomic_json(path: Path, value):
 @contextmanager
 def lifetime_lock(path: Path):
     path = Path(path); path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
     with open(path, "a+") as stream:
         os.chmod(path, 0o600)
         if fcntl is not None:
@@ -330,7 +395,10 @@ class IssueizationBatch:
         self.lease_seconds = lease_seconds
         self.repository = repository
         self.receipt_dir = Path(receipt_dir or store.vault_root / "01-Projects" / "issueization" / "receipts")
-        self.lock_path = Path(lock_path or self.receipt_dir.parent / "issueization.lock")
+        # The database is the shared coordination identity.  A caller-supplied
+        # receipt directory must not be able to select a second overlap lock.
+        db_identity = Path(str(store.db_path)).resolve()
+        self.lock_path = Path(str(db_identity) + ".issueize.lock")
         self.env = dict(env or os.environ)
         validate_subscription_environment(self.env)
 
@@ -342,9 +410,13 @@ class IssueizationBatch:
         path = self._receipt_path(task_id)
         try:
             value = json.loads(path.read_text())
-            return value if isinstance(value, dict) else None
-        except (OSError, ValueError):
+            if not isinstance(value, dict):
+                raise ValueError("receipt must be an object")
+            return value
+        except FileNotFoundError:
             return None
+        except (OSError, ValueError, TypeError) as exc:
+            raise ReceiptCorruptError(f"receipt is corrupt: {path}") from exc
 
     def _save_receipt(self, task_id, **fields):
         current = self._receipt(task_id) or {"task_id": task_id}
@@ -362,7 +434,7 @@ class IssueizationBatch:
             raise RemoteMalformedError("multiple remote Issues carry the same local task marker")
         return matches[0] if matches else None
 
-    def _readback_for_task(self, repository, task_id, issue):
+    def _readback_for_task(self, repository, task_id, issue, receipt):
         if not isinstance(issue, dict):
             raise RemoteMalformedError("remote Issue identity was not an object")
         number = issue.get("number", issue.get("issue_id"))
@@ -381,9 +453,53 @@ class IssueizationBatch:
             raise RemoteMalformedError("remote Issue readback number was malformed") from exc
         if url != expected or value_number != number or _marker(task_id) not in str(value.get("body", "")):
             raise RemoteMalformedError("remote Issue readback identity or marker mismatch")
+        if not isinstance(receipt, dict) or not isinstance(receipt.get("title"), str) or not isinstance(receipt.get("body"), str):
+            raise ReadbackMismatchError("persisted public draft is unavailable for exact readback")
+        try:
+            public_text(receipt["title"], self.env, english=True)
+            public_text(receipt["body"], self.env, english=True)
+        except ValueError as exc:
+            raise ReadbackMismatchError("persisted public draft fails English/privacy validation") from exc
+        if value.get("title") != receipt["title"] or value.get("body") != receipt["body"]:
+            raise ReadbackMismatchError("remote Issue content differs from persisted public draft")
         return {"repository": repository, "issue_id": int(number), "number": int(number),
                 "url": expected, "issue_url": expected, "html_url": expected,
                 "title": value.get("title"), "body": value.get("body", ""), "raw": value}
+
+    def _mark_incomplete(self, claim, diagnostic):
+        task_id, token = claim["id"], claim["claim_token"]
+        diagnostic = redact(str(diagnostic), self.env)
+        self._save_receipt(task_id, status="incomplete", diagnostic=diagnostic)
+        self.store.mark_issueization_ambiguous(task_id, token, diagnostic)
+        return "incomplete"
+
+    def _mark_corrupt_receipt(self, candidate, diagnostic):
+        task_id = candidate["id"]
+        if candidate.get("reconciliation_required"):
+            try:
+                self._remote_issue(candidate.get("repository"), task_id)
+            except Exception as exc:  # Preserve the corrupt bytes and continue to local reconciliation.
+                diagnostic = f"{diagnostic}; remote reconciliation: {exc}"
+            try:
+                self.store.reconcile_expired_claim(task_id, redact(str(diagnostic), self.env))
+                candidate = self.store.get_task(task_id)
+            except IssueizationError:
+                pass
+        try:
+            claim = self.store.claim_issueization(task_id, self.owner, lease_seconds=self.lease_seconds)
+        except IssueizationError:
+            return "skipped"
+        # Never overwrite the bytes that require reconciliation.  The sidecar
+        # is atomic and gives the next batch a durable diagnostic.
+        _atomic_json(self.receipt_dir / f"{task_id}.reconciliation.json", {
+            "task_id": task_id,
+            "status": "incomplete",
+            "reconciliation_required": True,
+            "diagnostic": redact(str(diagnostic), self.env),
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+        self.store.mark_issueization_ambiguous(task_id, claim["claim_token"], redact(str(diagnostic), self.env))
+        return "incomplete"
 
     def _mark_failure(self, claim, diagnostic, *, ambiguous=False):
         task_id, token = claim["id"], claim["claim_token"]
@@ -401,8 +517,13 @@ class IssueizationBatch:
         if not repository:
             return "skipped"
         marker = _marker(task_id)
-        receipt = self._receipt(task_id)
+        try:
+            receipt = self._receipt(task_id)
+        except ReceiptCorruptError as exc:
+            return self._mark_corrupt_receipt(candidate, exc)
         existing = None
+        uncertain_receipt = bool(receipt and receipt.get("status") in
+                                  ("creating", "linking", "ambiguous", "incomplete", "linked"))
         if candidate.get("reconciliation_required"):
             # Inspect the remote while the expired token still identifies the
             # old attempt, then transition it to ambiguous under our lifetime
@@ -423,28 +544,38 @@ class IssueizationBatch:
             claim = self.store.claim_issueization(task_id, self.owner, lease_seconds=self.lease_seconds)
         except IssueizationError:
             return "skipped"
-        self._save_receipt(task_id, status="prepare", marker=marker, repository=repository,
-                           claim_token=claim["claim_token"])
+        if not uncertain_receipt:
+            self._save_receipt(task_id, status="prepare", marker=marker, repository=repository,
+                               claim_token=claim["claim_token"])
         try:
             if existing is None:
                 existing = self._remote_issue(repository, task_id)
         except AuthorizationError as exc:
-            return self._mark_failure(claim, str(exc), ambiguous=False)
+            return self._mark_failure(claim, str(exc), ambiguous=uncertain_receipt)
         except AmbiguousRemoteError as exc:
             return self._mark_failure(claim, str(exc),
-                                      ambiguous=receipt and receipt.get("status") in ("creating", "linking"))
+                                      ambiguous=uncertain_receipt)
         if existing:
             try:
-                readback = self._readback_for_task(repository, task_id, existing)
+                readback = self._readback_for_task(repository, task_id, existing, receipt)
                 self._save_receipt(task_id, status="linking", issue=readback)
                 self.store.link_issue(task_id, repository, readback["issue_id"], readback["url"],
                                       claim_token=claim["claim_token"], verified=True, readback=readback)
                 self._save_receipt(task_id, status="linked", issue=readback)
                 return "issued"
+            except ReadbackMismatchError as exc:
+                return self._mark_incomplete(claim, str(exc))
             except (RemoteError, ValueError, ConflictError) as exc:
                 return self._mark_failure(claim, str(exc), ambiguous=True)
+        if uncertain_receipt:
+            return self._mark_failure(claim, "remote marker not visible; reconciliation only, creation suppressed",
+                                      ambiguous=True)
         try:
-            draft = parse_draft(self.agent.draft(claim), env=self.env)
+            if isinstance(self.agent, CodexDraftAgent):
+                raw_draft = self.agent.draft(claim, artifact_dir=self.receipt_dir.parent / "agent-runs")
+            else:
+                raw_draft = self.agent.draft(claim)
+            draft = parse_draft(raw_draft, env=self.env)
             body = render_issue_body(task_id, draft, env=self.env)
         except (DraftError, AuthorizationError, RemoteError) as exc:
             return self._mark_failure(claim, str(exc), ambiguous=False)
@@ -461,18 +592,21 @@ class IssueizationBatch:
         except RemoteError as exc:
             return self._mark_failure(claim, str(exc), ambiguous=True)
         try:
-            readback = self._readback_for_task(repository, task_id, created)
+            receipt = self._receipt(task_id)
+            readback = self._readback_for_task(repository, task_id, created, receipt)
             self._save_receipt(task_id, status="linking", issue=readback)
             self.store.link_issue(task_id, repository, readback["issue_id"], readback["url"],
                                   claim_token=claim["claim_token"], verified=True, readback=readback)
             self._save_receipt(task_id, status="linked", issue=readback)
             return "issued"
+        except ReadbackMismatchError as exc:
+            return self._mark_incomplete(claim, str(exc))
         except (RemoteError, ValueError, ConflictError) as exc:
             return self._mark_failure(claim, str(exc), ambiguous=True)
 
     def run(self, *, limit=None):
         result = {"status": "completed", "considered": 0, "issued": 0,
-                  "retry": 0, "ambiguous": 0, "skipped": 0, "errors": []}
+                  "retry": 0, "ambiguous": 0, "incomplete": 0, "skipped": 0, "errors": []}
         with lifetime_lock(self.lock_path):
             candidates = self.store.list_issueization_candidates(limit=limit)
             if self.repository:
@@ -486,7 +620,7 @@ class IssueizationBatch:
                     result["errors"].append({"task_id": candidate.get("id"),
                                               "error": redact(str(exc), self.env)})
                 result[outcome] = result.get(outcome, 0) + 1
-        if result["errors"] or result["retry"] or result["ambiguous"]:
+        if result["errors"] or result["retry"] or result["ambiguous"] or result["incomplete"]:
             result["status"] = "partial"
         elif result["considered"] == 0:
             result["status"] = "idle"
