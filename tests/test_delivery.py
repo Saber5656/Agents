@@ -249,6 +249,18 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaisesRegex(DeliveryError, 'Secret'):
             public_git_changes(branch, self.base, history_leak)
 
+    def test_public_git_changes_checks_leaks_removed_in_later_commits(self):
+        leak = self.repo / 'leak'
+        leak.write_text('/' + 'home' + '/fixture-user/private')
+        git(self.repo, 'add', 'leak')
+        git(self.repo, 'commit', '-m', 'First revision')
+        git(self.repo, 'rm', 'leak')
+        git(self.repo, 'commit', '-m', 'Remove temporary file')
+        head = git(self.repo, 'rev-parse', 'HEAD')
+        self.assertEqual('', git(self.repo, 'diff', self.base, head))
+        with self.assertRaisesRegex(DeliveryError, 'home path'):
+            public_git_changes(self.repo, self.base, head)
+
     def test_push_branch_uses_exact_oid_and_rejects_default_branch(self):
         remote = self.root / 'remote.git'; git(self.root, 'init', '--bare', str(remote))
         git(self.repo, 'remote', 'add', 'origin', str(remote))

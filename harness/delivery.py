@@ -53,7 +53,8 @@ def public_git_changes(repo, base, head, env=None):
     oid(base); oid(head)
     git(repo, 'cat-file', '-e', base + '^{commit}')
     git(repo, 'cat-file', '-e', head + '^{commit}')
-    history = git(repo, 'log', '--format=%H%n%B', base + '..' + head, '--')
+    history = git(repo, 'log', '--format=%H%n%B', '--patch', '--binary',
+                  '--diff-merges=first-parent', base + '..' + head, '--')
     diff = git(repo, 'diff', '--no-ext-diff', '--binary', base + '..' + head, '--')
     public_text(history, env)
     public_text(diff, env)
