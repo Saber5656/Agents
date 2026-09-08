@@ -21,6 +21,7 @@ VALID_STATUS = {"active", "draft", "deprecated"}
 VALID_CATEGORY = {"Dev", "News-Data", "Obsidian", "Operation", "Review", "Security", "Utility"}
 LINK_RE = re.compile(r"\[[^\]]+\]\((?!#)([^)]+)\)")
 RULE_CATEGORIES = {
+    "frontmatter_unparsed": "contract",
     "provenance_unclassified": "provenance",
     "stale_benchmark": "quality", "invalid_benchmark_json": "quality",
     "invalid_eval_json": "quality", "invalid_eval_schema": "quality",
@@ -30,9 +31,70 @@ RULE_CATEGORIES = {
     "audit_incomplete": "contract",
 }
 
+BLOCK_HEADER_RE = re.compile(r"^([>|])(?:(\d)?([+-])?|([+-])(\d)?)$")
+
 
 def digest_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _block_header(value: str) -> tuple[str, str, int | None] | None:
+    match = BLOCK_HEADER_RE.fullmatch(value)
+    if not match:
+        return None
+    style = match.group(1)
+    indent = match.group(2) or match.group(5)
+    chomp = match.group(3) or match.group(4) or ""
+    return style, chomp, int(indent) if indent else None
+
+
+def _block_scalar(
+    rows: list[str], start: int, style: str, chomp: str, explicit_indent: int | None
+) -> tuple[str, int]:
+    body: list[str] = []
+    index = start
+    while index < len(rows):
+        row = rows[index]
+        if not row.strip() or row[:1].isspace():
+            body.append(row)
+            index += 1
+            continue
+        break
+    if not body or not any(row.strip() for row in body):
+        return "", index
+    nonblank = [len(row) - len(row.lstrip(" ")) for row in body if row.strip()]
+    indent = explicit_indent or (min(nonblank) if nonblank else 0)
+    lines = [row[indent:] if row.strip() else "" for row in body]
+    if style == "|":
+        value = "\n".join(lines)
+    else:
+        folded: list[str] = []
+        for line_index, line in enumerate(lines):
+            if line_index and lines[line_index - 1] == "":
+                folded.append("\n")
+            elif line_index:
+                folded.append(" ")
+            folded.append(line)
+        value = "".join(folded)
+    if chomp == "-":
+        value = value.rstrip("\n")
+    elif chomp != "+":
+        value = value.rstrip("\n") + "\n"
+    else:
+        value += "\n"
+    return value, index
+
+
+def _scalar(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return value[1:-1]
+        return decoded if isinstance(decoded, str) else value[1:-1]
+    return value
 
 
 def frontmatter(text: str) -> tuple[dict[str, Any], list[str]]:
@@ -44,31 +106,28 @@ def frontmatter(text: str) -> tuple[dict[str, Any], list[str]]:
         return {}, ["unterminated YAML frontmatter"]
     rows = text[4:end].splitlines()
     data: dict[str, Any] = {}
-    current: str | None = None
-    folded: list[str] = []
-    for row in rows:
-        if current and (row.startswith("  ") or not row.strip()):
-            folded.append(row.strip())
-            continue
-        if current:
-            data[current] = " ".join(folded).strip()
-            current = None
-            folded = []
+    index = 0
+    while index < len(rows):
+        row = rows[index]
         if ":" not in row:
             errors.append(f"unparsed frontmatter line: {row}")
+            index += 1
             continue
         key, value = row.split(":", 1)
         key, value = key.strip(), value.strip()
-        if value in {">", "|", ""}:
-            current = key
-        elif value.startswith("[") and value.endswith("]"):
+        block = _block_header(value) if value[:1] in {">", "|"} else None
+        if block:
+            data[key], index = _block_scalar(rows, index + 1, *block)
+            continue
+        if value[:1] in {">", "|"}:
+            errors.append(f"unparsed frontmatter value: {row}")
+        if value.startswith("[") and value.endswith("]"):
             data[key] = [item.strip() for item in value[1:-1].split(",") if item.strip()]
         elif value in {"true", "false"}:
             data[key] = value == "true"
         else:
-            data[key] = value.strip('"\'')
-    if current:
-        data[current] = " ".join(folded).strip()
+            data[key] = _scalar(value)
+        index += 1
     return data, errors
 
 
@@ -221,7 +280,14 @@ def scan(root: Path, audit_id: str, profile: str, include: list[str] | None = No
             ))
         missing = sorted(key for key in required if not metadata.get(key))
         for error in parse_errors:
-            findings.append(finding("frontmatter_parse", "blocker", directory.name, error, "Skill routing metadata cannot be trusted."))
+            if error.startswith("unparsed frontmatter"):
+                findings.append(finding(
+                    "frontmatter_unparsed", "medium", directory.name, error,
+                    "Metadata syntax is outside the deterministic parser; skill validity remains unverified.",
+                    "probable",
+                ))
+            else:
+                findings.append(finding("frontmatter_parse", "blocker", directory.name, error, "Skill routing metadata cannot be trusted."))
         if missing:
             findings.append(finding("required_metadata", "high" if skill_profile == "repo_native" else "medium", directory.name, f"missing: {', '.join(missing)}", "Applicable skill contract is incomplete."))
         if metadata.get("name") and metadata.get("name") != directory.name:
