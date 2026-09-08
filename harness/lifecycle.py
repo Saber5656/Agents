@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tempfile
 from typing import Callable
@@ -67,26 +68,55 @@ class LifecycleStore:
         if self.path.is_symlink() or self.path.parent.is_symlink():
             raise LifecycleError("lifecycle registry file and immediate parent must not be symlinks")
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        current = self.path.parent.resolve()
+        immediate_parent = current
+        while True:
+            info = current.stat()
+            owner_ok = not hasattr(os, "geteuid") or info.st_uid in (0, os.geteuid())
+            mode = stat.S_IMODE(info.st_mode)
+            sticky = current != immediate_parent and bool(mode & stat.S_ISVTX) and owner_ok
+            if not owner_ok or (mode & 0o022 and not sticky):
+                raise LifecycleError(f"lifecycle registry parent must not be writable by other users: {current}")
+            if current == current.parent:
+                break
+            current = current.parent
         self.lock_path = self.path.with_name(self.path.name + ".lock")
-        self.lock_path.touch(mode=0o600, exist_ok=True)
-        self.lock_path.chmod(0o600)
+        if self.lock_path.is_symlink():
+            raise LifecycleError("lifecycle lock must not be a symlink")
+        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        os.fchmod(fd, 0o600)
+        os.close(fd)
         with self._locked():
             if not self.path.exists():
                 self._write({"version": 1, "work_units": {}})
 
     @contextmanager
     def _locked(self):
-        with self.lock_path.open("a+") as lock:
-            self.lock_path.chmod(0o600)
+        if self.lock_path.is_symlink():
+            raise LifecycleError("lifecycle lock must not be a symlink")
+        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        lock = os.fdopen(fd, "a+")
+        try:
+            os.fchmod(lock.fileno(), 0o600)
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 yield
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock.close()
 
     def _read(self):
         try:
-            value = json.loads(self.path.read_text())
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(self.path, flags)
+            try:
+                with os.fdopen(fd, "r") as stream:
+                    fd = None
+                    value = json.load(stream)
+            finally:
+                if fd is not None:
+                    os.close(fd)
         except (OSError, ValueError, TypeError) as exc:
             raise LifecycleError("lifecycle registry is unreadable; preserve it for reconciliation") from exc
         if not isinstance(value, dict) or not isinstance(value.get("work_units"), dict):
@@ -164,8 +194,8 @@ class LifecycleStore:
                  published_commit=None):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]*", str(unit_id)):
             raise LifecycleError("invalid work-unit identity")
-        if not purpose or not repository or not project_id or not host_id:
-            raise LifecycleError("purpose, repository, project, and host are required")
+        if not purpose or not repository or not host_id:
+            raise LifecycleError("purpose, repository, and host are required")
         base_oid = _full_oid(base_oid)
         worktree = Path(worktree).absolute()
         if not worktree.is_dir():
@@ -176,7 +206,8 @@ class LifecycleStore:
         context_path = str(Path(context_path).resolve()) if context_path else None
         immutable = {
             "purpose": str(purpose), "repository": str(repository),
-            "project_id": str(project_id), "host_id": str(host_id),
+            "project_id": str(project_id) if project_id is not None else None,
+            "host_id": str(host_id),
             "base_oid": base_oid, "worktree": str(worktree.resolve()),
             "repository_path": str(repository_path) if repository_path else None,
             "branch": branch, "task_ids": list(dict.fromkeys(map(str, task_ids))),
@@ -201,7 +232,7 @@ class LifecycleStore:
                 "chat": {"state": "not_created", "marker": f"<!-- agents-work-unit:{unit_id} -->",
                          "ready_thread_id": None, "client_thread_id": None,
                          "host_id": str(host_id), "cwd": None, "base_oid": None,
-                         "handoff": None, "archive_receipt": None},
+                         "handoff": None, "archive_receipt": None, "unarchive_receipt": None},
                 "cleanup": {"state": "pending", "receipt": None},
                 "created_at": stamp, "updated_at": stamp,
             }
@@ -224,8 +255,9 @@ class LifecycleStore:
 class ChatLifecycle:
     """Reconcile injected App backend operations against a local work unit."""
 
-    def __init__(self, store: LifecycleStore):
+    def __init__(self, store: LifecycleStore, *, writer_guard=None):
         self.store = store
+        self.writer_guard = writer_guard
 
     @staticmethod
     def _payload(unit, prompt):
@@ -246,7 +278,7 @@ class ChatLifecycle:
         text = " ".join(str(thread.get(key, "")) for key in ("title", "summary", "prompt", "description"))
         return unit["chat"]["marker"] in text
 
-    def _verify_thread(self, unit, thread, *, allow_archived=True):
+    def _verify_thread(self, unit, thread, *, allow_archived=True, require_ready=False):
         if not self._thread_marker(unit, thread):
             raise LifecycleError("remote thread does not identify this work unit")
         thread_cwd = thread.get("cwd") or thread.get("worktree") or thread.get("workspace")
@@ -264,6 +296,12 @@ class ChatLifecycle:
             raise LifecycleError("remote thread task scope does not match the work unit")
         if not allow_archived and thread.get("archived"):
             raise LifecycleError("remote thread is archived")
+        if require_ready:
+            status = str(thread.get("status", "")).lower()
+            if status in ("running", "in_progress", "active", "failed", "incomplete", "needs_verification", "pending"):
+                raise LifecycleError("remote thread is not ready")
+            if status not in ("ready", "completed", "succeeded", "success", "archived") and not thread.get("archived"):
+                raise LifecycleError("remote thread readiness is unverified")
         return thread
 
     @staticmethod
@@ -302,20 +340,20 @@ class ChatLifecycle:
         result["client_thread_id"] = result["chat"].get("client_thread_id")
         return result
 
-    def _readback(self, unit, backend, thread_id):
+    def _readback(self, unit, backend, thread_id, *, require_ready=False):
         try:
             thread = backend.read_thread(thread_id, host_id=unit["host_id"])
         except Exception as exc:
             raise LifecycleError("ready thread readback is incomplete") from exc
         if str(_thread_id(thread)) != str(thread_id):
             raise LifecycleError("remote readback returned a different thread identity")
-        return self._verify_thread(unit, thread)
+        return self._verify_thread(unit, thread, require_ready=require_ready)
 
     def _adopt_ready(self, unit, backend, response, *, handoff=None):
         thread_id = _thread_id(response)
         if not thread_id:
             raise LifecycleError("remote response has no ready thread ID")
-        thread = self._readback(unit, backend, thread_id)
+        thread = self._readback(unit, backend, thread_id, require_ready=True)
         fields = {"state": "archived" if thread.get("archived") else "ready",
                   "ready_thread_id": str(thread_id), "client_thread_id": None,
                   "host_id": thread.get("hostId", thread.get("host_id", unit["host_id"])),
@@ -350,6 +388,10 @@ class ChatLifecycle:
     def create(self, unit_id, prompt, backend):
         unit = self._unit(unit_id); chat = unit["chat"]
         if chat.get("ready_thread_id"):
+            try:
+                self._readback(unit, backend, chat["ready_thread_id"], require_ready=True)
+            except LifecycleError as exc:
+                return self._save_chat(unit_id, state="ambiguous", last_error=str(exc), uncertain_at=_now())
             return self._public(unit)
         if chat["state"] in ("creating", "ambiguous", "pending"):
             return self.reconcile(unit_id, backend)
@@ -389,10 +431,29 @@ class ChatLifecycle:
         unit, thread_id, thread = self._require_ready(unit_id, backend)
         if thread.get("archived"):
             raise LifecycleError("archived chat cannot receive a message")
-        response = backend.send_message(thread_id, self._payload(unit, str(prompt)), host_id=unit["host_id"])
-        if _thread_id(response) and str(_thread_id(response)) != str(thread_id):
-            raise LifecycleError("message response changed the ready thread identity")
-        return self._save_chat(unit_id, last_handoff={"kind": "message", "prompt": str(prompt), "at": _now()})
+        handoff_id = hashlib.sha256(f"{unit_id}\0{thread_id}\0{prompt}".encode()).hexdigest()[:24]
+        marker = f"<!-- agents-handoff:{handoff_id} -->"
+        claim = self.store.claim_handoff(unit_id, {
+            "state": "creating", "id": handoff_id, "marker": marker,
+            "kind": "message", "prompt": str(prompt), "at": _now(),
+        })
+        if claim is None:
+            return self.reconcile_handoff(unit_id, backend)
+        payload = f"{self._payload(unit, str(prompt))}\n{marker}"
+        try:
+            response = backend.send_message(thread_id, payload, host_id=unit["host_id"])
+            if _thread_id(response) and str(_thread_id(response)) != str(thread_id):
+                raise LifecycleError("message response changed the ready thread identity")
+            readback = self._readback(unit, backend, thread_id)
+            return self._save_chat(unit_id, handoff={"state": "ready", "id": handoff_id,
+                                      "marker": marker, "kind": "message", "prompt": str(prompt), "at": _now()},
+                                   last_handoff={"kind": "message", "prompt": str(prompt), "at": _now()},
+                                   state="archived" if readback.get("archived") else "ready")
+        except Exception as exc:
+            self._save_chat(unit_id, handoff={"state": "ambiguous", "id": handoff_id,
+                                "marker": marker, "kind": "message", "prompt": str(prompt),
+                                "error": str(exc), "at": _now()})
+            raise LifecycleError("message requires remote readback") from exc
 
     def handoff(self, unit_id, prompt, backend):
         unit, thread_id, thread = self._require_ready(unit_id, backend)
@@ -503,17 +564,31 @@ class ChatLifecycle:
         thread_id = unit["chat"].get("ready_thread_id")
         if not thread_id:
             raise LifecycleError("archived chat has no ready thread reference")
-        thread = self._readback(unit, backend, thread_id)
+        receipt = unit["chat"].get("unarchive_receipt") or {}
+        try:
+            thread = self._readback(unit, backend, thread_id)
+        except Exception as exc:
+            self._save_chat(unit_id, unarchive_receipt={"state": "ambiguous", "thread_id": str(thread_id),
+                                                        "error": str(exc), "at": _now()})
+            raise LifecycleError("unarchive requires remote readback") from exc
         if not thread.get("archived") and str(thread.get("status", "")).lower() != "archived":
-            return self._save_chat(unit_id, state="ready")
+            return self._save_chat(unit_id, state="ready", unarchive_receipt={"state": "ready", "thread_id": str(thread_id), "at": _now()})
+        if receipt.get("state") == "ambiguous":
+            # The prior attempt may have reached the backend.  Readback above
+            # is authoritative; retrying the idempotent transition is safe only
+            # when the remote still proves archived.
+            pass
+        self._save_chat(unit_id, unarchive_receipt={"state": "creating", "thread_id": str(thread_id), "at": _now()})
         try:
             backend.unarchive_thread(thread_id, host_id=unit["host_id"])
             readback = self._readback(unit, backend, thread_id)
             if readback.get("archived") or str(readback.get("status", "")).lower() == "archived":
                 raise LifecycleError("unarchive readback remained archived")
         except Exception as exc:
+            self._save_chat(unit_id, unarchive_receipt={"state": "ambiguous", "thread_id": str(thread_id),
+                                                        "error": str(exc), "at": _now()})
             raise LifecycleError("unarchive requires remote readback") from exc
-        return self._save_chat(unit_id, state="ready")
+        return self._save_chat(unit_id, state="ready", unarchive_receipt={"state": "ready", "thread_id": str(thread_id), "at": _now()})
 
     def cleanup(self, unit_id, git):
         unit = self._unit(unit_id)
@@ -532,8 +607,11 @@ class ChatLifecycle:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         key = hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest()
         path = root / f"{key}.lock"
-        lock = path.open("a+")
-        path.chmod(0o600)
+        if path.is_symlink():
+            raise CleanupError("worktree lock must not be a symlink")
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        lock = os.fdopen(fd, "a+")
+        os.fchmod(lock.fileno(), 0o600)
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -541,16 +619,61 @@ class ChatLifecycle:
             raise
         return lock
 
+    def _writer_state(self, worktree, git):
+        if self.writer_guard is None:
+            return "unknown"
+        try:
+            value = self.writer_guard(worktree, git)
+        except Exception:
+            return "unknown"
+        if value is True:
+            return "active"
+        if value is False:
+            return "inactive"
+        return value if value in ("active", "inactive", "unknown") else "unknown"
+
+    def _validate_cleanup_receipt(self, unit, receipt):
+        if not isinstance(receipt, dict):
+            raise CleanupError("cleanup receipt is malformed; preserve data")
+        required = ("unit_id", "repository", "worktree", "branch", "head_oid")
+        if receipt.get("unit_id") != unit["id"]:
+            raise CleanupError("cleanup receipt belongs to a different work unit")
+        if receipt.get("state") not in ("prepared", "worktree_removed", "branch_removed"):
+            raise CleanupError("cleanup receipt has an unknown state; preserve data")
+        for key in required[1:]:
+            if key not in receipt:
+                raise CleanupError("cleanup receipt lacks immutable identity")
+        if Path(receipt["repository"]).resolve() != Path(unit["repository_path"]).resolve():
+            raise CleanupError("cleanup receipt repository does not match the work unit")
+        if Path(receipt["worktree"]).resolve() != Path(unit["worktree"]).resolve():
+            raise CleanupError("cleanup receipt worktree does not match the work unit")
+        if receipt["branch"] != unit["branch"]:
+            raise CleanupError("cleanup receipt branch does not match the work unit")
+        try:
+            if _full_oid(receipt["head_oid"]) != _full_oid(unit.get("published_commit") or receipt["head_oid"]):
+                # A work unit has no immutable head until cleanup preparation;
+                # compare against the persisted receipt on later retries.
+                if unit.get("cleanup", {}).get("receipt", {}).get("head_oid") != receipt["head_oid"]:
+                    raise CleanupError("cleanup receipt HEAD does not match recorded identity")
+        except LifecycleError as exc:
+            raise CleanupError("cleanup receipt HEAD is not a full commit OID") from exc
+        return receipt
+
     def _cleanup_locked(self, unit_id, git):
         unit = self._unit(unit_id)
         cleanup = unit["cleanup"]
         receipt = self._read_cleanup_receipt(unit_id)
-        if receipt and receipt.get("unit_id") not in (None, unit_id):
-            raise CleanupError("cleanup receipt belongs to a different work unit")
+        if receipt:
+            receipt = self._validate_cleanup_receipt(unit, receipt)
+        if cleanup.get("state") in ("prepared", "worktree_removed", "branch_removed") and not receipt:
+            raise CleanupError("cleanup receipt is missing; preserve data for reconciliation")
         if receipt and receipt.get("state") == "branch_removed" and cleanup.get("state") != "branch_removed":
             result = self.store.update(unit_id, lambda row: row["cleanup"].update({"state": "branch_removed", "receipt": receipt}))
             result["state"] = "branch_removed"
             return result
+        if receipt and receipt.get("state") == "prepared" and cleanup.get("state") == "pending":
+            cleanup = dict(cleanup); cleanup["state"] = "prepared"
+            self.store.update(unit_id, lambda row: row["cleanup"].update({"state": "prepared", "receipt": receipt}))
         if receipt and receipt.get("state") == "worktree_removed" and cleanup.get("state") != "worktree_removed":
             cleanup = dict(cleanup); cleanup["state"] = "worktree_removed"
             self.store.update(unit_id, lambda row: row["cleanup"].update({"state": "worktree_removed", "receipt": receipt}))
@@ -571,18 +694,28 @@ class ChatLifecycle:
                 continue
             if other.get("worktree") == worktree or other.get("branch") == branch:
                 raise CleanupError("another work unit still references the worktree or branch")
-        if getattr(git, "active_writer", False):
-            raise CleanupError("active writer owns the worktree")
+        if self._writer_state(worktree, git) != "inactive":
+            raise CleanupError("worktree writer state is not proven inactive")
         rows = git.worktrees(repository)
         same_path = lambda left, right: left is not None and right is not None and Path(left).resolve() == Path(right).resolve()
-        if any(same_path(row.get("path"), repository) and same_path(row.get("path"), worktree) for row in rows):
-            raise CleanupError("canonical repository and task worktree are ambiguous")
+        canonical = [row for row in rows if same_path(row.get("path"), repository)]
+        if len(canonical) != 1 or canonical[0].get("branch") not in (None, "main", "master"):
+            raise CleanupError("canonical repository identity is ambiguous")
+        target_rows = [row for row in rows if same_path(row.get("path"), worktree)]
+        if len(target_rows) > 1 or (target_rows and target_rows[0].get("branch") != branch):
+            raise CleanupError("task worktree identity does not match the recorded branch")
         same_branch_elsewhere = [row for row in rows if row.get("branch") == branch and not same_path(row.get("path"), worktree)]
         if same_branch_elsewhere:
             raise CleanupError("branch is used by another worktree")
         worktree_present = any(same_path(row.get("path"), worktree) for row in rows)
         if cleanup.get("state") == "worktree_removed" and worktree_present:
             raise CleanupError("cleanup receipt says worktree was removed, but it is present again")
+        if not worktree_present and cleanup.get("state") == "prepared":
+            receipt = dict(receipt or {})
+            receipt["state"] = "worktree_removed"; receipt["at"] = _now()
+            self._write_cleanup_receipt(unit_id, receipt)
+            self.store.update(unit_id, lambda row: row["cleanup"].update({"state": "worktree_removed", "receipt": receipt}))
+            cleanup = dict(cleanup); cleanup["state"] = "worktree_removed"
         if not worktree_present and cleanup.get("state") != "worktree_removed":
             raise CleanupError("recorded worktree is not present in Git worktree registry")
         if cleanup.get("state") != "worktree_removed":
@@ -590,8 +723,12 @@ class ChatLifecycle:
                 raise CleanupError("worktree has dirty or ignored files")
             if git.branch_ahead(repository, branch):
                 raise CleanupError("branch has local-only commits")
+            current_head = _full_oid(git.head(worktree))
+            branch_head = getattr(git, "branch_head", None)
+            if branch_head is None or _full_oid(branch_head(repository, branch)) != current_head:
+                raise CleanupError("worktree and branch HEAD identities do not match")
             receipt = {"state": "prepared", "unit_id": unit_id, "repository": repository,
-                       "worktree": worktree, "branch": branch, "head_oid": git.head(worktree),
+                       "worktree": worktree, "branch": branch, "head_oid": current_head,
                        "at": _now()}
             self._write_cleanup_receipt(unit_id, receipt)
             self.store.update(unit_id, lambda row: row["cleanup"].update({"state": "prepared", "receipt": receipt}))
@@ -603,6 +740,10 @@ class ChatLifecycle:
             self._write_cleanup_receipt(unit_id, receipt)
             self.store.update(unit_id, lambda row: row["cleanup"].update({"state": "worktree_removed", "receipt": receipt}))
         try:
+            if receipt and receipt.get("state") == "worktree_removed":
+                branch_head = getattr(git, "branch_head", None)
+                if branch_head is None or _full_oid(branch_head(repository, branch)) != _full_oid(receipt["head_oid"]):
+                    raise CleanupError("branch HEAD identity changed after worktree removal")
             if getattr(git, "branch_exists", lambda *_: True)(repository, branch):
                 git.delete_branch(repository, branch)
         except Exception as exc:
@@ -621,6 +762,8 @@ class ChatLifecycle:
 
     def _write_cleanup_receipt(self, unit_id, receipt):
         path = self._receipt_path(unit_id)
+        if path.is_symlink() or path.parent.is_symlink():
+            raise CleanupError("cleanup receipt path must not be a symlink")
         fd, temporary = tempfile.mkstemp(prefix=".cleanup-", dir=path.parent)
         try:
             with os.fdopen(fd, "w") as stream:
@@ -635,8 +778,17 @@ class ChatLifecycle:
         path = self._receipt_path(unit_id)
         if not path.is_file():
             return None
+        if path.is_symlink():
+            raise CleanupError("cleanup receipt path must not be a symlink")
         try:
-            value = json.loads(path.read_text())
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                with os.fdopen(fd, "r") as stream:
+                    fd = None
+                    value = json.load(stream)
+            finally:
+                if fd is not None:
+                    os.close(fd)
         except (OSError, ValueError) as exc:
             raise CleanupError("cleanup receipt is corrupt; preserve data") from exc
         return value if isinstance(value, dict) else None
@@ -691,12 +843,34 @@ class GitWorktree:
             raise CleanupError("cannot read worktree HEAD")
         return _full_oid(result.stdout.strip())
 
+    def branch_head(self, repository, branch):
+        result = subprocess.run(["git", "rev-parse", f"refs/heads/{branch}"], cwd=self.repository,
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise CleanupError("cannot read branch HEAD")
+        return _full_oid(result.stdout.strip())
+
     def branch_ahead(self, repository, branch):
-        output = self._run("rev-list", "--left-right", "--count", f"origin/main...{branch}")
+        # Read the remote advertisement at cleanup time.  A cached
+        # origin/main ref can lag behind the actual publication and would
+        # incorrectly permit a branch with local-only commits.
+        advertised = self._run("ls-remote", "origin", "refs/heads/main")
+        remote_oid = (advertised.split()[0] if advertised else "")
         try:
-            return int(output.split()[1])
-        except (IndexError, ValueError) as exc:
-            raise CleanupError("cannot determine local-only commits") from exc
+            remote_oid = _full_oid(remote_oid)
+        except LifecycleError as exc:
+            raise CleanupError("cannot verify the remote main commit") from exc
+        reachable = subprocess.run(["git", "cat-file", "-e", f"{remote_oid}^{{commit}}"],
+                                   cwd=self.repository, capture_output=True, text=True, timeout=30)
+        if reachable.returncode:
+            raise CleanupError("remote main commit is not locally reachable")
+        result = subprocess.run(["git", "merge-base", "--is-ancestor", branch, remote_oid],
+                                cwd=self.repository, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return 0
+        if result.returncode == 1:
+            return 1
+        raise CleanupError("cannot determine local-only commits")
 
     def remove_worktree(self, repository, worktree):
         self._run("worktree", "remove", "--", worktree)

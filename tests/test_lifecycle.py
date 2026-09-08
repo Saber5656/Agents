@@ -109,6 +109,9 @@ class FakeGit:
     def head(self, worktree):
         return self.head_oid
 
+    def branch_head(self, repository, branch):
+        return self.head_oid
+
     def branch_ahead(self, repository, branch):
         return self.ahead
 
@@ -140,7 +143,10 @@ class LifecycleTests(unittest.TestCase):
             task_ids=["task-1", "task-2"], issue_ids=["org/repo#14"],
             context_path=self.vault / "context.json")
         self.backend = FakeChatBackend()
-        self.chat = ChatLifecycle(self.registry)
+        self.chat = ChatLifecycle(
+            self.registry,
+            writer_guard=lambda _worktree, git: "active" if getattr(git, "active_writer", False) else "inactive",
+        )
         self.addCleanup(self.temp.cleanup)
 
     def test_registry_persists_immutable_work_unit_and_pending_ready_chat(self):
@@ -151,6 +157,13 @@ class LifecycleTests(unittest.TestCase):
             self.registry.register("wu-2", purpose="bad", repository="org/repo",
                                    project_id="p", host_id="h", base_oid="short",
                                    worktree=self.worktree)
+
+    def test_projectless_registration_preserves_none_project_without_guessing(self):
+        unit = self.registry.register(
+            "wu-projectless", purpose="Projectless task", repository="org/repo",
+            project_id=None, host_id="host-1", base_oid=self.base,
+            worktree=self.worktree)
+        self.assertIsNone(unit["project_id"])
 
     def test_concurrent_first_open_preserves_registered_units(self):
         path = self.vault / "new-registry.json"
@@ -203,6 +216,22 @@ class LifecycleTests(unittest.TestCase):
         persisted = self.registry.get("wu-1")
         self.assertEqual(persisted["chat"]["cwd"], str(self.worktree.resolve()))
         self.assertEqual(persisted["chat"]["base_oid"], self.base)
+
+    def test_existing_ready_create_performs_remote_readback(self):
+        self.chat.create("wu-1", "initial", self.backend)
+        self.backend.threads[0]["cwd"] = str(self.root / "different")
+        result = self.chat.create("wu-1", "initial", self.backend)
+        self.assertEqual(result["state"], "ambiguous")
+        self.assertEqual(self.backend.create_calls, 1)
+
+    def test_create_does_not_adopt_failed_remote_thread_as_ready(self):
+        self.backend.create_thread = mock.Mock(return_value={
+            "threadId": "failed-thread", "hostId": "host-1", "work_unit_id": "wu-1",
+            "cwd": str(self.worktree), "base_oid": self.base, "status": "failed",
+        })
+        self.backend.threads.append(dict(self.backend.create_thread.return_value))
+        result = self.chat.create("wu-1", "initial", self.backend)
+        self.assertEqual(result["state"], "ambiguous")
 
     def test_lost_create_response_is_ambiguous_and_retry_never_blind_creates(self):
         self.backend.fail_create_once = True
@@ -277,6 +306,24 @@ class LifecycleTests(unittest.TestCase):
         })
         self.assertEqual(self.chat.reconcile_handoff("wu-1", self.backend)["ready_thread_id"], "fork-reconciled")
 
+    def test_send_lost_response_records_marker_and_never_blindly_resends(self):
+        self.chat.create("wu-1", "initial", self.backend)
+        original = self.backend.send_message
+        calls = []
+        def lost(thread_id, prompt, *, host_id=None):
+            calls.append(1)
+            if len(calls) == 1:
+                self.backend.threads[0]["prompt"] += "\n" + prompt
+                raise OSError("lost response")
+            return original(thread_id, prompt, host_id=host_id)
+        self.backend.send_message = lost
+        with self.assertRaises(LifecycleError):
+            self.chat.send("wu-1", "follow-up", self.backend)
+        state = self.registry.get("wu-1")
+        self.assertEqual(state["chat"]["handoff"]["state"], "ambiguous")
+        self.assertEqual(self.chat.send("wu-1", "follow-up", self.backend)["state"], "ready")
+        self.assertEqual(calls, [1])
+
     def test_archive_requires_delivery_context_and_remote_identity_then_unarchive_restores(self):
         self.chat.create("wu-1", "initial", self.backend)
         with self.assertRaises(LifecycleError):
@@ -290,6 +337,26 @@ class LifecycleTests(unittest.TestCase):
         restored = self.chat.unarchive("wu-1", self.backend)
         self.assertEqual(restored["state"], "ready")
         self.assertEqual(self.registry.get("wu-1")["chat"]["ready_thread_id"], "thread-1")
+
+    def test_unarchive_lost_readback_is_durable_and_reconciles_without_duplicate(self):
+        self.chat.create("wu-1", "initial", self.backend)
+        context = self.vault / "context.json"; context.write_text("saved context")
+        self.registry.set_delivery("wu-1", merged=True, main_synced=True,
+                                   context_saved=True, context_path=context)
+        self.chat.archive("wu-1", self.backend)
+        original = self.backend.read_thread
+        calls = []
+        def lost(thread_id, *, host_id=None):
+            calls.append(len(calls) + 1)
+            if len(calls) == 2:
+                raise OSError("lost readback")
+            return original(thread_id, host_id=host_id)
+        self.backend.read_thread = lost
+        with self.assertRaises(LifecycleError):
+            self.chat.unarchive("wu-1", self.backend)
+        self.assertEqual(self.registry.get("wu-1")["chat"]["unarchive_receipt"]["state"], "ambiguous")
+        self.assertEqual(self.chat.unarchive("wu-1", self.backend)["state"], "ready")
+        self.assertEqual(calls, [1, 2, 3])
 
     def test_archive_rejects_running_or_different_task_chat(self):
         self.chat.create("wu-1", "initial", self.backend)
@@ -350,6 +417,76 @@ class LifecycleTests(unittest.TestCase):
         result = self.chat.cleanup("wu-1", git)
         self.assertEqual(result["state"], "branch_removed")
         self.assertTrue(git.deleted)
+
+    def test_cleanup_prepared_receipt_recovers_when_worktree_already_removed(self):
+        context = self.vault / "context.json"; context.write_text("saved context")
+        self.registry.set_delivery("wu-1", merged=True, main_synced=True,
+                                   context_saved=True, context_path=context)
+        git = FakeGit(self.repo, self.worktree)
+        receipt = {"state": "prepared", "unit_id": "wu-1",
+                   "repository": str(self.repo.resolve()), "worktree": str(self.worktree.resolve()),
+                   "branch": "feat/task", "head_oid": "b" * 40}
+        self.chat._write_cleanup_receipt("wu-1", receipt)
+        git.removed = True
+        result = self.chat.cleanup("wu-1", git)
+        self.assertEqual(result["state"], "branch_removed")
+        self.assertTrue(git.deleted)
+
+    def test_cleanup_rejects_receipt_with_different_branch(self):
+        context = self.vault / "context.json"; context.write_text("saved context")
+        self.registry.set_delivery("wu-1", merged=True, main_synced=True,
+                                   context_saved=True, context_path=context)
+        git = FakeGit(self.repo, self.worktree)
+        receipt = {"state": "worktree_removed", "unit_id": "wu-1",
+                   "repository": str(self.repo.resolve()), "worktree": str(self.worktree.resolve()),
+                   "branch": "other-branch", "head_oid": "b" * 40}
+        self.chat._write_cleanup_receipt("wu-1", receipt)
+        git.removed = True
+        with self.assertRaises(CleanupError):
+            self.chat.cleanup("wu-1", git)
+
+    def test_cleanup_preserves_corrupt_receipt_without_deletion(self):
+        context = self.vault / "context.json"; context.write_text("saved context")
+        self.registry.set_delivery("wu-1", merged=True, main_synced=True,
+                                   context_saved=True, context_path=context)
+        path = self.chat._receipt_path("wu-1")
+        path.write_text("{broken")
+        git = FakeGit(self.repo, self.worktree)
+        with self.assertRaises(CleanupError):
+            self.chat.cleanup("wu-1", git)
+        self.assertFalse(git.removed)
+
+    def test_cleanup_preserves_prepared_state_when_receipt_is_missing(self):
+        context = self.vault / "context.json"; context.write_text("saved context")
+        self.registry.set_delivery("wu-1", merged=True, main_synced=True,
+                                   context_saved=True, context_path=context)
+        self.registry.update("wu-1", lambda row: row["cleanup"].update({"state": "prepared"}))
+        git = FakeGit(self.repo, self.worktree)
+        with self.assertRaises(CleanupError):
+            self.chat.cleanup("wu-1", git)
+        self.assertFalse(git.removed)
+
+    def test_cleanup_rejects_branch_head_changed_after_removal_receipt(self):
+        context = self.vault / "context.json"; context.write_text("saved context")
+        self.registry.set_delivery("wu-1", merged=True, main_synced=True,
+                                   context_saved=True, context_path=context)
+        git = FakeGit(self.repo, self.worktree)
+        receipt = {"state": "worktree_removed", "unit_id": "wu-1",
+                   "repository": str(self.repo.resolve()), "worktree": str(self.worktree.resolve()),
+                   "branch": "feat/task", "head_oid": "b" * 40}
+        self.chat._write_cleanup_receipt("wu-1", receipt)
+        git.removed = True; git.head_oid = "c" * 40
+        with self.assertRaises(CleanupError):
+            self.chat.cleanup("wu-1", git)
+        self.assertFalse(git.deleted)
+
+    def test_cleanup_without_writer_guard_never_assumes_inactive(self):
+        chat = ChatLifecycle(self.registry)
+        context = self.vault / "context.json"; context.write_text("saved context")
+        self.registry.set_delivery("wu-1", merged=True, main_synced=True,
+                                   context_saved=True, context_path=context)
+        with self.assertRaises(CleanupError):
+            chat.cleanup("wu-1", FakeGit(self.repo, self.worktree))
 
     def test_cleanup_actual_isolated_git_fixture_requires_clean_merged_branch(self):
         remote = self.root / "remote.git"
