@@ -2,7 +2,7 @@
 """Run Codex-based routing evaluation for a skill description.
 
 Tests whether Codex judges that a skill's description should be used for a set
-of queries. Outputs results as JSON. This intentionally avoids `claude -p`.
+of queries. Outputs results as JSON and records the requested execution settings.
 """
 
 import argparse
@@ -14,7 +14,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
-from scripts.utils import parse_skill_md
+try:
+    from scripts.utils import parse_skill_md
+except ModuleNotFoundError:
+    # Keep direct ``python scripts/run_eval.py`` invocation usable from a
+    # repository root as well as package-style imports.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from utils import parse_skill_md
 
 
 def find_project_root() -> Path:
@@ -80,6 +86,7 @@ def run_single_query(
     timeout: int,
     project_root: str,
     model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> dict:
     """Run a single query and return Codex's skill routing decision."""
     with tempfile.NamedTemporaryFile("w", suffix=".schema.json", delete=False) as schema_file:
@@ -102,6 +109,8 @@ def run_single_query(
         ]
         if model:
             cmd.extend(["--model", model])
+        if reasoning_effort:
+            cmd.extend(["-c", f"model_reasoning_effort={reasoning_effort}"])
         cmd.append(prompt)
 
         try:
@@ -172,6 +181,7 @@ def run_eval(
     runs_per_query: int = 1,
     trigger_threshold: float = 0.5,
     model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> dict:
     """Run the full eval set and return results."""
     results = []
@@ -188,6 +198,7 @@ def run_eval(
                     timeout,
                     str(project_root),
                     model,
+                    reasoning_effort,
                 )
                 future_to_info[future] = (item, run_idx)
 
@@ -242,6 +253,13 @@ def run_eval(
     return {
         "skill_name": skill_name,
         "description": description,
+        "execution": {
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "timeout_seconds": timeout,
+            "runs_per_query": runs_per_query,
+            "num_workers": num_workers,
+        },
         "results": results,
         "summary": {
             "total": total,
@@ -262,6 +280,7 @@ def main():
     parser.add_argument("--runs-per-query", type=int, default=3, help="Number of runs per query")
     parser.add_argument("--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold")
     parser.add_argument("--model", default=None, help="Model to use for codex exec (default: user's configured model)")
+    parser.add_argument("--reasoning-effort", default=None, help="Reasoning effort passed to codex exec; null means configured default")
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     args = parser.parse_args()
 
@@ -289,6 +308,7 @@ def main():
         runs_per_query=args.runs_per_query,
         trigger_threshold=args.trigger_threshold,
         model=args.model,
+        reasoning_effort=args.reasoning_effort,
     )
 
     if args.verbose:

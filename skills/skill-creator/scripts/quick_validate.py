@@ -6,8 +6,44 @@ Quick validation script for skills - minimal version
 import sys
 import os
 import re
-import yaml
 from pathlib import Path
+
+try:
+    import yaml
+except ModuleNotFoundError:  # Keep validation usable in a clean Python install.
+    yaml = None
+
+
+def parse_frontmatter(text):
+    """Parse the small YAML subset needed for skill metadata without PyYAML."""
+    values = {}
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip() or line.lstrip().startswith('#'):
+            index += 1
+            continue
+        if ':' not in line or line[:1].isspace():
+            raise ValueError(f"Invalid frontmatter line: {line}")
+        key, raw = line.split(':', 1)
+        key = key.strip()
+        raw = raw.strip()
+        if not key:
+            raise ValueError("Frontmatter key cannot be empty")
+        if raw in ('>', '|', '>-', '|-'):
+            continuation = []
+            index += 1
+            while index < len(lines) and (lines[index].startswith('  ') or lines[index].startswith('\t')):
+                continuation.append(lines[index].strip())
+                index += 1
+            values[key] = ('\n' if raw.startswith('|') else ' ').join(continuation)
+            continue
+        if (len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "'\""):
+            raw = raw[1:-1]
+        values[key] = raw
+        index += 1
+    return values
 
 def validate_skill(skill_path):
     """Basic validation of a skill"""
@@ -32,11 +68,16 @@ def validate_skill(skill_path):
 
     # Parse YAML frontmatter
     try:
-        frontmatter = yaml.safe_load(frontmatter_text)
+        frontmatter = (yaml.safe_load(frontmatter_text) if yaml else
+                       parse_frontmatter(frontmatter_text))
         if not isinstance(frontmatter, dict):
             return False, "Frontmatter must be a YAML dictionary"
-    except yaml.YAMLError as e:
+    except (ValueError, TypeError) as e:
         return False, f"Invalid YAML in frontmatter: {e}"
+    except Exception as e:
+        if yaml and isinstance(e, yaml.YAMLError):
+            return False, f"Invalid YAML in frontmatter: {e}"
+        raise
 
     # Define allowed properties
     ALLOWED_PROPERTIES = {
