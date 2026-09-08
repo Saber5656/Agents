@@ -1,0 +1,8 @@
+{
+  "repository_snapshot": "fixture-snapshot-v1",
+  "issues": [
+    {"number": 1, "title": "Capture source metadata", "design_refs": ["REQ-CAPTURE-1"], "acceptance_criteria": ["URL and timestamp are retained"], "validation": ["fixture test"]},
+    {"number": 2, "title": "Review and correct claims", "design_refs": ["REQ-REVIEW-1"], "acceptance_criteria": ["Correction history is retained"], "validation": ["fixture test"]},
+    {"number": 3, "title": "Export reviewed brief", "design_refs": ["REQ-EXPORT-1"], "acceptance_criteria": ["Local export retains provenance"], "validation": ["fixture test"]}
+  ]
+}

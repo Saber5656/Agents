@@ -1,0 +1,21 @@
+{
+  "mode": "proposal",
+  "repository": {
+    "root": null,
+    "owner_repo": null,
+    "base_sha": null,
+    "issue_snapshot": null
+  },
+  "product_goal": "A small team can collect, review, and publish a source-backed research brief without losing provenance.",
+  "intended_users": ["small research teams"],
+  "scope": [
+    "source capture with URL and timestamp",
+    "review with evidence and correction history",
+    "export a reviewed brief"
+  ],
+  "exclusions": ["automatic external publishing", "background crawling"],
+  "known_decisions": [],
+  "requested_changes": [],
+  "required_feature_count": 3,
+  "required_whole_product_check": "A captured source can be reviewed and exported while retaining provenance."
+}

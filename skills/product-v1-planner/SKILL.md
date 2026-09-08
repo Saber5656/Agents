@@ -137,5 +137,5 @@ next_handoff: "<owner or skill>"
 **Works with sandboxing:** Yes, subject to repository and network write approval.
 
 - Proposal/audit: filesystem read-only; GitHub read-only when used.
-- Approved apply: exact approved paths and individually approved Issue operations only.
+- Explicit apply: apply is explicitly requested and limited to exact requested paths after the fresh repository and target checks above. Issueization owns derived Issue creation; this skill never performs Issue mutation.
 - Credentials: never generate, register, print, or broaden tokens/secrets.
