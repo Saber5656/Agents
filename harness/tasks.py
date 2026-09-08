@@ -303,6 +303,7 @@ class TaskStore:
         # explicit *_id names remain unambiguous in the schema.
         result["source_task"] = result["source_task_id"]
         result["issueization"] = result["issueization_state"]
+        result["github_issues"] = self.list_issue_links(task_id)
         return result
 
     def _task_by_id(self, task_id):
@@ -510,11 +511,11 @@ class TaskStore:
         return self.get_task(task_id)
 
     def list_issue_links(self, task_id=None):
-        query = "SELECT * FROM task_issues"
+        query = "SELECT ti.*,i.issue_url,i.title FROM task_issues ti JOIN issues i ON i.repository=ti.repository AND i.issue_id=ti.issue_id"
         args = ()
         if task_id is not None:
-            query += " WHERE task_id=?"; args = (task_id,)
-        query += " ORDER BY linked_at"
+            query += " WHERE ti.task_id=?"; args = (task_id,)
+        query += " ORDER BY ti.linked_at"
         with self._lock:
             return [dict(r) for r in self._conn.execute(query, args)]
 

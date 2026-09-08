@@ -2,7 +2,7 @@
 
 ## Snapshot identity
 
-Bind every audit to an immutable repository revision and a canonical scope list. Compute `scope_digest` over sorted repository-relative paths and content digests. If source files change during the audit, return `audit_incomplete`; never combine observations from different revisions.
+Bind every audit to an immutable repository revision and an explicit repository-relative scope list. Nested skill roots are valid when the manifest selects them explicitly (for example `skills/*`). Compute `scope_digest` over sorted repository-relative paths and content digests. If source files change during the audit, a selected skill is missing, or HEAD differs from the manifest, return `audit_incomplete` with exit code `2`; never combine observations from different revisions.
 
 ## Provenance profiles
 
@@ -28,9 +28,11 @@ Profile resolution order:
 - active contracts reference a removed/deprecated capability without migration evidence.
 - benchmark claims freshness without a matching evaluated contract digest.
 
+Unrelated untracked paths outside the explicit scope do not invalidate the audit. A selected directory, `SKILL.md`, or nested input symlink is rejected before its target is read when it crosses the repository boundary.
+
 ## Semantic review candidates
 
-Semantic candidates require human/agent reasoning and must not be hard-coded as automatic deletion:
+Semantic candidates require human/agent reasoning and must not be hard-coded as automatic deletion or compliance:
 
 - duplicate user intent and output artifact;
 - trigger collision or routing ambiguity;

@@ -40,7 +40,9 @@ mode: full | changed
 fail_policy: report_only | new_blockers
 ```
 
-`revision_sha`と監査対象scopeはcleanなtracked treeへ一致させる。scannerはdirty scopeやHEAD不一致を拒否する。JSON/Markdown evidence pathは監査repository外を明示し、同一pathを使わない。
+`repository_root`はGit repository rootを指定し、`scope.include`にはrepository-relativeなskillディレクトリのglobを明示する。現在のAgents repositoryなら、例えば `skills/*` が正しい（`skills/agents-sdk` を `agents-sdk` として渡さない）。`revision_sha`と監査対象scopeはcleanなtracked treeへ一致させる。scannerはdirty scope、選択skillの欠落、HEAD不一致を `audit_incomplete` としてレポートし、正常監査とは別の終了状態にする。JSON/Markdown evidence pathは監査repository外を明示し、同一pathを使わない。
+
+明示scopeの外にある未追跡ファイルやsymlinkは監査対象に含めない。scopeに選択されたskill directory、`SKILL.md`、またはその配下のsymlinkがrepository boundaryの外へ向く場合は拒否する。
 
 Scopeやsource rootが不明なときは、`.system/`、plugin cache、`.workspace/`、別worktree、symlink copyを勝手に同一母集団へ混ぜず、`skill_portfolio_context_missing`を返す。
 
@@ -68,7 +70,12 @@ Scopeやsource rootが不明なときは、`.system/`、plugin cache、`.workspa
 
 Profiles matter:
 
-- `repo_native`: enforce the repository TEMPLATE and local policy.
+- `repo_native`: enforce the current repository policy. The portable `name` and
+  `description` routing fields are required; local fields such as
+  `allowed-tools`, `created`, and `purpose` are optional unless a future
+  manifest explicitly defines them as required. When present, repository
+  metadata is still checked for valid status/category values and read-only
+  tool boundaries.
 - `upstream_compatible`: enforce only the portable Codex skill contract; local metadata gaps are informational.
 - `unclassified`: report provenance uncertainty instead of misclassifying it as noncompliance.
 
@@ -113,7 +120,7 @@ summary:
   handoffs: []
 ```
 
-Use exit code `0` for a valid report with no policy-blocking new finding, `1` for new blockers under an approved `new_blockers` policy, and `2` when the audit itself is invalid/incomplete.
+Use exit code `0` for a complete report with no policy-blocking new finding, `1` for new blockers under an approved `new_blockers` policy, and `2` when the audit itself is invalid/incomplete. `hard_gate_pass` describes deterministic blocker findings only; it is not a claim of semantic or policy compliance. `compliance_status` remains `unverified` when provenance is unknown or a wording-based heuristic is involved.
 
 ## Mutation Boundary
 

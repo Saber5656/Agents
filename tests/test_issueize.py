@@ -16,6 +16,8 @@ from harness.issueize import (
     IssueDraft,
     IssueizationBatch,
     RemoteMalformedError,
+    RemoteError,
+    RemoteNetworkError,
     SubscriptionBoundaryError,
     parse_draft,
     render_issue_body,
@@ -248,6 +250,32 @@ class IssueizationTests(unittest.TestCase):
         self.assertEqual(result["retry"], 1)
         self.assertEqual(remote.creates, 1)
         self.assertEqual(self.store.get_task(task["id"])["issueization_state"], "retry")
+
+    def test_rate_limited_listing_records_diagnostic_and_recovers_later(self):
+        task = self.make_tasks(1)[0]
+        remote, agent = FakeGitHub(), FakeAgent()
+        with mock.patch.object(remote, "list_issues", side_effect=RemoteError("API rate limit exceeded (429)")):
+            result = IssueizationBatch(self.store, remote, agent).run()
+        self.assertEqual(result["retry"], 1)
+        self.assertEqual(self.store.get_task(task["id"])["issueization_state"], "retry")
+        self.assertEqual(remote.creates, 0)
+        result = IssueizationBatch(self.store, remote, agent).run()
+        self.assertEqual(result["issued"], 1)
+        self.assertEqual(remote.creates, 1)
+
+    def test_remote_failures_after_creation_reconcile_without_second_create(self):
+        for failure in (RemoteNetworkError("connection reset"), RemoteError("rate limited"),
+                        RemoteMalformedError("malformed response"), AuthorizationError("401")):
+            with self.subTest(failure=type(failure).__name__):
+                task = self.make_tasks(1)[0]
+                remote, agent = FakeGitHub(), FakeAgent()
+                remote.fail_create = failure
+                IssueizationBatch(self.store, remote, agent).run()
+                self.assertNotEqual(self.store.get_task(task["id"])["issueization_state"], "issued")
+                recovered = IssueizationBatch(self.store, remote, agent).run()
+                self.assertEqual(recovered["issued"], 1)
+                self.assertEqual(remote.creates, 1)
+                self.assertEqual(len(agent.calls), 1)
 
     def test_expired_claim_without_receipt_cannot_prove_create_was_unsent(self):
         task = self.make_tasks(1)[0]

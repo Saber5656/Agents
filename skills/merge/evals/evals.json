@@ -52,9 +52,9 @@
     {
       "id": 9,
       "prompt": "https://github.com/acme/app/pull/42 をマージして",
-      "expected_output": "Rejects the bare GitHub PR URL as unsupported_context, performs no local git merge or PR handoff, and returns required_handoff: typed_saihai_merge_envelope; it routes to pr-merge-gate only after that complete trusted envelope is supplied.",
+      "expected_output": "Routes the bare GitHub PR URL to pr-merge-gate, performs no local git merge or unrelated repository update, and does not require a retired Saihai envelope.",
       "files": [],
-      "expectations": ["Detects GitHub PR negative trigger", "Does not run local merge", "Does not hand off a bare URL", "Names the typed Saihai envelope requirement"]
+      "expectations": ["Routes a bare PR URL to pr-merge-gate", "Does not run local merge", "Does not update unrelated repositories", "Does not require a retired Saihai envelope"]
     },
     {
       "id": 10,

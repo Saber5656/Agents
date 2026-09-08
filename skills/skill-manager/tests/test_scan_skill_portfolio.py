@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -45,6 +46,59 @@ class PortfolioScannerTests(unittest.TestCase):
             report = MODULE.scan(root, "audit-1", "repo_native")
             self.assertEqual(1, len(report["inventory"]))
             self.assertTrue(report["summary"]["hard_gate_pass"])
+
+    def test_frontmatter_accepts_folded_and_literal_block_scalars(self):
+        folded, folded_errors = MODULE.frontmatter(
+            "---\nname: folded\ndescription: >-\n  First line\n  second line\nstatus: active\n---\n"
+        )
+        literal, literal_errors = MODULE.frontmatter(
+            "---\nname: literal\ndescription: |-\n  First line\n  second line\nstatus: active\n---\n"
+        )
+        empty, empty_errors = MODULE.frontmatter(
+            "---\nname: empty\ndescription: >\nstatus: active\n---\n"
+        )
+        self.assertEqual("First line second line", folded["description"])
+        self.assertEqual("First line\nsecond line", literal["description"])
+        self.assertEqual("", empty["description"])
+        self.assertEqual([], folded_errors + literal_errors + empty_errors)
+
+    def test_frontmatter_accepts_quoted_metadata_values(self):
+        metadata, errors = MODULE.frontmatter(
+            "---\nname: \"quoted-skill\"\ndescription: 'A description: with punctuation'\nstatus: \"active\"\n---\n"
+        )
+        self.assertEqual("quoted-skill", metadata["name"])
+        self.assertEqual("A description: with punctuation", metadata["description"])
+        self.assertEqual("active", metadata["status"])
+        self.assertEqual([], errors)
+
+    def test_frontmatter_accepts_indented_sequence_metadata(self):
+        metadata, errors = MODULE.frontmatter(
+            "---\nname: list-skill\ndescription: A list-backed skill\nreferences:\n  - first\n  - \"second reference\"\nstatus: active\n---\n"
+        )
+        self.assertEqual(["first", "second reference"], metadata["references"])
+        self.assertEqual([], errors)
+
+    def test_unknown_frontmatter_line_is_unverified_not_invalid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_skill(root, "alpha")
+            skill = root / "alpha" / "SKILL.md"
+            skill.write_text(skill.read_text().replace("---\n# Skill", "unknown syntax without a key\n---\n# Skill"))
+            findings = MODULE.scan(root, "audit-1", "repo_native")["findings"]
+            unparsed = [item for item in findings if item["rule_id"] == "frontmatter_unparsed"]
+            self.assertEqual(1, len(unparsed))
+            self.assertEqual("medium", unparsed[0]["severity"])
+            self.assertFalse(any(item["severity"] == "blocker" for item in unparsed))
+
+    def test_unknown_frontmatter_block_does_not_create_missing_metadata_blocker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_skill(root, "alpha")
+            skill = root / "alpha" / "SKILL.md"
+            skill.write_text(skill.read_text().replace("description: Test skill", "description:\n  nested: value"))
+            findings = MODULE.scan(root, "audit-1", "repo_native")["findings"]
+            self.assertTrue(any(item["rule_id"] == "frontmatter_unparsed" for item in findings))
+            self.assertFalse(any(item["rule_id"] == "required_metadata" and "description" in item["evidence"][0] for item in findings))
 
     def test_name_path_mismatch_is_blocker(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -145,11 +199,22 @@ class PortfolioScannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             self.make_skill(root, "alpha")
-            text = (root / "alpha/SKILL.md").read_text().replace("purpose: One responsibility\n", "")
+            text = (root / "alpha/SKILL.md").read_text().replace("description: Test skill\n", "description:\n")
             (root / "alpha/SKILL.md").write_text(text)
             report = MODULE.scan(root, "audit-1", "upstream_compatible", profiles={"alpha": "repo_native"})
             finding = next(item for item in report["findings"] if item["rule_id"] == "required_metadata")
             self.assertEqual("high", finding["severity"])
+
+    def test_repo_native_accepts_current_codex_minimal_frontmatter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / "alpha"
+            directory.mkdir()
+            (directory / "SKILL.md").write_text(
+                "---\nname: alpha\ndescription: Current Codex skill\n---\n# Skill\n"
+            )
+            report = MODULE.scan(root, "audit-1", "repo_native")
+            self.assertFalse(any(item["rule_id"] == "required_metadata" for item in report["findings"]))
 
     def test_verified_benchmark_rate_uses_contract_digest(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -275,7 +340,7 @@ class PortfolioScannerTests(unittest.TestCase):
                     path.unlink()
             (root / "beta/evals").rmdir()
             (root / "beta").rmdir()
-            with self.assertRaisesRegex(ValueError, "audited scope is not clean"):
+            with self.assertRaisesRegex(ValueError, "audited scope is (not clean|incomplete)"):
                 MODULE.verify_snapshot(root, revision, [root / "alpha"], [], [])
 
     def test_finding_categories_and_duplicate_paths_are_preserved(self):
@@ -332,6 +397,117 @@ class PortfolioScannerTests(unittest.TestCase):
                 handle.write("\n[one](missing.md)\n[one](missing.md)\n")
             findings = [item for item in MODULE.scan(root, "audit-1", "repo_native")["findings"] if item["rule_id"] == "broken_local_reference"]
             self.assertEqual(1, len(findings))
+
+    def init_git(self, root):
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+
+    def commit_git(self, root):
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
+        return MODULE.git_revision(root)
+
+    def test_nested_repository_scope_uses_repository_relative_git_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "skills").mkdir()
+            self.make_skill(root / "skills", "alpha")
+            revision = MODULE.git_revision(root)
+            report = MODULE.scan(root, "audit-1", "repo_native", include=["skills/*"], revision_sha=revision)
+            self.assertEqual(["skills/alpha"], [item["path"] for item in report["inventory"]])
+            self.assertEqual(MODULE.scoped_digest([root / "skills" / "alpha"], root, revision), report["audit"]["scope_digest"])
+
+    def test_nested_container_scope_binds_revision_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "skills").mkdir()
+            self.make_skill(root / "skills", "alpha")
+            self.init_git(root)
+            revision = self.commit_git(root)
+            directories = MODULE.select_directories(root, ["skills"], [])
+            MODULE.verify_snapshot(root, revision, directories, ["skills"], [])
+            self.assertEqual(["skills/alpha"], MODULE.revision_skill_paths(root, revision, ["skills"], []))
+
+    def test_unrelated_untracked_symlink_is_ignored_by_explicit_scope(self):
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as outside:
+            root = Path(temp)
+            (root / "skills").mkdir()
+            self.make_skill(root / "skills", "alpha")
+            self.init_git(root)
+            revision = self.commit_git(root)
+            (root / "unrelated").symlink_to(Path(outside), target_is_directory=True)
+            report = MODULE.scan(root, "audit-1", "repo_native", include=["skills/*"], revision_sha=revision)
+            self.assertEqual(["skills/alpha"], [item["path"] for item in report["inventory"]])
+
+    def test_selected_escaping_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as outside:
+            root = Path(temp)
+            (root / "skills").mkdir()
+            self.make_skill(Path(outside), "escape")
+            (root / "skills" / "escape").symlink_to(Path(outside) / "escape", target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlinked skill boundary"):
+                MODULE.select_directories(root, ["skills/*"], [])
+
+    def test_snapshot_incompleteness_is_reported_with_status(self):
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as evidence:
+            root = Path(temp)
+            (root / "skills").mkdir()
+            self.make_skill(root / "skills", "alpha")
+            self.init_git(root)
+            revision = self.commit_git(root)
+            (root / "skills" / "alpha" / "SKILL.md").write_text("dirty")
+            evidence = Path(evidence)
+            manifest = evidence / "manifest.json"
+            manifest.write_text(json.dumps({
+                "audit_id": "audit-1", "repository_root": str(root), "revision_sha": revision,
+                "scope": {"include": ["skills/*"], "exclude": []},
+                "profile_source": {"default": "repo_native"}, "mode": "full",
+                "fail_policy": "report_only", "previous_report": None,
+            }))
+            output_json = evidence / "report.json"
+            output_md = evidence / "report.md"
+            result = subprocess.run([
+                sys.executable, str(MODULE_PATH), "--manifest", str(manifest),
+                "--json", str(output_json), "--markdown", str(output_md),
+            ], capture_output=True, text=True)
+            self.assertEqual(2, result.returncode)
+            report = json.loads(output_json.read_text())
+            self.assertEqual("audit_incomplete", report["audit"]["status"])
+            self.assertFalse(report["summary"]["hard_gate_pass"])
+            self.assertIn("not clean", report["audit"]["incomplete_reason"])
+
+    def test_cli_writes_complete_nested_audit_with_tracked_digest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "repo"
+            evidence = base / "evidence"
+            root.mkdir()
+            (root / "skills").mkdir()
+            self.make_skill(root / "skills", "alpha")
+            self.init_git(root)
+            revision = self.commit_git(root)
+            manifest = evidence / "manifest.json"
+            manifest.parent.mkdir()
+            manifest.write_text(json.dumps({
+                "audit_id": "audit-1", "repository_root": str(root), "revision_sha": revision,
+                "scope": {"include": ["skills/*"], "exclude": []},
+                "profile_source": {"default": "repo_native"}, "mode": "full",
+                "fail_policy": "report_only", "previous_report": None,
+            }))
+            output_json = evidence / "report.json"
+            output_md = evidence / "report.md"
+            result = subprocess.run([
+                sys.executable, str(MODULE_PATH), "--manifest", str(manifest),
+                "--json", str(output_json), "--markdown", str(output_md),
+            ], capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stderr)
+            report = json.loads(output_json.read_text())
+            self.assertEqual("complete", report["audit"]["status"])
+            self.assertEqual(
+                MODULE.scoped_digest([root / "skills" / "alpha"], root, revision),
+                report["audit"]["scope_digest"],
+            )
 
 
 if __name__ == "__main__":
