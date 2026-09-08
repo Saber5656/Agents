@@ -97,6 +97,57 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "retry")
         self.assertEqual(self.service.get_job(job["id"])["attempts_count"], 2)
 
+    def test_extra_billing_hold_records_action_without_stopping_independent_task(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        blocked = AuthError("extra billing blocked: openai_api purchase", hold=True,
+                            action="purchase", source="openai_api")
+        with mock.patch.object(self.service, "auth_guard", side_effect=blocked):
+            result = self.service.run_once()
+        self.assertEqual(result["status"], "held")
+        detail = self.service.get_job(job["id"])
+        self.assertEqual(detail["state"], "held")
+        self.assertIn("purchase", detail["last_error"])
+        self.assertEqual(detail["attempts"][0]["status"], "held")
+        self.assertEqual(self.tasks.get_task(self.task["id"])["execution_status"], "held")
+        self.assertIn("local://cost-security/openai_api/purchase", self.tasks.get_task(self.task["id"])["evidence_links"])
+        updates = detail["updates"]
+        self.assertTrue(any("openai_api" in update["message"] for update in updates))
+
+        other = self.tasks.create_task(purpose="independent work")
+        other_workspace = self.root / "other-work"; other_workspace.mkdir()
+        other_job = self.service.enroll(other["id"], other_workspace, "prompt", "context")
+        resumed = self.service.run_once(executor=lambda _: {"status": "failed", "text": "temporary"})
+        self.assertEqual(resumed["job_id"], other_job["id"])
+        self.assertEqual(self.service.get_job(job["id"])["state"], "held")
+
+    def test_paid_adapter_is_not_called_before_cost_hold(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        calls = []
+        blocked = AuthError("extra billing blocked: separately billed inference",
+                            hold=True, action="pay_per_use_inference", source="paid-api")
+        with mock.patch.object(self.service, "auth_guard", side_effect=blocked), \
+             mock.patch("harness.service.default_executor", side_effect=lambda spec: calls.append(spec)):
+            result = self.service.run_once()
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(calls, [])
+        detail = self.service.get_job(job["id"])
+        self.assertIn("paid-api", detail["last_error"])
+        self.assertEqual(detail["state"], "held")
+
+    def test_worker_timeout_is_recorded_and_rescheduled_without_model_promotion(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)
+        seen = []
+        def executor(spec):
+            seen.append(spec["model"])
+            return {"status": "timeout", "text": "worker execution limit elapsed"} if len(seen) == 1 else {"status": "completed"}
+        first = self.service.run_once(executor=executor)
+        self.assertEqual(first["status"], "retry")
+        self.assertEqual(self.service.get_job(job["id"])["attempts"][0]["status"], "retry")
+        second = self.service.run_once(executor=executor)
+        self.assertEqual(second["status"], "needs_verification")
+        self.assertEqual(seen, ["gpt-5.6-luna", "gpt-5.6-luna"])
+        self.assertNotEqual(self.service.get_job(job["id"])["state"], "held")
+
     def test_attempts_use_distinct_run_dirs_and_latest_updates(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)
         seen = []

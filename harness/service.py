@@ -36,6 +36,12 @@ from .service_review import decide_findings
 class AuthError(RuntimeError):
     """Subscription authentication is absent or an API route was requested."""
 
+    def __init__(self, message, *, hold=False, action=None, source=None):
+        super().__init__(message)
+        self.hold = bool(hold)
+        self.action = action
+        self.source = source
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -732,11 +738,12 @@ class ServiceStore:
 
     def _finish_attempt(self, job, result=None, error=None):
         status = result.get("status") if isinstance(result, dict) else "failed"
+        held = status == "held"
         succeeded = status in ("completed", "success")
-        terminal = "needs_verification" if succeeded else "retry"
-        attempt_status = "needs_verification" if succeeded else "retry"
+        terminal = "needs_verification" if succeeded else ("held" if held else "retry")
+        attempt_status = "needs_verification" if succeeded else ("held" if held else "retry")
         attempt_no = job["attempts_count"]
-        if succeeded:
+        if succeeded or held:
             next_at = None
         else:
             delay = retry_delay(job["retry_base"], job["retry_max"], attempt_no)
@@ -749,7 +756,8 @@ class ServiceStore:
         if task is not None:
             try:
                 current = self.tasks.get_task(job["task_id"])
-                self.tasks.update_task(job["task_id"], expected_version=current["version"], execution_status="needs_verification" if succeeded else "running")
+                self.tasks.update_task(job["task_id"], expected_version=current["version"],
+                                       execution_status="needs_verification" if succeeded else ("held" if held else "running"))
             except ConflictError:
                 pass
             except Exception as exc:
@@ -759,6 +767,20 @@ class ServiceStore:
                                      (f"task status update failed: {exc}", now(), job["id"]))
                 except Exception:
                     pass
+        if held:
+            action = result.get("action") if isinstance(result, dict) else None
+            source = result.get("source") if isinstance(result, dict) else None
+            diagnostic = error or (result.get("text") if isinstance(result, dict) else None) or "operation held"
+            evidence = f"local://cost-security/{source}/{action}" if source and action else "local://cost-security/hold"
+            self.record_update(job["id"],
+                               f"Cost/security hold: {diagnostic}",
+                               [evidence])
+            try:
+                self.tasks.add_evidence(job["task_id"], [evidence], kind="cost_security_hold")
+            except Exception:
+                # The service/job receipt above remains the source of truth if
+                # a concurrent task update cannot be appended here.
+                pass
         return {"status": terminal, "job_id": job["id"], "attempt": attempt_no}
 
     def run_once(self, executor: Callable | None = None, verifier: Callable | None = None):
@@ -774,7 +796,15 @@ class ServiceStore:
                 try:
                     self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"))
                 except Exception as exc:
-                    return self._finish_attempt(job, result={"status": "failed", "text": str(exc)}, error=str(exc))
+                    held = isinstance(exc, AuthError) and exc.hold
+                    diagnostic = str(exc)
+                    if held:
+                        diagnostic += f" [source={exc.source or 'unknown'}; action={exc.action or 'unknown'}]"
+                    result = {"status": "held" if held else "failed", "text": diagnostic}
+                    if held:
+                        result.update({"action": exc.action, "source": exc.source,
+                                       "hold_category": "cost_or_security"})
+                    return self._finish_attempt(job, result=result, error=diagnostic)
                 executor = default_executor
             try:
                 latest = self.get_job(job["id"])
@@ -1161,8 +1191,12 @@ class ServiceStore:
     @staticmethod
     def auth_guard(env, login_check=None):
         blocked = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CODEX_API_KEY")
-        if any(env.get(key) for key in blocked):
-            raise AuthError("API inference routes are forbidden; use ChatGPT subscription login")
+        configured = next((key for key in blocked if env.get(key)), None)
+        if configured:
+            raise AuthError(
+                f"API inference routes are forbidden; use ChatGPT subscription login "
+                f"(extra billing blocked: source={configured}; action=inference_api_route)",
+                hold=True, action="inference_api_route", source=configured)
         if login_check is None:
             def login_check(actual):
                 try:
