@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import stat
 import sys
@@ -62,6 +63,7 @@ REQUIRED_RUNTIME_FILES = frozenset(
         "verify-runtime-release.py",
     }
 )
+OPTIONAL_RUNTIME_FILES = frozenset({"daily-it-news.publish.prompt.md"})
 
 
 class ReleaseVerificationError(ValueError):
@@ -169,6 +171,49 @@ def digest_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def normalize_runtime(workdir: Path) -> int:
+    """Normalize copied public assets, never shared inodes or private state."""
+    if not workdir.is_dir() or workdir.is_symlink():
+        raise ReleaseVerificationError("runtime_root_unavailable")
+    root_fd = None
+    opened = []
+    try:
+        root_fd = os.open(workdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        # Validate the complete package before any mode mutation. Keep each
+        # inode open so replacement of a name cannot redirect chmod.
+        for name in sorted(REQUIRED_RUNTIME_FILES | OPTIONAL_RUNTIME_FILES):
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=root_fd)
+            except FileNotFoundError:
+                if name in OPTIONAL_RUNTIME_FILES:
+                    continue
+                raise ReleaseVerificationError("runtime_file_unavailable")
+            except OSError as exc:
+                raise ReleaseVerificationError("runtime_file_not_regular") from exc
+            opened.append((name, fd))
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ReleaseVerificationError("runtime_file_not_exclusive_regular")
+        for name, fd in opened:
+            metadata = os.fstat(fd)
+            named = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino) or metadata.st_nlink != 1:
+                raise ReleaseVerificationError("runtime_file_changed")
+            mode = 0o755 if name.endswith((".py", ".sh")) else 0o644
+            os.fchmod(fd, mode)
+            if stat.S_IMODE(os.fstat(fd).st_mode) != mode:
+                raise ReleaseVerificationError("runtime_file_mode_update_failed")
+        return len(opened)
+    except OSError as exc:
+        raise ReleaseVerificationError("runtime_file_mode_update_failed") from exc
+    finally:
+        for _, fd in opened:
+            os.close(fd)
+        if root_fd is not None:
+            os.close(root_fd)
+
+
 def verify(manifest_path: Path, workdir: Path) -> tuple[str, int]:
     """Verify each manifest entry against a bounded runtime directory."""
     if not workdir.is_dir() or workdir.is_symlink():
@@ -198,6 +243,13 @@ def verify(manifest_path: Path, workdir: Path) -> tuple[str, int]:
 
 def main(argv: list[str]) -> int:
     """CLI entry point: verifier MANIFEST WORKDIR."""
+    if len(argv) == 3 and argv[1] == "--normalize":
+        try:
+            count = normalize_runtime(Path(argv[2]))
+        except ReleaseVerificationError as exc:
+            return fail(str(exc))
+        print(f"runtime release modes normalized: files={count}")
+        return 0
     if len(argv) != 3:
         return fail("usage", code=EXIT_USAGE)
     try:

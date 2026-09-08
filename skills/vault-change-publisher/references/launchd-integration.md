@@ -1,3 +1,11 @@
+> Historical deployment design: current COMMON and the user request override the
+> retired role/manifest/approval/PR gates below. This document does not authorize
+> activation of a retired runtime. The mode-normalization utility can be tested
+> on an explicitly selected disposable package without starting a service.
+> It validates every listed asset before changing modes and rejects symlinks,
+> non-regular files, and hardlinked inodes. Private files outside the asset list
+> are left untouched; copy assets rather than sharing their inodes.
+
 # launchd Integration
 
 `launchd`は04:00にdaily専用runnerを起動するだけとする。汎用automation ID dispatcherへdaily publication権限を追加しない。
@@ -70,7 +78,7 @@ launchd 04:00
 | `scripts/interpret-automation-result.sh` | same workdir |
 | generated `runtime-release-manifest.json` | same workdir (ignored, deployment-owned) |
 
-配備はPR前受入とmerge後releaseの二段階で行う。PR前受入では、独立review済みのfrozen task-branch sourceをbackup付きでcanonical production runtimeへcopyし、各source/destinationのSHA-256とfile mode一致を確認する。task worktreeをproduction runtime pathとして参照しない。コピー完了後は配備対象の全runtime file（modeとSHA-256）およびsource commitを`runtime-release-manifest.json`へ封印し、runner起動時の`verify-runtime-release.py`が毎回照合する。manifest欠落、差替え、mode変更、digest不一致はpublication前にfail closedする。実環境E2E成功後だけsource commit/push/PRへ進み、merge後は最新mainの同一filesからmanifestを再生成してcanonical runtimeへ再配備する。特にdirect executionされる`collect-public-sources.py`、`run-pinned-review.py`、`send-it-news-discord-notification.py`、`verify-runtime-release.py`は、両段階でtracked sourceとruntimeの双方がexecutableであることをgateで検証する。
+配備はPR前受入とmerge後releaseの二段階で行う。PR前受入では、独立review済みのfrozen task-branch sourceをbackup付きでcanonical production runtimeへpackageし、source/destinationのSHA-256一致とdestinationのfile mode契約を確認する。task worktreeをproduction runtime pathとして参照しない。runtime package assemblyがcheckoutの実modeとumaskを持ち込まないよう、明示したruntime assetだけを`verify-runtime-release.py --normalize <runtime-root>`で通常data/schema/promptは`0644`、direct executionするPython/shellは`0755`へ正規化する。`automation.local.env`、logs、receiptsなどprivate stateはpackage対象外で、`umask 077`の制約を維持する。コピー完了後は配備対象の全runtime file（modeとSHA-256）およびsource commitを`runtime-release-manifest.json`へ封印し、runner起動時の`verify-runtime-release.py`が毎回照合する。manifest欠落、差替え、mode変更、digest不一致はpublication前にfail closedする。実環境E2E成功後だけsource commit/push/PRへ進み、merge後は最新mainの同一filesからmanifestを再生成してcanonical runtimeへ再配備する。特にdirect executionされる`collect-public-sources.py`、`run-pinned-review.py`、`send-it-news-discord-notification.py`、`verify-runtime-release.py`は、両段階でtracked sourceとruntimeの双方がexecutableであることもgateで検証する。
 
 File Provider/iCloud上の既存ファイルは、GitのHEAD・index・dirty blob OID・mode・mtimeをcaptureしてから扱い、publication helperが上書きしない。capture時に既存dirty fileの実体化だけがタイムアウトした場合は、該当entryを`unavailable`として封印し、そのVaultのmodeを`own_only`へ下げる。GitのHEAD/index/remoteが安定し、今回の新規artifact targetが競合しない限り、クラウドの同期待ちで新規artifactのpublication全体を停止しない。`own_only` commitは既存dirty/staged pathを共有indexへ追加せず、targetだけを隔離indexからcommitする。GitのCASとtarget reservationで実行中の既存ファイル更新・競合を検知し、競合時だけbounded replanまたはVault単位のblockedへ移行する。
 

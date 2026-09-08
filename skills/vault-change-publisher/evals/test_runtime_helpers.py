@@ -67,6 +67,12 @@ EXPECTED_RUNTIME_RELEASE_FILES = frozenset(
     }
 )
 sys.path.insert(0, str(SCRIPTS))
+VERIFY_SPEC = importlib.util.spec_from_file_location(
+    "verify_runtime_release", RUNTIME_RELEASE_VERIFIER
+)
+assert VERIFY_SPEC and VERIFY_SPEC.loader
+VERIFY_MODULE = importlib.util.module_from_spec(VERIFY_SPEC)
+VERIFY_SPEC.loader.exec_module(VERIFY_MODULE)
 PUSH_SPEC = importlib.util.spec_from_file_location(
     "push_committed_heads", SCRIPTS / "push-committed-heads.py"
 )
@@ -524,6 +530,71 @@ def load_environment(*, checkout_root, environ, require_catalog):
             target.chmod(0o755 if name.endswith((".py", ".sh")) else 0o644)
         return self.write_runtime_release_manifest(release_root, source_commit)
 
+    def test_runtime_asset_packaging_normalizes_source_modes_under_both_umasks(self) -> None:
+        """Source permission drift cannot make a release fail its mode contract."""
+        for label, mask in (("restrictive", 0o077), ("ordinary", 0o022)):
+            package_root = self.root / f"runtime-package-{label}"
+            package_root.mkdir()
+            for name in EXPECTED_RUNTIME_RELEASE_FILES | {"daily-it-news.publish.prompt.md"}:
+                target = package_root / name
+                target.write_text(f"fixture:{name}\n", encoding="utf-8")
+                target.chmod(0o600)
+            private_state = package_root / "automation.local.env"
+            private_state.write_text("PRIVATE=1\n", encoding="utf-8")
+            private_state.chmod(0o600)
+
+            previous_umask = os.umask(mask)
+            try:
+                normalized = VERIFY_MODULE.normalize_runtime(package_root)
+            finally:
+                os.umask(previous_umask)
+
+            self.assertEqual(normalized, len(EXPECTED_RUNTIME_RELEASE_FILES) + 1)
+            self.assertEqual(
+                stat.S_IMODE((package_root / "collection-result.schema.json").stat().st_mode), 0o644
+            )
+            self.assertEqual(
+                stat.S_IMODE((package_root / "verify-runtime-release.py").stat().st_mode), 0o755
+            )
+            self.assertEqual(stat.S_IMODE(private_state.stat().st_mode), 0o600)
+
+    def test_runtime_asset_packaging_accepts_missing_optional_prompt(self) -> None:
+        """A runtime without the optional publication prompt still normalizes."""
+        package_root = self.root / "runtime-package-without-optional"
+        package_root.mkdir()
+        for name in EXPECTED_RUNTIME_RELEASE_FILES:
+            target = package_root / name
+            target.write_text(f"fixture:{name}\n", encoding="utf-8")
+            target.chmod(0o600)
+
+        self.assertEqual(
+            VERIFY_MODULE.normalize_runtime(package_root),
+            len(EXPECTED_RUNTIME_RELEASE_FILES),
+        )
+
+    def test_normalization_rejects_shared_or_invalid_assets_before_changing_modes(self) -> None:
+        for kind in ("hardlink", "symlink", "missing"):
+            with self.subTest(kind=kind):
+                root = self.root / ("invalid-package-" + kind)
+                root.mkdir()
+                for name in EXPECTED_RUNTIME_RELEASE_FILES:
+                    (root / name).write_text("public fixture")
+                    (root / name).chmod(0o600)
+                private = self.root / ("private-" + kind)
+                private.write_text("private fixture")
+                private.chmod(0o600)
+                bad = root / sorted(EXPECTED_RUNTIME_RELEASE_FILES)[-1]
+                bad.unlink()
+                if kind == "hardlink":
+                    os.link(private, bad)
+                elif kind == "symlink":
+                    bad.symlink_to(private)
+                before = {p.name: stat.S_IMODE(p.lstat().st_mode) for p in root.iterdir()}
+                with self.assertRaises(VERIFY_MODULE.ReleaseVerificationError):
+                    VERIFY_MODULE.normalize_runtime(root)
+                self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o600)
+                self.assertEqual(before, {p.name: stat.S_IMODE(p.lstat().st_mode) for p in root.iterdir()})
+
     def test_runtime_release_verifier_accepts_exact_manifest(self) -> None:
         """Accept the independently enumerated complete runtime release."""
         release_root = self.workdir / "release"
@@ -557,6 +628,20 @@ def load_environment(*, checkout_root, environ, require_catalog):
         )
         self.assertEqual(result.returncode, 78)
         self.assertIn("manifest_runtime_file_set_mismatch", result.stderr)
+
+    def test_runtime_release_verifier_rejects_mode_drift(self) -> None:
+        """A private mode accidentally copied into the package fails closed."""
+        release_root = self.workdir / "release-mode-drift"
+        manifest = self.create_runtime_release_fixture(release_root, "d" * 40)
+        (release_root / "collection-result.schema.json").chmod(0o600)
+        result = subprocess.run(
+            [str(RUNTIME_RELEASE_VERIFIER), str(manifest), str(release_root)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 78)
+        self.assertIn("runtime_file_mode_mismatch", result.stderr)
 
     def test_runtime_release_verifier_rejects_tampering_and_symlink_escape(self) -> None:
         """A changed file or symlink cannot silently replace the reviewed runtime."""
@@ -12236,6 +12321,8 @@ def load_environment(*, checkout_root, environ, require_catalog):
             SOURCE_CATALOG,
         ):
             shutil.copy2(source, runtime / source.name)
+
+        VERIFY_MODULE.normalize_runtime(runtime)
 
         runtime_verifier = runtime / "verify-runtime-release.py"
         runtime_verifier.chmod(0o755)
