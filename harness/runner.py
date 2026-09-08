@@ -215,7 +215,7 @@ def reconcile_process(state):
         return {'status': 'unknown', 'pid': pid, 'reason': 'identity_unavailable', 'identity': current}
     for key in ('start_ticks', 'start_time'):
         if recorded.get(key) and current.get(key) != recorded[key]:
-            return {'status': 'unknown', 'pid': pid, 'reason': 'pid_reused', 'identity': current}
+            return {'status': 'terminated', 'pid': pid, 'reason': 'pid_reused', 'identity': current}
     if recorded.get('command') and current.get('command') and recorded['command'] != current['command']:
         return {'status': 'unknown', 'pid': pid, 'reason': 'command_changed', 'identity': current}
     return {'status': 'alive', 'pid': pid, 'identity': current}

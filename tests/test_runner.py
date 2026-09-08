@@ -435,6 +435,16 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual('unknown',result['status'])
 
 
+    def test_old_pid_with_different_start_identity_is_terminated(self):
+        with patch.object(h, 'process_identity', return_value={'pid':123,'start_ticks':'new','command':'worker'}):
+            result=h.reconcile_process({'pid':123,'identity':{'start_ticks':'old','command':'worker'}})
+        self.assertEqual('terminated', result['status'])
+
+    def test_same_process_with_changed_command_is_not_proven_terminated(self):
+        with patch.object(h, 'process_identity', return_value={'pid':123,'start_ticks':'same','command':'new executable'}):
+            result=h.reconcile_process({'pid':123,'identity':{'start_ticks':'same','command':'worker'}})
+        self.assertEqual('unknown', result['status'])
+
     def test_save_is_atomic_and_private(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'state.json'

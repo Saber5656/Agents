@@ -66,3 +66,7 @@ terminal provider output is reconciled into the local store before completion
 is reported. Replaying the same event does not duplicate the discovery. A
 changed originating task or capture location cannot reuse an earlier receipt;
 malformed capture remains incomplete without starting another provider.
+
+A PID with a different recorded start identity proves the old process has
+terminated. A changed command alone, permission failure, or unavailable identity
+remains unknown, preserving the original process until reconciliation is possible.
