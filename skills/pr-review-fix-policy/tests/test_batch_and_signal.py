@@ -119,7 +119,7 @@ class BatchTests(unittest.TestCase):
 
     @patch.object(BATCH, "run_review_graphql")
     @patch.object(BATCH, "run_graphql")
-    def test_paginates_submitted_reviews_and_discards_old_head(self, graphql, review_graphql):
+    def test_paginates_submitted_reviews_and_retains_old_head_provenance(self, graphql, review_graphql):
         def payload(reviews, state="OPEN", has_next=False):
             return {"data": {"repository": {"pullRequest": {
                 "url": "u", "state": state, "baseRefName": "main", "headRefName": "b",
@@ -139,6 +139,63 @@ class BatchTests(unittest.TestCase):
         self.assertFalse(result["reviews"][0]["head_match"])
         self.assertTrue(all(item["head_match"] for item in result["reviews"][1:]))
         review_graphql.assert_called_once_with("owner", "repo", 1, "next")
+
+    @patch.object(BATCH, "run_review_graphql")
+    @patch.object(BATCH, "run_graphql")
+    def test_missing_submitted_review_cursor_is_incomplete(self, graphql, review_graphql):
+        def payload(has_next=True, cursor="next"):
+            return {"data": {"repository": {"pullRequest": {
+                "url": "u", "state": "OPEN", "baseRefName": "main", "headRefName": "b",
+                "headRefOid": "a" * 40,
+                "reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+                "reviews": {"nodes": [], "pageInfo": {"hasNextPage": has_next, "endCursor": cursor}},
+            }}}}
+        graphql.return_value = payload()
+        review_graphql.return_value = {"data": {"repository": {"pullRequest": {
+            "headRefOid": "a" * 40,
+            "reviews": {"nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": None}},
+        }}}}
+        result = BATCH.fetch_one("owner", "repo", 1)
+        self.assertEqual("review_pagination_cursor_missing", result["blocker"])
+        self.assertFalse(result["pagination_complete"])
+
+    @patch.object(BATCH, "run_review_graphql")
+    @patch.object(BATCH, "run_graphql")
+    def test_repeated_submitted_review_cursor_is_incomplete(self, graphql, review_graphql):
+        payload = {"data": {"repository": {"pullRequest": {
+            "url": "u", "state": "OPEN", "baseRefName": "main", "headRefName": "b",
+            "headRefOid": "a" * 40,
+            "reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+            "reviews": {"nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": "next"}},
+        }}}}
+        graphql.return_value = payload
+        review_graphql.return_value = {"data": {"repository": {"pullRequest": {
+            "headRefOid": "a" * 40,
+            "reviews": {"nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": "next"}},
+        }}}}
+        result = BATCH.fetch_one("owner", "repo", 1)
+        self.assertEqual("review_pagination_cursor_repeated", result["blocker"])
+        self.assertFalse(result["pagination_complete"])
+
+    @patch.object(BATCH, "run_graphql")
+    def test_submitted_review_keeps_full_body_alongside_summary(self, graphql):
+        body = "initial context\n" + ("detail " * 60) + "FINDING_AT_END"
+        payload = {"data": {"repository": {"pullRequest": {
+            "url": "u", "state": "OPEN", "baseRefName": "main", "headRefName": "b",
+            "headRefOid": "a" * 40,
+            "reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+            "reviews": {"nodes": [{
+                "id": "R1", "state": "CHANGES_REQUESTED", "body": body,
+                "commit": {"oid": "a" * 40}, "author": {"login": "reviewer"},
+            }], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+        }}}}
+        graphql.side_effect = [payload, payload]
+        result = BATCH.fetch_one("owner", "repo", 1)
+        review = result["reviews"][0]
+        self.assertEqual(body, review["body"])
+        self.assertIn("FINDING_AT_END", review["body"])
+        self.assertLess(len(review["summary"]), len(review["body"]))
+        self.assertNotIn("FINDING_AT_END", review["summary"])
 
 
 class SignalTests(unittest.TestCase):

@@ -140,6 +140,7 @@ def fetch_one(owner: str, repo: str, number: int) -> dict[str, Any]:
     cursor: str | None = None
     fixed_head: str | None = None
     review_cursor: str | None = None
+    review_seen_cursors: set[str] = set()
     reviews_by_id: dict[str, dict[str, Any]] = {}
     try:
         while True:
@@ -193,13 +194,17 @@ def fetch_one(owner: str, repo: str, number: int) -> dict[str, Any]:
                 })
             page = connection["pageInfo"]
             if not page["hasNextPage"]:
-                record["pagination_complete"] = True
                 break
             cursor = page["endCursor"]
             if not cursor:
                 record["blocker"] = "pagination_cursor_missing"
                 break
         while review_cursor:
+            if review_cursor in review_seen_cursors:
+                record["blocker"] = "review_pagination_cursor_repeated"
+                record["pagination_complete"] = False
+                return record
+            review_seen_cursors.add(review_cursor)
             payload = run_review_graphql(owner, repo, number, review_cursor)
             review_pr = payload.get("data", {}).get("repository", {}).get("pullRequest")
             if review_pr is None or str(review_pr.get("headRefOid") or "").lower() != fixed_head:
@@ -213,7 +218,19 @@ def fetch_one(owner: str, repo: str, number: int) -> dict[str, Any]:
                 if review_id:
                     reviews_by_id[review_id] = review
             page = review_connection.get("pageInfo") or {}
-            review_cursor = page.get("endCursor") if page.get("hasNextPage") else None
+            if page.get("hasNextPage"):
+                next_cursor = page.get("endCursor")
+                if not next_cursor:
+                    record["blocker"] = "review_pagination_cursor_missing"
+                    record["pagination_complete"] = False
+                    return record
+                if next_cursor in review_seen_cursors:
+                    record["blocker"] = "review_pagination_cursor_repeated"
+                    record["pagination_complete"] = False
+                    return record
+                review_cursor = next_cursor
+            else:
+                review_cursor = None
         final_payload = run_graphql(owner, repo, number, None)
         final_pr = final_payload.get("data", {}).get("repository", {}).get("pullRequest")
         final_head = str((final_pr or {}).get("headRefOid") or "").lower()
@@ -232,7 +249,8 @@ def fetch_one(owner: str, repo: str, number: int) -> dict[str, Any]:
             {
                 "id": review_id,
                 "state": review.get("state"),
-                "body": summarize(review.get("body") or ""),
+                "body": review.get("body") or "",
+                "summary": summarize(review.get("body") or ""),
                 "author": (review.get("author") or {}).get("login"),
                 "submitted_at": review.get("submittedAt"),
                 "updated_at": review.get("updatedAt"),
@@ -242,12 +260,14 @@ def fetch_one(owner: str, repo: str, number: int) -> dict[str, Any]:
             }
             for review_id, review in reviews_by_id.items()
         ], key=lambda item: item["id"])
+        record["pagination_complete"] = True
         record["state"] = final_pr.get("state")
         if record.get("state") != "OPEN":
             record["blocker"] = f"pr_state_{str(record.get('state')).lower()}"
         record["actionable_threads"].sort(key=lambda item: (item["path"] or "", item["original_line"] or -1, item["thread_node_id"]))
     except (RuntimeError, json.JSONDecodeError) as error:
         record["blocker"] = f"fetch_failed: {error}"
+        record["pagination_complete"] = False
     return record
 
 
