@@ -138,6 +138,7 @@ def fetch_one(owner: str, repo: str, number: int) -> dict[str, Any]:
         "ignored": {"resolved": 0, "outdated": 0}, "blocker": None,
     }
     cursor: str | None = None
+    thread_seen_cursors: set[str] = set()
     fixed_head: str | None = None
     review_cursor: str | None = None
     review_seen_cursors: set[str] = set()
@@ -198,7 +199,11 @@ def fetch_one(owner: str, repo: str, number: int) -> dict[str, Any]:
             cursor = page["endCursor"]
             if not cursor:
                 record["blocker"] = "pagination_cursor_missing"
-                break
+                return record
+            if cursor in thread_seen_cursors:
+                record["blocker"] = "pagination_cursor_repeated"
+                return record
+            thread_seen_cursors.add(cursor)
         while review_cursor:
             if review_cursor in review_seen_cursors:
                 record["blocker"] = "review_pagination_cursor_repeated"

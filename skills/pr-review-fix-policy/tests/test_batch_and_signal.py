@@ -23,6 +23,25 @@ CONSUMER = load("consumer", "scripts/consume_review_signal.py")
 
 
 class BatchTests(unittest.TestCase):
+    @patch.object(BATCH, "run_graphql")
+    def test_invalid_thread_cursor_never_certifies_complete_fetch(self, graphql):
+        for cursor, blocker in [(None, "pagination_cursor_missing"),
+                                ("repeat", "pagination_cursor_repeated")]:
+            with self.subTest(cursor=cursor):
+                payload = {"data": {"repository": {"pullRequest": {
+                    "url": "u", "state": "OPEN", "baseRefName": "main", "headRefName": "b",
+                    "headRefOid": "a" * 40,
+                    "reviewThreads": {"nodes": [], "pageInfo": {
+                        "hasNextPage": True, "endCursor": cursor}},
+                    "reviews": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+                }}}}
+                graphql.reset_mock()
+                graphql.side_effect = [payload, payload, RuntimeError("Unexpected repeated request")]
+                result = BATCH.fetch_one("owner", "repo", 1)
+                self.assertEqual(blocker, result["blocker"])
+                self.assertFalse(result["pagination_complete"])
+                self.assertLessEqual(graphql.call_count, 2)
+
     def test_requires_explicit_owner_repo_number(self):
         self.assertEqual(("owner", "repo", 12), BATCH.parse_ref("owner/repo#12"))
         self.assertEqual(("Owner", "Repo", 12), BATCH.parse_ref("https://github.com/Owner/Repo/pull/12"))
