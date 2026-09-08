@@ -7,6 +7,7 @@ overfitting.
 """
 
 import argparse
+import importlib.util
 import json
 import random
 import sys
@@ -17,16 +18,30 @@ from pathlib import Path
 
 from typing import Optional
 
-from scripts.generate_report import generate_html
-from scripts.improve_description import improve_description
-from scripts.run_eval import (
-    DEFAULT_MODEL,
-    DEFAULT_REASONING_EFFORT,
-    VALID_REASONING_EFFORTS,
-    find_project_root,
-    run_eval,
-)
-from scripts.utils import parse_skill_md
+
+def _load_adjacent_module(filename: str, module_name: str):
+    """Load a sibling script without relying on global package names."""
+    module_path = Path(__file__).resolve().with_name(filename)
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load adjacent helper: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_report = _load_adjacent_module("generate_report.py", "_skill_creator_generate_report")
+_improve = _load_adjacent_module("improve_description.py", "_skill_creator_improve_description")
+_eval = _load_adjacent_module("run_eval.py", "_skill_creator_run_eval")
+_utils = _load_adjacent_module("utils.py", "_skill_creator_utils")
+generate_html = _report.generate_html
+improve_description = _improve.improve_description
+DEFAULT_MODEL = _eval.DEFAULT_MODEL
+DEFAULT_REASONING_EFFORT = _eval.DEFAULT_REASONING_EFFORT
+VALID_REASONING_EFFORTS = _eval.VALID_REASONING_EFFORTS
+find_project_root = _eval.find_project_root
+run_eval = _eval.run_eval
+parse_skill_md = _utils.parse_skill_md
 
 
 def split_eval_set(eval_set: list[dict], holdout: float, seed: int = 42) -> tuple[list[dict], list[dict]]:

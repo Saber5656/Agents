@@ -6,6 +6,7 @@ using `codex exec`.
 """
 
 import argparse
+import importlib.util
 import json
 import subprocess
 import sys
@@ -14,23 +15,24 @@ from pathlib import Path
 
 from typing import Optional
 
-try:
-    from scripts.utils import parse_skill_md
-    from scripts.run_eval import (
-        DEFAULT_REASONING_EFFORT,
-        build_codex_command,
-        ensure_chatgpt_subscription,
-    )
-except ModuleNotFoundError:
-    # Keep direct script invocation usable from a repository root as well as
-    # package-style imports.
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from utils import parse_skill_md
-    from run_eval import (
-        DEFAULT_REASONING_EFFORT,
-        build_codex_command,
-        ensure_chatgpt_subscription,
-    )
+
+def _load_adjacent_module(filename: str, module_name: str):
+    """Load a sibling script without importing generic module names."""
+    module_path = Path(__file__).resolve().with_name(filename)
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load adjacent helper: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_utils = _load_adjacent_module("utils.py", "_skill_creator_utils")
+_run_eval = _load_adjacent_module("run_eval.py", "_skill_creator_run_eval")
+parse_skill_md = _utils.parse_skill_md
+DEFAULT_REASONING_EFFORT = _run_eval.DEFAULT_REASONING_EFFORT
+build_codex_command = _run_eval.build_codex_command
+ensure_chatgpt_subscription = _run_eval.ensure_chatgpt_subscription
 
 
 DESCRIPTION_SCHEMA = {

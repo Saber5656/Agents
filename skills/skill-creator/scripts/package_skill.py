@@ -11,17 +11,26 @@ Example:
 """
 
 import fnmatch
+import importlib.util
 import sys
 import zipfile
 from pathlib import Path
 
-try:
-    from scripts.quick_validate import validate_skill
-except ModuleNotFoundError:
-    # Support both `python -m scripts.package_skill` from this directory and
-    # direct execution from a repository checkout.
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from quick_validate import validate_skill
+
+def _load_adjacent_validator():
+    """Load the validator beside this script without changing sys.path."""
+    validator_path = Path(__file__).resolve().with_name("quick_validate.py")
+    spec = importlib.util.spec_from_file_location(
+        "_skill_creator_quick_validate", validator_path
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load adjacent helper: {validator_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.validate_skill
+
+
+validate_skill = _load_adjacent_validator()
 
 # Patterns to exclude when packaging skills.
 EXCLUDE_DIRS = {"__pycache__", "node_modules"}

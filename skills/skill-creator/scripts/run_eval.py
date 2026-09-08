@@ -6,6 +6,7 @@ of queries. Outputs results as JSON and records the requested execution settings
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -16,13 +17,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
-try:
-    from scripts.utils import parse_skill_md
-except ModuleNotFoundError:
-    # Keep direct ``python scripts/run_eval.py`` invocation usable from a
-    # repository root as well as package-style imports.
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from utils import parse_skill_md
+
+def _load_adjacent_parse_skill_md():
+    """Load this skill's parser without mutating import search state."""
+    utils_path = Path(__file__).resolve().with_name("utils.py")
+    spec = importlib.util.spec_from_file_location(
+        "_skill_creator_utils", utils_path
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load adjacent helper: {utils_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.parse_skill_md
+
+
+parse_skill_md = _load_adjacent_parse_skill_md()
 
 
 def find_project_root() -> Path:
