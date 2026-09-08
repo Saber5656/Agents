@@ -38,7 +38,7 @@
 
 ## trigger-eval.json
 
-description最適化用の routing eval を定義する。`run_eval.py` / `run_loop.py` は `claude -p` を使わず、`codex exec` で各クエリについてスキルを使うべきかを判定する。
+description最適化用の routing eval を定義する。`run_eval.py` / `run_loop.py` は別のlive trigger APIを使わず、`codex exec` で各クエリについてスキルを使うべきかを判定する。
 
 ```json
 [
@@ -78,7 +78,7 @@ description最適化用の routing eval を定義する。`run_eval.py` / `run_l
 - `confidence`: 0〜1 の信頼度
 - `reason`: 短い判断理由
 
-`run_eval.py` の集計出力では後方互換のため、従来の `trigger_rate`、`triggers`、`runs`、`pass` を維持する。ここでの `trigger` は Claude live trigger ではなく、Codex routing decision の `should_use_skill` を意味する。
+`run_eval.py` の集計出力では後方互換のため、従来の `trigger_rate`、`triggers`、`runs`、`pass` を維持する。ここでの `trigger` は provider live trigger ではなく、Codex routing decision の `should_use_skill` を意味する。
 
 `valid_runs` は成功した Codex 判定数、`errors` は timeout / command failure / parse failure 数を表す。`errors > 0` の query は、期待値が `should_trigger: false` でも pass にしない。評価基盤の失敗を negative eval の成功として扱わないため。
 
@@ -246,7 +246,7 @@ Improveモードでのバージョン進行を追跡する。ワークスペー�
 
 実行のウォールクロックタイミング。`<run-dir>/timing.json` に配置する。
 
-**キャプチャ方法：** サブエージェントタスクが完了すると、タスク通知に `total_tokens` と `duration_ms` が含まれる。これらを即座に保存すること — それ以外には永続化されず、後から回復できない。
+**キャプチャ方法：** CLIまたはfixture実行から取得できる `total_tokens` と `duration_ms` は実測値として即座に保存する。取得できない値は推測せず `null` とし、後から回復できない通知値を仮定しない。
 
 ```json
 {
@@ -273,7 +273,8 @@ Benchmarkモードからの出力。`benchmarks/<timestamp>/benchmark.json` に�
   "metadata": {
     "skill_name": "pdf",
     "skill_path": "/path/to/pdf",
-    "executor_model": "claude-sonnet-4-20250514",
+    "executor_model": "gpt-5.6-luna",
+    "executor_reasoning_effort": "low",
     "analyzer_model": "most-capable-model",
     "timestamp": "2026-01-15T10:30:00Z",
     "evals_run": [1, 2, 3],

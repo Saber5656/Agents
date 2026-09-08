@@ -11,7 +11,7 @@
 | フィールド | 必須 | 説明 |
 |-----------|:----:|------|
 | `name` | ✅ | スキルID（ディレクトリ名と一致させる） |
-| `description` | ✅ | Claude Code の自動検出トリガー。「いつ使うか」を明確に書く（TRIGGER/DO NOT TRIGGER 形式推奨） |
+| `description` | ✅ | Codex CLI の自動検出トリガー。「いつ使うか」を明確に書く（TRIGGER/DO NOT TRIGGER 形式推奨） |
 | `user-invocable` | ✅ | `true` = `/スキル名` で直接呼び出し可、`false` = 自動トリガーのみ |
 | `allowed-tools` | ✅ | 使用するツールのみ列挙（例: `Read, Grep, Bash, Write`） |
 | `category` | ✅ | Obsidian 管理用カテゴリ（後述） |
@@ -259,8 +259,8 @@ const patterns = {
 
 複数ステップの作業手順、外部ツール連携、またはローカル運用をまとめるスキル。
 role、policy、mode、routing の定義は skills-repo に置かない。
-組織上の判断が必要なスキルは、呼び出し元から明示的に渡された caller-supplied Saihai task context、
-または `Branch Plan`、`Task Change Manifest`、`Publication Manifest` などの typed artifact を入力にする。
+組織上の判断が必要なスキルは、現在の依頼と task context にある要件・判断根拠を入力にする。
+旧ハーネスの envelope、manifest、固定 role は通常の前提にしない。
 utility skill は入力を検証してローカル責務だけを実行し、control plane を探索・起動したり、
 role、approval owner、review provider、routing、publication ownership を独自に決めたりしない。
 
@@ -286,8 +286,8 @@ purpose: 〇〇作業の手順と安全境界を定義する
 
 このスキルが担当するローカル作業と、担当しない判断を1〜2文で説明する。
 外部フロー上の承認、routing、policy 判定が必要な場合は、このスキル内で判断せず、
-呼び出し元から明示的に渡された caller-supplied Saihai task context または typed artifact を使う。
-必要な入力がない場合は control plane の探索や推測をせず、typed missing-context result を返して停止する。
+現在の task context と依頼に記録された要件・判断根拠を使う。必要な入力がない場合は control plane の
+探索や推測をせず、不足情報を明示して停止する。
 
 ## Input Contract
 
