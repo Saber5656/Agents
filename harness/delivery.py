@@ -87,7 +87,11 @@ def verify_remote(repo,expected):
 
 def sync_main(repo,branch,merge_sha,remote):
     oid(merge_sha);verify_remote(repo,remote)
-    if git(repo,'symbolic-ref','--short','HEAD')!=branch:
+    try:
+        current_branch=git(repo,'symbolic-ref','--short','HEAD')
+    except DeliveryError as exc:
+        raise DeliveryError('Canonical checkout is detached or on another branch') from exc
+    if current_branch!=branch:
         raise DeliveryError('Canonical checkout is detached or on another branch')
     if git(repo,'status','--porcelain=v1','-uall'):
         raise DeliveryError('Canonical checkout is dirty; preserve local state')

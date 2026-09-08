@@ -135,6 +135,23 @@ class DeliveryTests(unittest.TestCase):
         (other/'b').write_text('new');git(other,'add','b');git(other,'commit','-m','new');git(other,'push','origin','main')
         latest=git(other,'rev-parse','HEAD')
         self.assertEqual(latest,sync_main(self.repo,'main',self.base,str(remote)))
+        self.assertEqual(latest,sync_main(self.repo,'main',latest,str(remote)))
+        self.assertEqual(latest,git(self.repo,'rev-parse','HEAD'))
+
+    def test_sync_blocks_divergent_and_detached_primary_without_mutation(self):
+        remote=self.root/'remote.git';git(self.root,'init','--bare',str(remote))
+        git(self.repo,'remote','add','origin',str(remote));git(self.repo,'push','origin','main')
+        other=self.root/'other';git(self.root,'clone','--branch','main',str(remote),str(other))
+        git(other,'config','user.name','Fixture');git(other,'config','user.email','fixture@example.invalid')
+        (other/'remote').write_text('remote');git(other,'add','remote');git(other,'commit','-m','remote');git(other,'push','origin','main')
+        (self.repo/'local').write_text('local');git(self.repo,'add','local');git(self.repo,'commit','-m','local')
+        local_head=git(self.repo,'rev-parse','HEAD')
+        with self.assertRaisesRegex(DeliveryError,'diverged'):
+            sync_main(self.repo,'main',git(other,'rev-parse','HEAD'),str(remote))
+        self.assertEqual(local_head,git(self.repo,'rev-parse','HEAD'))
+        git(self.repo,'switch','--detach','HEAD')
+        with self.assertRaisesRegex(DeliveryError,'detached'):
+            sync_main(self.repo,'main',git(other,'rev-parse','HEAD'),str(remote))
 
     def test_other_base_branch_never_mutates_even_with_same_oid(self):
         client=GitHub('fixture/repository')

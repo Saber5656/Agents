@@ -49,6 +49,8 @@ arriving after the last read; local reobservation alone cannot eliminate that ra
 
 Main sync verifies origin, requires the intended clean attached branch, fetches
 and checks that remote main contains the merge, then fast-forwards. Dirty,
-divergent, detached and wrong-branch checkouts are retained. Dependents must wait
-for this observed synchronization; independent work can continue. Archival is a
-separate supported App action after durable context save and actual merge/sync.
+divergent, detached and wrong-branch checkouts are retained with a specific
+blocker. Repeating sync after the same readback is a no-op and creates no extra
+commit. Dependents must wait for this observed synchronization; independent work
+can continue. Archival is a separate supported App action after durable context
+save and actual merge/sync.
