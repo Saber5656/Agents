@@ -15,6 +15,24 @@ python3 -m harness doctor
 
 `gh`、`claude`、`codex` は通常のターミナルでログイン済みのものを利用する。認証情報の生成・複製・置き換えは行わない。
 
+## バックグラウンドサービス
+
+Codex App や会話が終了した後も作業を継続するサービスの背景とレビュー手順は、[background-service.md](../docs/background-service.md) と [service-review.md](../docs/service-review.md) を参照する。既存の `.env` に `AGENTS_ROOT` と `AGENTS_VAULT_ROOT` を設定し、環境ルートを使って明示的に登録する。
+
+```sh
+python3 -m harness.service enroll \
+  --task TASK_ID \
+  --workspace "$AGENTS_ROOT/worktrees/parser" \
+  --prompt-file "$AGENTS_VAULT_ROOT/request.txt" \
+  --context "vault://runs/request/context.json"
+```
+
+macOS の launchd 状態は、登録・起動を変更せずに次で確認できる。`installed`/`running` の状態確認は、App 終了後やホスト再起動後も継続できることの受入確認とは別であり、この README は未観測の結果を保証しない。
+
+```sh
+python3 -m harness.service launchd status --label com.agents.service
+```
+
 ## 認証の差異を調べる
 
 ```sh
