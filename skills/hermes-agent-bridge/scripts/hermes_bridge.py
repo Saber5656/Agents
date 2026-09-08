@@ -97,6 +97,7 @@ def _redact_value(value: Any, env: Mapping[str, str]) -> Any:
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
+    payload = _redact_value(payload, dict(os.environ))
     if path.is_symlink():
         raise ValueError(f"receipt path must not be a symlink: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -498,7 +499,7 @@ def run_command(
             "reconciliation_required": False,
             "resumable": False,
         }
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(_redact_value(payload, environment), ensure_ascii=False, indent=2))
         return 126
     try:
         route = validate_subscription_route(provider, model, env=environment)
@@ -518,7 +519,7 @@ def run_command(
         if artifacts:
             payload["artifacts"] = artifacts
             payload["receipt_path"] = str(context["result"])
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(_redact_value(payload, environment), ensure_ascii=False, indent=2))
         return 126
 
     started = time.monotonic()
@@ -599,7 +600,7 @@ def run_command(
     if artifacts:
         payload["artifacts"] = artifacts
         payload["receipt_path"] = str(context["result"])
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(json.dumps(_redact_value(payload, environment), ensure_ascii=False, indent=2))
     return 124 if timed_out else returncode
 
 
@@ -658,7 +659,7 @@ def main() -> int:
     ns = parser.parse_args()
 
     if ns.command == "resume":
-        print(json.dumps(read_receipt(ns.receipt), ensure_ascii=False, indent=2))
+        print(json.dumps(_redact_value(read_receipt(ns.receipt), dict(os.environ)), ensure_ascii=False, indent=2))
         return 0
 
     if ns.command == "oneshot":

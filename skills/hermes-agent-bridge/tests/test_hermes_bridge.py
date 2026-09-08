@@ -375,3 +375,27 @@ def test_nonfinite_timeout_is_rejected_before_process(tmp_path, timeout):
     assert result.returncode == 2
     assert "finite" in result.stderr
     assert not marker.exists()
+
+
+def test_linux_process_metadata_is_redacted_in_every_persisted_state(tmp_path, monkeypatch, capsys):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("hermes_metadata_fixture", SCRIPT)
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+    secret = "fixture-process-secret-123456"
+    monkeypatch.setenv("TEST_API_TOKEN", secret)
+    monkeypatch.setattr(bridge, "validate_subscription_route", lambda *a, **k: {"provider": "fixture-local"})
+    monkeypatch.setattr(bridge, "_process_identity", lambda pid: {"pid": pid, "command": "hermes -z " + secret})
+    writes = []
+    original = bridge._atomic_json
+    def observe(path, payload):
+        original(path, payload)
+        writes.append(path.read_text())
+    monkeypatch.setattr(bridge, "_atomic_json", observe)
+    code = bridge.run_command([sys.executable, "-c", "print('fixture')"],
+                              receipt_dir=tmp_path / "receipts", timeout=1)
+    output = capsys.readouterr().out
+    assert code == 0
+    assert secret not in output
+    assert writes and all(secret not in text for text in writes)
+    assert "[REDACTED]" in output
