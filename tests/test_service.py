@@ -376,6 +376,11 @@ class ServiceTests(unittest.TestCase):
                 self.service.verify(job["id"], evidence)
         self.assertEqual(self.service.get_job(job["id"])["state"], "pending")
         self.assertEqual(self.tasks.get_task(task["id"])["execution_status"], "planned")
+        claimed = self.service._claim_next(); claimed["_lock"].release()
+        with mock.patch("harness.service.observe_publication", return_value={"commit": "a" * 40}):
+            with self.assertRaisesRegex(ValueError, "state"):
+                self.service.verify(job["id"], evidence)
+        self.assertEqual(self.service.get_job(job["id"])["state"], "running")
 
     def test_verifier_requires_every_exact_acceptance_criterion(self):
         task = self.tasks.create_task(purpose="verify exact", repository="Saber5656/Agents",
