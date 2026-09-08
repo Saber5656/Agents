@@ -170,6 +170,33 @@ def test_context_keeps_append_only_generations_and_stream_completion(tmp_path):
     assert "first" in contents and "second" in contents
 
 
+def test_repeated_source_events_are_not_written_twice(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    context = VaultContext(vault, "run-1")
+    first = [
+        {"source_event_id": "turn-1", "text": "initial objective"},
+        {"source_event_id": "turn-2", "text": "user correction"},
+    ]
+    context.save_records("conversation", first, complete=False, truncation="live")
+    context.save_records(
+        "conversation",
+        first + [{"source_event_id": "turn-3", "text": "recovered tool result"}],
+        complete=True,
+    )
+
+    reopened = VaultContext(vault, "run-1")
+    index = reopened.index()
+    paths = [reopened.run_dir / row["path"] for row in index["records"]]
+    raw = "".join(path.read_text() for path in paths)
+    assert raw.count('"source_event_id": "turn-1"') == 1
+    assert raw.count('"source_event_id": "turn-2"') == 1
+    assert raw.count('"source_event_id": "turn-3"') == 1
+    assert index["streams"]["conversation"]["complete"] is True
+    assert len(index["streams"]["conversation"]["records"]) == 2
+    assert len(index["streams"]["conversation"]["source_digests"]) == 3
+
+
 def test_serialized_tool_result_excludes_nested_reasoning(tmp_path):
     context = VaultContext(tmp_path, "run")
     payload = json.dumps({"events": [
