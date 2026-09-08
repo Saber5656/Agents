@@ -6,6 +6,7 @@ import unittest
 import sys
 from unittest.mock import patch
 from harness import runner as h
+from harness.tasks import TaskStore
 
 
 def event(**data):
@@ -116,6 +117,14 @@ class CommandTests(unittest.TestCase):
         self.assertIn('approval_policy="never"',c)
         self.assertIn('multi_agent',c)
 
+    def test_codex_run_adds_only_explicit_task_store_and_vault_dirs(self):
+        dirs = ['/tmp/agents/.local', '/tmp/agents-vault']
+        c=h.build_command('codex','run','gpt-5.6-luna','low',add_dirs=dirs)
+        self.assertEqual(c[c.index('--add-dir')+1], dirs[0])
+        second=c.index('--add-dir', c.index('--add-dir')+1)
+        self.assertEqual(c[second+1], dirs[1])
+        self.assertNotIn('--add-dir', h.build_command('codex','run','gpt-5.6-luna','low'))
+
 
 class JobTests(unittest.TestCase):
     def setUp(self):
@@ -142,6 +151,100 @@ class JobTests(unittest.TestCase):
         self.assertIn('引き継ぎ',self.calls[1][2])
         self.assertLessEqual(self.calls[1][3],self.calls[0][3])
         self.assertTrue((Path(result['run_dir'])/'result.json').is_file())
+
+    def test_run_capture_registers_discoveries_and_preserves_assigned_role_boundary(self):
+        root=self.root; db=root/'.local'/'tasks.sqlite3'
+        with TaskStore(db, agents_root=root, vault_root=root/'vault') as store:
+            origin=store.create_task(purpose='assigned fixture', repository='Saber5656/Agents')
+        self.env['AGENTS_ROOT']=str(root)
+        self.job=h.Job(root/'work',root/'vault','Implement the assigned fixture',mode='run',provider='codex',
+                       task_id=origin['id'],task_store_db=db)
+        marker=json.dumps({'agents_worker_capture': {'discoveries': [{
+            'event_key':'unrelated-1','purpose':'Unrelated improvement',
+            'expected_result':'A separate test documents the behavior',
+            'evidence_links':['vault://worker/discovery-1'],
+            'repository':'Saber5656/Agents'}]}})
+        result=h.run_job(self.job,self.env,self.executor([h.ProcessResult(0,codex_result(marker))]))
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(result['capture_status'],'captured')
+        with TaskStore(db, agents_root=root, vault_root=root/'vault') as store:
+            discovered=store.list_tasks(repository='Saber5656/Agents')
+            self.assertEqual(len(discovered),2)
+            followup=next(x for x in discovered if x['source_task_id']==origin['id'])
+            self.assertEqual(followup['issueization_state'],'unissued')
+            self.assertEqual(followup['evidence_links'],['vault://worker/discovery-1'])
+        prompt=self.calls[0][2]
+        self.assertIn(origin['id'],prompt)
+        self.assertIn('GitHub Issue',prompt)
+        command=json.loads((Path(result['run_dir'])/'0-codex-command.json').read_text())
+        add_dirs=[command[i+1] for i,item in enumerate(command[:-1]) if item=='--add-dir']
+        self.assertEqual(add_dirs,[str((root/'.local').resolve()),str((root/'vault').resolve())])
+
+    def test_capture_retry_correlates_event_and_merges_evidence(self):
+        root=self.root; db=root/'.local'/'tasks.sqlite3'
+        with TaskStore(db, agents_root=root, vault_root=root/'vault') as store:
+            origin=store.create_task(purpose='assigned fixture')
+        first=json.dumps({'agents_worker_capture': {'originating_task_id':origin['id'], 'discoveries': [{
+            'event_key':'same-event','purpose':'Captured follow-up','evidence_links':['vault://first']}]}})
+        second=json.dumps({'agents_worker_capture': {'originating_task_id':origin['id'], 'discoveries': [{
+            'event_key':'same-event','purpose':'Captured follow-up','evidence_links':['vault://first','vault://retry']}]}})
+        first_rows=h.capture_discoveries(task_id=origin['id'],task_store_db=db,agents_root=root,vault_root=root/'vault',text=first)
+        second_rows=h.capture_discoveries(task_id=origin['id'],task_store_db=db,agents_root=root,vault_root=root/'vault',text=second)
+        self.assertEqual(first_rows[0]['id'],second_rows[0]['id'])
+        self.assertEqual(second_rows[0]['evidence_links'],['vault://first','vault://retry'])
+
+    def test_run_capture_rejects_malformed_discovery_without_lying_about_completion(self):
+        root=self.root; db=root/'.local'/'tasks.sqlite3'
+        with TaskStore(db, agents_root=root, vault_root=root/'vault') as store:
+            origin=store.create_task(purpose='assigned fixture')
+        self.env['AGENTS_ROOT']=str(root)
+        self.job=h.Job(root/'work',root/'vault','assigned',mode='run',provider='codex',task_id=origin['id'],task_store_db=db)
+        malformed=json.dumps({'agents_worker_capture': {'discoveries':[{'purpose':'missing event key'}]}})
+        result=h.run_job(self.job,self.env,self.executor([h.ProcessResult(0,codex_result(malformed))]))
+        self.assertEqual(result['status'],'incomplete')
+        self.assertEqual(result['capture_status'],'incomplete')
+        self.assertIn('capture',result['capture_error'])
+
+    def test_resume_captures_terminal_output_before_reporting_completion(self):
+        root=self.root; db=root/'.local'/'tasks.sqlite3'
+        with TaskStore(db, agents_root=root, vault_root=root/'vault') as store:
+            origin=store.create_task(purpose='assigned capture recovery')
+        self.env['AGENTS_ROOT']=str(root)
+        job=h.Job(root/'work',root/'vault','assigned',mode='run',provider='codex',
+                  task_id=origin['id'],task_store_db=db)
+        run_dir=root/'vault'/'capture-interrupted'; run_dir.mkdir()
+        text=json.dumps({'agents_worker_capture':{'discoveries':[
+            {'event_key':'recovered-event','purpose':'Recovered follow-up',
+             'evidence_links':['vault://recovered']} ]}})
+        h.save(run_dir/'result.json',{'status':'running','mode':'run','workspace':str(job.workspace),
+            'capture_config':{'task_id':origin['id'],'task_store_db':str(db.resolve()),
+                              'agents_root':str(root.resolve()),'vault_root':str(job.vault.resolve())},
+            'attempts':[{'provider':'codex','status':'running'}]},self.env)
+        h.save(run_dir/'0-codex-state.json',{'attempt':0,'provider':'codex','status':'completed','exit_code':0},self.env)
+        h.save(run_dir/'0-codex-stdout.jsonl',codex_result(text),self.env)
+        calls=[]
+        result=h.resume_job(job,run_dir,self.env,lambda *args:calls.append(args))
+        self.assertEqual('completed',result['status'])
+        self.assertEqual('captured',result.get('capture_status'))
+        again=h.resume_job(job,run_dir,self.env,lambda *args:calls.append(args))
+        self.assertEqual(result['captured_discoveries'],again['captured_discoveries'])
+        self.assertEqual([],calls)
+        with TaskStore(db, agents_root=root, vault_root=root/'vault') as store:
+            self.assertEqual(2,len(store.list_tasks()))
+        job.task_id='different-origin'
+        mismatch=h.resume_job(job,run_dir,self.env,lambda *args:calls.append(args))
+        self.assertEqual('capture_configuration_mismatch',mismatch.get('error'))
+        job.task_id=origin['id']
+        h.save(run_dir/'0-codex-stdout.jsonl',codex_result(json.dumps({
+            'agents_worker_capture':{'discoveries':[{'purpose':'missing event key'}]}})),self.env)
+        invalid=h.resume_job(job,run_dir,self.env,lambda *args:calls.append(args))
+        self.assertEqual('incomplete',invalid['status'])
+        self.assertEqual('incomplete',invalid['capture_status'])
+        self.assertEqual([],calls)
+
+    def test_review_command_never_grants_capture_write_directories(self):
+        command=h.build_command('codex','review','gpt-5.6-luna','low',add_dirs=['/tmp/write'])
+        self.assertNotIn('--add-dir',command)
 
     def test_elapsed_seconds_is_per_attempt(self):
         import time
@@ -330,6 +433,7 @@ class ProcessTests(unittest.TestCase):
         with patch.object(h.os,'kill',side_effect=PermissionError('not inspectable')):
             result=h.reconcile_process({'pid':123,'identity':{'command':'worker'}})
         self.assertEqual('unknown',result['status'])
+
 
     def test_save_is_atomic_and_private(self):
         with tempfile.TemporaryDirectory() as d:

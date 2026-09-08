@@ -12,6 +12,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import string
 import subprocess
 import sys
@@ -49,6 +50,8 @@ class Job:
     timeout: float = 300
     fallback: bool = True
     run_dir: Path | None = None
+    task_id: str | None = None
+    task_store_db: Path | None = None
 
 
 @dataclass
@@ -465,7 +468,7 @@ def classify(provider, output, error, code):
     return Result(_error_status(error), error, actual_model=actual_model, model_verified=model_verified)
 
 
-def build_command(provider, mode, model, effort):
+def build_command(provider, mode, model, effort, *, add_dirs=()):
     if provider == 'claude':
         tools = 'Read,Grep,Glob' if mode == 'review' else 'Read,Grep,Glob,Edit,Write,Bash'
         command = ['claude', '-p', '--model', model, '--effort', effort,
@@ -477,10 +480,113 @@ def build_command(provider, mode, model, effort):
         if mode == 'review':
             command += ['--allowedTools', 'Read,Grep,Glob']
         return command
-    return ['codex', 'exec', '--ignore-user-config', '--ephemeral', '--json',
+    command = ['codex', 'exec', '--ignore-user-config', '--ephemeral', '--json',
             '--skip-git-repo-check', '-m', model, '-s', 'read-only' if mode == 'review' else 'workspace-write',
             '-c', 'approval_policy="never"', '-c', f'model_reasoning_effort="{effort}"',
-            '--disable', 'multi_agent', '-']
+            '--disable', 'multi_agent']
+    for directory in (add_dirs if mode == 'run' else ()):
+        command.extend(['--add-dir', str(directory)])
+    command.append('-')
+    return command
+
+
+def _capture_dirs(job, env):
+    """Return the two explicit writable roots needed for local capture."""
+    if not job.task_id:
+        return []
+    agents_root = env.get('AGENTS_ROOT')
+    if not isinstance(agents_root, str) or not Path(agents_root).is_dir():
+        raise ValueError('AGENTS_ROOT is required for worker discovery capture')
+    local = Path(agents_root).resolve()/'.local'
+    db = Path(job.task_store_db or local/'tasks.sqlite3').expanduser().resolve()
+    if db.parent != local:
+        raise ValueError('task capture database must remain under AGENTS_ROOT/.local')
+    if not job.vault.is_dir():
+        raise ValueError('AGENTS_VAULT_ROOT is required for worker discovery capture')
+    return [str(local), str(job.vault.resolve())]
+
+
+def _capture_payload(text):
+    """Extract the worker's optional machine-readable discovery envelope."""
+    decoder = json.JSONDecoder()
+    for offset, char in enumerate(text or ''):
+        if char != '{':
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[offset:])
+        except ValueError:
+            continue
+        if not isinstance(value, dict) or 'agents_worker_capture' not in value:
+            continue
+        envelope = value['agents_worker_capture']
+        if not isinstance(envelope, dict) or not isinstance(envelope.get('discoveries'), list):
+            raise ValueError('capture envelope must contain a discoveries list')
+        return envelope
+    return None
+
+
+def capture_discoveries(*, task_id, task_store_db, agents_root, vault_root, text):
+    """Persist worker-reported unrelated discoveries in the local TaskStore.
+
+    This function never contacts GitHub and never executes a discovered task.
+    The explicit roots are checked before opening the database so a worker
+    cannot silently guess another user's Vault or write outside ``.local``.
+    """
+    if not isinstance(task_id, str) or not task_id:
+        raise ValueError('originating task_id is required for capture')
+    root = Path(agents_root).resolve()
+    vault = Path(vault_root).resolve()
+    db = Path(task_store_db).expanduser().resolve()
+    if not root.is_dir() or not vault.is_dir() or db.parent != root/'.local':
+        raise ValueError('capture roots are not explicit trusted locations')
+    envelope = _capture_payload(text)
+    if envelope is None:
+        return []
+    if envelope.get('originating_task_id') not in (None, task_id):
+        raise ValueError('capture envelope has a different originating task')
+    from .tasks import TaskStore
+    captured = []
+    with TaskStore(db, agents_root=root, vault_root=vault) as store:
+        for discovery in envelope['discoveries']:
+            if not isinstance(discovery, dict):
+                raise ValueError('each discovery must be an object')
+            event_key = discovery.get('event_key', discovery.get('discovery_key'))
+            purpose = discovery.get('purpose')
+            if not isinstance(event_key, str) or not event_key.strip() or not isinstance(purpose, str) or not purpose.strip():
+                raise ValueError('each discovery requires event_key and purpose')
+            for field in ('evidence_links', 'dependencies', 'acceptance_evidence'):
+                value = discovery.get(field) or []
+                if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+                    raise ValueError(f'discovery {field} must be a list of strings')
+            for field in ('expected_result', 'repository', 'assignee', 'priority'):
+                if discovery.get(field) is not None and not isinstance(discovery[field], str):
+                    raise ValueError(f'discovery {field} must be a string')
+            captured.append(store.record_discovery(
+                originating_task=task_id, discovery_key=event_key, purpose=purpose,
+                expected_result=discovery.get('expected_result'),
+                evidence_links=discovery.get('evidence_links') or [],
+                repository=discovery.get('repository'), assignee=discovery.get('assignee'),
+                priority=discovery.get('priority'), dependencies=discovery.get('dependencies') or [],
+                acceptance_evidence=discovery.get('acceptance_evidence') or []))
+    return captured
+
+
+def _complete_capture(summary):
+    config = summary.get('capture_config')
+    if summary.get('status') != 'completed' or summary.get('mode') != 'run' or not config:
+        return
+    attempt = summary['attempts'][-1]
+    try:
+        captured = capture_discoveries(**config, text=summary.get('text', ''))
+        summary['capture_status'] = 'captured' if captured else 'none'
+        summary['captured_discoveries'] = [row['id'] for row in captured]
+        summary.pop('capture_error', None)
+        attempt['capture_status'] = summary['capture_status']
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as exc:
+        summary['status'] = 'incomplete'
+        summary['capture_status'] = 'incomplete'
+        summary['capture_error'] = 'capture: ' + str(exc)
+        attempt['status'] = 'incomplete'
 
 
 def snapshot(workspace):
@@ -636,6 +742,7 @@ def _reconcile_captured_attempt(run_dir, summary, state_record, env):
     summary.pop('active_process', None)
     summary['status'] = final_status
     summary['text'] = parsed.text
+    _complete_capture(summary)
     summary['usage'] = _usage_summary(summary['attempts'])
     save(Path(run_dir) / 'result.json', summary, env)
     return True
@@ -704,6 +811,11 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
     if job.timeout <= 0:
         raise ValueError('timeout must be positive')
     env = child_env(env)
+    capture_dirs = _capture_dirs(job, env) if job.mode == 'run' else []
+    capture_config = ({'task_id': job.task_id,
+                       'task_store_db': str(Path(job.task_store_db or Path(env['AGENTS_ROOT'])/'.local'/'tasks.sqlite3').resolve()),
+                       'agents_root': str(Path(env['AGENTS_ROOT']).resolve()),
+                       'vault_root': str(job.vault.resolve())} if capture_dirs else None)
     run_dir = Path(run_dir or job.run_dir or
                    job.vault/'01-Projects'/'agent-runs'/(datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')+'-'+uuid.uuid4().hex[:12]))
     try:
@@ -719,6 +831,9 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         return {'run_dir': str(run_dir), 'status': 'incomplete',
                 'error': 'corrupt_result_record', 'recovery': 'preserved_original_record'}
     if old_summary:
+        if old_summary.get('capture_config') != capture_config:
+            return {'run_dir': str(run_dir), 'status': 'incomplete',
+                    'error': 'capture_configuration_mismatch', 'recovery': 'preserved_original_record'}
         expected_workspace = str(job.workspace.resolve())
         recorded_workspace = old_summary.get('workspace')
         if recorded_workspace is not None and not isinstance(recorded_workspace, str):
@@ -740,6 +855,13 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         if old_summary.get('status') in ('completed', 'review_findings', 'review_incomplete'):
             return json.loads(redact(json.dumps(old_summary, ensure_ascii=False), env))
     instruction = ('依頼された作業を実行する。追加エージェントの起動は行わず、現在の成果を保持する。\n')
+    if job.mode == 'run' and job.task_id:
+        instruction += ('これは元の assigned task の実行であり、元作業を最後まで修復・テスト・delivery する責任を持つ。\n'
+                        f'元 task ID: {job.task_id}\n'
+                        '実行中に見つけた unrelated improvement は実装せず、GitHub Issue も作らず、'
+                        '末尾に agents_worker_capture JSON envelope として記録する。\n'
+                        'envelope の各 discovery は event_key, purpose, expected_result, evidence_links を含める。\n'
+                        'accepted review defect が元 assigned task の範囲なら follow-up にせず修復し、テストする。\n')
     if job.mode == 'review':
         instruction += ('レビューの実行は依頼済み。読み取りだけで確認し、実施許可を再質問しない。\n'
                         '不足情報は limitations に記録する。修正、コマンド実行、外部操作を行わない。\n'
@@ -761,6 +883,8 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
     summary['status'] = 'running'
     summary['startup'] = {'workspace': str(job.workspace), 'vault': str(job.vault),
                           'environment_keys': {key: bool(env.get(key)) for key in AUTH_KEYS}}
+    if capture_config:
+        summary['capture_config'] = capture_config
     save(run_dir/'result.json', summary, env)
     _context_index(run_dir, env)
     providers = [job.provider]
@@ -793,7 +917,8 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
             break
         model = job.claude_model if provider == 'claude' else job.codex_model
         attempt_no = len(summary['attempts'])
-        argv = build_command(provider, job.mode, model, job.effort)
+        argv = build_command(provider, job.mode, model, job.effort,
+                             add_dirs=capture_dirs if provider == 'codex' else ())
         stem = f'{attempt_no}-{provider}'
         state_path = run_dir/f'{stem}-state.json'
         stdout_path = run_dir/f'{stem}-stdout.jsonl'
@@ -848,6 +973,7 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         state_record['status'] = final_status
         summary['status'] = final_status
         summary['text'] = parsed.text
+        _complete_capture(summary)
         summary['usage'] = _usage_summary(summary['attempts'])
         save(run_dir/'after.json',snapshot(job.workspace),env)
         save(run_dir/'result.json',summary,env)
@@ -982,6 +1108,10 @@ def main(argv=None):
                        help='Persist or resume a specific existing run directory')
         p.add_argument('--resume',action='store_true',
                        help='Reconcile a persisted run before continuing it')
+        p.add_argument('--task-id',
+                       help='Originating local TaskStore task ID for worker discovery capture')
+        p.add_argument('--task-db',type=Path,
+                       help='Explicit TaskStore SQLite path under $AGENTS_ROOT/.local')
     args=parser.parse_args(argv)
     try:
         current=dict(os.environ)
@@ -1014,9 +1144,12 @@ def main(argv=None):
             prompt += '\n\n役割の要件:\n'+(ROOT/'roles'/(args.role+'.md')).read_text()
         prompt += '\n\n共通方針:\n'+(ROOT/'COMMON-AGENTS.md').read_text()
         prompt += '\n\n実行記録は呼び出し元が Vault に保存する。子は担当する成果を返す。'
+        if args.task_db and not args.task_id:
+            raise ValueError('--task-db requires --task-id')
         job=Job(args.workspace.resolve(),vault.resolve(),prompt, args.command,args.provider,
                 args.claude_model,args.codex_model,args.effort,args.timeout,not args.no_fallback,
-                args.run_dir.resolve() if args.run_dir else None)
+                args.run_dir.resolve() if args.run_dir else None,
+                args.task_id, args.task_db.resolve() if args.task_db else None)
         if args.resume and job.run_dir is None:
             raise ValueError('--resume requires --run-dir')
         result=run_job(job,env,run_dir=job.run_dir,resume=args.resume)
