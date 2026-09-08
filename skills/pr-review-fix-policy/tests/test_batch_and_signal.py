@@ -98,6 +98,48 @@ class BatchTests(unittest.TestCase):
         graphql.side_effect = [payload("OPEN"), payload("CLOSED")]
         self.assertEqual("pr_state_closed", BATCH.fetch_one("owner", "repo", 1)["blocker"])
 
+    @patch.object(BATCH, "run_graphql")
+    def test_fetches_submitted_reviews_bound_to_current_head(self, graphql):
+        def payload(state="OPEN"):
+            return {"data": {"repository": {"pullRequest": {
+                "url": "u", "state": state, "baseRefName": "main", "headRefName": "b",
+                "headRefOid": "a" * 40,
+                "reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+                "reviews": {"nodes": [{
+                    "id": "R1", "state": "CHANGES_REQUESTED", "body": "blocking rationale",
+                    "submittedAt": "2026-07-16T00:00:00Z", "updatedAt": "2026-07-16T00:01:00Z",
+                    "commit": {"oid": "a" * 40}, "author": {"login": "reviewer"},
+                }], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+            }}}}
+        graphql.side_effect = [payload(), payload()]
+        result = BATCH.fetch_one("owner", "repo", 1)
+        self.assertEqual("R1", result["reviews"][0]["id"])
+        self.assertEqual("CHANGES_REQUESTED", result["reviews"][0]["state"])
+        self.assertEqual("a" * 40, result["reviews"][0]["commit_oid"])
+
+    @patch.object(BATCH, "run_review_graphql")
+    @patch.object(BATCH, "run_graphql")
+    def test_paginates_submitted_reviews_and_discards_old_head(self, graphql, review_graphql):
+        def payload(reviews, state="OPEN", has_next=False):
+            return {"data": {"repository": {"pullRequest": {
+                "url": "u", "state": state, "baseRefName": "main", "headRefName": "b",
+                "headRefOid": "a" * 40,
+                "reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+                "reviews": {"nodes": reviews, "pageInfo": {"hasNextPage": has_next, "endCursor": "next" if has_next else None}},
+            }}}}
+        first = {"id": "R1", "state": "COMMENTED", "body": "one", "commit": {"oid": "a" * 40}}
+        old = {"id": "OLD", "state": "CHANGES_REQUESTED", "body": "old", "commit": {"oid": "b" * 40}}
+        graphql.side_effect = [payload([first], has_next=True), payload([first])]
+        review_graphql.return_value = {"data": {"repository": {"pullRequest": {
+            "headRefOid": "a" * 40,
+            "reviews": {"nodes": [old, {"id": "R2", "state": "APPROVED", "body": "two", "commit": {"oid": "a" * 40}}], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+        }}}}
+        result = BATCH.fetch_one("owner", "repo", 1)
+        self.assertEqual(["OLD", "R1", "R2"], [item["id"] for item in result["reviews"]])
+        self.assertFalse(result["reviews"][0]["head_match"])
+        self.assertTrue(all(item["head_match"] for item in result["reviews"][1:]))
+        review_graphql.assert_called_once_with("owner", "repo", 1, "next")
+
 
 class SignalTests(unittest.TestCase):
     def envelope(self):

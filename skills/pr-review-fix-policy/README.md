@@ -10,6 +10,7 @@
 - `owner/repo#123` を複数指定して、最大20 PRをthread-awareに一括取得する。
 - PR横断で見やすく整理しつつ、head・返信・resolve・完了判定はPRごとに分離する。関連Issueをfeature unitにまとめる場合も、PR identityは分離する。
 - current headとreview/thread commit identityを照合し、old-head evidenceを`old_head_review_invalid`として除外する。
+- submitted reviewsも取得し、各reviewの`commit_oid`とcurrent headの`head_match`を保持する。old-head reviewは現在の修正根拠に再利用しない。
 - review 0件、thread不存在、未解決0件、timeoutを別状態として返し、timeoutをpassにしない。
 - Review results must retain request/session/head/integrity provenance: the request and session references,
   exact reviewed head, provider, requested and effective model, and raw-record/digest references where available.

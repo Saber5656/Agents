@@ -20,6 +20,10 @@ query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
   repository(owner:$owner, name:$repo) {
     pullRequest(number:$number) {
       number url state baseRefName headRefName headRefOid
+      reviews(first:100) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id state body author { login } submittedAt updatedAt commit { oid } }
+      }
       reviewThreads(first:100, after:$cursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -29,6 +33,19 @@ query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
             nodes { id author { login } body createdAt updatedAt }
           }
         }
+      }
+    }
+  }
+}
+"""
+REVIEW_QUERY = r"""
+query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      headRefOid
+      reviews(first:100, after:$cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id state body author { login } submittedAt updatedAt commit { oid } }
       }
     }
   }
@@ -80,6 +97,18 @@ def run_comment_graphql(thread_id: str, cursor: str) -> dict[str, Any]:
     return json.loads(completed.stdout)
 
 
+def run_review_graphql(owner: str, repo: str, number: int, cursor: str) -> dict[str, Any]:
+    command = [
+        "gh", "api", "graphql", "-f", f"query={REVIEW_QUERY}",
+        "-F", f"owner={owner}", "-F", f"repo={repo}", "-F", f"number={number}",
+        "-F", f"cursor={cursor}",
+    ]
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    if completed.returncode:
+        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "gh api graphql failed")
+    return json.loads(completed.stdout)
+
+
 def complete_comments(thread: dict[str, Any]) -> list[dict[str, Any]]:
     connection = thread.get("comments") or {}
     comments = list(connection.get("nodes") or [])
@@ -105,10 +134,13 @@ def summarize(body: str, limit: int = 240) -> str:
 def fetch_one(owner: str, repo: str, number: int) -> dict[str, Any]:
     record: dict[str, Any] = {
         "repository": f"{owner}/{repo}", "pr_number": number, "pagination_complete": False,
-        "actionable_threads": [], "ignored": {"resolved": 0, "outdated": 0}, "blocker": None,
+        "actionable_threads": [], "reviews": [],
+        "ignored": {"resolved": 0, "outdated": 0}, "blocker": None,
     }
     cursor: str | None = None
     fixed_head: str | None = None
+    review_cursor: str | None = None
+    reviews_by_id: dict[str, dict[str, Any]] = {}
     try:
         while True:
             payload = run_graphql(owner, repo, number, cursor)
@@ -122,7 +154,19 @@ def fetch_one(owner: str, repo: str, number: int) -> dict[str, Any]:
             elif current_head != fixed_head:
                 record["blocker"] = "head_changed_during_fetch"
                 record["actionable_threads"] = []
+                record["reviews"] = []
                 return record
+            review_connection = pr.get("reviews") or {}
+            for review in review_connection.get("nodes") or []:
+                review_id = str(review.get("id") or "")
+                if review_id:
+                    reviews_by_id[review_id] = review
+            review_page = review_connection.get("pageInfo") or {}
+            if review_page.get("hasNextPage") and not review_cursor:
+                review_cursor = review_page.get("endCursor")
+                if not review_cursor:
+                    record["blocker"] = "review_pagination_cursor_missing"
+                    return record
             if "url" not in record:
                 record.update({key: pr.get(key) for key in ("url", "state", "baseRefName", "headRefName", "headRefOid")})
             connection = pr["reviewThreads"]
@@ -155,14 +199,49 @@ def fetch_one(owner: str, repo: str, number: int) -> dict[str, Any]:
             if not cursor:
                 record["blocker"] = "pagination_cursor_missing"
                 break
+        while review_cursor:
+            payload = run_review_graphql(owner, repo, number, review_cursor)
+            review_pr = payload.get("data", {}).get("repository", {}).get("pullRequest")
+            if review_pr is None or str(review_pr.get("headRefOid") or "").lower() != fixed_head:
+                record["blocker"] = "head_changed_during_fetch"
+                record["actionable_threads"] = []
+                record["reviews"] = []
+                return record
+            review_connection = review_pr.get("reviews") or {}
+            for review in review_connection.get("nodes") or []:
+                review_id = str(review.get("id") or "")
+                if review_id:
+                    reviews_by_id[review_id] = review
+            page = review_connection.get("pageInfo") or {}
+            review_cursor = page.get("endCursor") if page.get("hasNextPage") else None
         final_payload = run_graphql(owner, repo, number, None)
         final_pr = final_payload.get("data", {}).get("repository", {}).get("pullRequest")
         final_head = str((final_pr or {}).get("headRefOid") or "").lower()
         if not final_pr or final_head != fixed_head:
             record["blocker"] = "head_changed_during_fetch"
             record["actionable_threads"] = []
+            record["reviews"] = []
             record["pagination_complete"] = False
             return record
+        final_reviews = final_pr.get("reviews") or {}
+        for review in final_reviews.get("nodes") or []:
+            review_id = str(review.get("id") or "")
+            if review_id:
+                reviews_by_id[review_id] = review
+        record["reviews"] = sorted([
+            {
+                "id": review_id,
+                "state": review.get("state"),
+                "body": summarize(review.get("body") or ""),
+                "author": (review.get("author") or {}).get("login"),
+                "submitted_at": review.get("submittedAt"),
+                "updated_at": review.get("updatedAt"),
+                "commit_oid": str((review.get("commit") or {}).get("oid") or "").lower(),
+                "head_match": str((review.get("commit") or {}).get("oid") or "").lower() == fixed_head,
+                "content_trust": "untrusted_review_content",
+            }
+            for review_id, review in reviews_by_id.items()
+        ], key=lambda item: item["id"])
         record["state"] = final_pr.get("state")
         if record.get("state") != "OPEN":
             record["blocker"] = f"pr_state_{str(record.get('state')).lower()}"
