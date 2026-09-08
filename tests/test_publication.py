@@ -128,6 +128,25 @@ def test_privacy_rejection_leaves_worktree_and_main_unchanged(fixture):
     assert git(worktree, "diff", "--cached") == ""
 
 
+def test_publish_allows_ordinary_hyphenated_words_with_key_prefix_suffix(fixture):
+    canonical, worktree, remote, vault, base = fixture
+    content = "Reviewed task-owned notes use disk-backed storage and mask-like labels.\n"
+    (worktree / "src" / "selected.txt").write_text(content)
+    result = publish_scoped(make_spec(canonical, worktree, remote, vault, base))
+    assert result["status"] == "published"
+    assert (canonical / "src" / "selected.txt").read_text() == content
+    assert git(remote, "rev-parse", "refs/heads/main") == result["published_sha"]
+
+
+def test_privacy_still_rejects_a_standalone_provider_key(fixture):
+    canonical, worktree, remote, vault, base = fixture
+    (worktree / "src" / "selected.txt").write_text("Credential: " + "sk" + "-" + "x" * 32)
+    with pytest.raises(PublicationError, match="privacy"):
+        publish_scoped(make_spec(canonical, worktree, remote, vault, base))
+    assert git(remote, "rev-parse", "refs/heads/main") == base
+    assert git(canonical, "rev-parse", "HEAD") == base
+
+
 def test_privacy_rejects_private_key_and_generic_secret_assignments(fixture):
     canonical, worktree, remote, vault, base = fixture
     selected = worktree / "src" / "selected.txt"

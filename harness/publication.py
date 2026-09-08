@@ -38,7 +38,7 @@ class ReceiptReadError(PublicationError):
 _OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SAFE_REL = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))(?!.*\\).+")
 _SECRET = re.compile(
-    rb"(?:github_pat_|ghp_|gho_|ghs_|ghr_|sk-[A-Za-z0-9]|AKIA[0-9A-Z]{16}|"
+    rb"(?:github_pat_|ghp_|gho_|ghs_|ghr_|\bsk-[A-Za-z0-9]|AKIA[0-9A-Z]{16}|"
     rb"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----|"
     rb"(?i:bearer\s+[A-Za-z0-9._~+/=-]{16,})|"
     rb"(?i:(?:api[_-]?key|secret|token|password|passwd|authorization)\s*[:=]\s*[^\s]{8,}))"
