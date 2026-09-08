@@ -511,6 +511,27 @@ class ServiceStore:
             conn.execute("UPDATE service_jobs SET state='needs_verification',next_attempt_at=?,last_error=?,updated_at=? WHERE id=? AND state='verifying'", (next_at, diagnostic, now(), job_id))
             conn.execute("UPDATE service_attempts SET status='needs_verification',error=? WHERE job_id=? AND status='verifying'", (diagnostic, job_id))
 
+    def _schedule_publication_repair(self, job_id, diagnostic):
+        """Return a publication race to the original worker for repair."""
+        with self.tx() as conn:
+            conn.execute("UPDATE service_jobs SET state='retry',next_attempt_at=NULL,last_error=?,updated_at=? WHERE id=? AND state='verifying'", (diagnostic, now(), job_id))
+            conn.execute("UPDATE service_attempts SET status='repair_required',error=? WHERE job_id=? AND status='verifying'", (diagnostic, job_id))
+        job = self.get_job(job_id)
+        task = self.tasks.get_task(job["task_id"]) if job else None
+        if task is not None:
+            try:
+                self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="running")
+            except ConflictError:
+                pass
+
+    @staticmethod
+    def _publication_conflict(error):
+        text = str(error).lower()
+        return any(marker in text for marker in (
+            "canonical main moved", "not an ancestor", "remote readback",
+            "main advanced", "receipt commit is not",
+        ))
+
     def _job(self, row):
         if row is None:
             return None
@@ -792,8 +813,32 @@ class ServiceStore:
     def verify_with_agent(self, job_id, verifier):
         job = self.get_job(job_id)
         task = self.tasks.get_task(job["task_id"])
-        proposal_snapshot = None
         proposal = self._latest_publication_proposal(job)
+        resumed_proof = None
+        if proposal is not None:
+            try:
+                resumed = self._resume_pending_publication(job, task, proposal)
+            except Exception as exc:
+                if self._publication_conflict(exc):
+                    self._schedule_publication_repair(job_id, "publication race requires worker repair: " + str(exc))
+                    return {"status": "retry", "job_id": job_id,
+                            "repair_required": True, "verification_error": str(exc)}
+                self._reset_verification(job_id, "publication receipt reconciliation failed: " + str(exc))
+                return {"status": "needs_verification", "job_id": job_id,
+                        "verification_error": str(exc)}
+            if resumed is not None:
+                if resumed.get("status") != "published":
+                    self._reset_verification(job_id, "publication CI or remote readback remains incomplete")
+                    return {"status": "needs_verification", "job_id": job_id,
+                            "publication": resumed,
+                            "verification_error": resumed.get("reason", "publication remains incomplete")}
+                resumed_proof = {"commit": resumed["published_sha"],
+                                 "mode": proposal.get("mode", "direct_main"),
+                                 "files": list(resumed.get("files", proposal.get("files", [])))}
+                # The code publication is already durably completed.  Only a
+                # fresh final acceptance review may still be needed.
+                proposal = None
+        proposal_snapshot = None
         if proposal is not None:
             try:
                 proposal_snapshot = self._publication_snapshot(job, proposal)
@@ -863,6 +908,15 @@ class ServiceStore:
             accepted_result["findings"] = []
             accepted_result["review_disposition"] = disposition
             result = accepted_result
+        if resumed_proof is not None:
+            result = dict(result) if isinstance(result, dict) else {}
+            result["publication"] = resumed_proof
+            try:
+                result["publication_readback"] = observe_publication(job, task, resumed_proof)
+            except Exception as exc:
+                self._reset_verification(job_id, "publication readback remains incomplete: " + str(exc))
+                return {"status": "needs_verification", "job_id": job_id,
+                        "verification": result, "verification_error": str(exc)}
         if proposal is not None:
             # Publication readiness covers the code/test evidence needed to
             # safely publish.  Final acceptance may still depend on the
@@ -887,6 +941,11 @@ class ServiceStore:
                 proof = self._publish_proposal(job, task, proposal, review,
                                                snapshot=proposal_snapshot)
             except Exception as exc:
+                if self._publication_conflict(exc):
+                    self._schedule_publication_repair(job_id, "publication race requires worker repair: " + str(exc))
+                    return {"status": "retry", "job_id": job_id,
+                            "repair_required": True, "verification": result,
+                            "verification_error": str(exc)}
                 self._reset_verification(job_id, "publication proposal was not published: " + str(exc))
                 return {"status": "needs_verification", "job_id": job_id,
                         "verification": result or {}, "verification_error": str(exc)}
@@ -938,6 +997,38 @@ class ServiceStore:
                 "preimage": selected_tree_digest(canonical, files),
                 "diff": selected_diff_digest(worktree, base, files)}
 
+    def _resume_pending_publication(self, job, task, proposal):
+        """Reconcile a host receipt without spending another verifier turn."""
+        from .publication import _read_json, publish_scoped
+        receipt = Path(job["run_dir"]) / "publication.json"
+        if receipt.is_symlink() or not receipt.is_file():
+            return None
+        state = _read_json(receipt)
+        if state.get("status") not in {"pending", "incomplete"} or not state.get("published_sha"):
+            return None
+        files = state.get("files") or proposal.get("files")
+        base = state.get("base") or proposal.get("immutable_base")
+        preimage = state.get("preimage_digest") or proposal.get("preimage_digest")
+        diff = state.get("diff_digest") or proposal.get("diff_digest")
+        review = state.get("review")
+        if (not isinstance(files, list) or not isinstance(base, str)
+                or not isinstance(preimage, str) or not isinstance(diff, str)
+                or not isinstance(review, dict)):
+            raise ValueError("publication receipt lacks host resume inputs")
+        from .publication import _authorized_github_remote
+        if not _authorized_github_remote(task.get("repository", ""), proposal.get("remote", "")):
+            raise ValueError("publication receipt remote is not the authorized GitHub remote")
+        spec = dict(proposal)
+        spec.update({"repository": task.get("repository"),
+                     "canonical_repo": str(Path(self.tasks.agents_root).resolve()),
+                     "task_worktree": str(Path(job["workspace"]).resolve()),
+                     "files": files, "immutable_base": base,
+                     "preimage_digest": preimage, "diff_digest": diff,
+                     "review": review, "vault_receipt": str(receipt)})
+        spec.pop("ci", None)
+        spec.pop("ci_observer", None)
+        return publish_scoped(spec)
+
     def _publish_proposal(self, job, task, proposal, review, *, snapshot=None):
         """Publish a worker proposal only after host-side CAS and review checks."""
         if not isinstance(proposal, dict) or not isinstance(task, dict):
@@ -950,6 +1041,9 @@ class ServiceStore:
             raise ValueError("publication proposal is incomplete")
         if proposal.get("repository", task.get("repository")) != task.get("repository"):
             raise ValueError("publication proposal repository does not match the task")
+        from .publication import _authorized_github_remote
+        if not _authorized_github_remote(task.get("repository", ""), proposal.get("remote", "")):
+            raise ValueError("publication proposal remote is not the authorized GitHub remote")
         canonical = Path(self.tasks.agents_root).resolve()
         worktree = Path(job["workspace"]).resolve()
         proposed_canonical = Path(proposal["canonical_repo"])

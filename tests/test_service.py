@@ -686,7 +686,7 @@ class ServiceTests(unittest.TestCase):
                     "vault_receipt": str(self.vault / "publication.json"),
                     "diff_digest": "0" * 64}
         review = {"status": "complete", "decisions": [], "findings_complete": True}
-        with self.assertRaisesRegex(ValueError, "checkouts do not match"):
+        with self.assertRaisesRegex(ValueError, "authorized GitHub remote"):
             self.service._publish_proposal(job, task, proposal, review)
 
     def test_publication_proposal_is_not_published_when_verdict_is_incomplete(self):

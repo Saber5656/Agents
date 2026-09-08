@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 from unittest import mock
@@ -77,7 +78,7 @@ def _review(workspace, base, files, *, missing=None):
 
 def test_host_rejects_missing_review_snapshot(publication_job):
     service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
-    proposal = _proposal(workspace, canonical, remote, base, vault)
+    proposal = _proposal(workspace, canonical, "git@github.com:Saber5656/Agents.git", base, vault)
     review = _review(workspace, base, proposal["files"], missing="reviewed_head")
     with pytest.raises(ValueError, match="review head"):
         service._publish_proposal(job, task, proposal, review)
@@ -85,7 +86,7 @@ def test_host_rejects_missing_review_snapshot(publication_job):
 
 def test_host_binds_paths_receipt_and_ignores_worker_ci_metadata(publication_job):
     service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
-    proposal = _proposal(workspace, canonical, remote, base, vault)
+    proposal = _proposal(workspace, canonical, "git@github.com:Saber5656/Agents.git", base, vault)
     proposal.update({"vault_receipt": str(Path("/tmp") / "attacker.json"),
                      "ci": {"status": "success"}})
     review = _review(workspace, base, proposal["files"])
@@ -103,8 +104,39 @@ def test_host_binds_paths_receipt_and_ignores_worker_ci_metadata(publication_job
 
 def test_host_rejects_worker_selected_checkout(publication_job, tmp_path):
     service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
-    proposal = _proposal(workspace, canonical, remote, base, vault)
+    proposal = _proposal(workspace, canonical, "git@github.com:Saber5656/Agents.git", base, vault)
     proposal["canonical_repo"] = str(tmp_path / "attacker-checkout")
     review = _review(workspace, base, proposal["files"])
     with pytest.raises(ValueError, match="checkouts do not match"):
         service._publish_proposal(job, task, proposal, review)
+
+
+def test_host_rejects_worker_selected_local_bare_remote(publication_job):
+    service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
+    proposal = _proposal(workspace, canonical, remote, base, vault)
+    review = _review(workspace, base, proposal["files"])
+    with pytest.raises(ValueError, match="authorized GitHub remote"):
+        service._publish_proposal(job, task, proposal, review)
+
+
+def test_pending_receipt_is_reconciled_without_restarting_verifier(publication_job):
+    service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
+    proposal = _proposal(workspace, canonical, "git@github.com:Saber5656/Agents.git", base, vault)
+    review = _review(workspace, base, proposal["files"])
+    service.run_once(executor=lambda _: {"status": "completed",
+                                         "publication_proposal": proposal})
+    assert service._start_verification(job["id"])
+    receipt = Path(job["run_dir"])
+    receipt.mkdir(parents=True, exist_ok=True)
+    (receipt / "publication.json").write_text(json.dumps({
+        "status": "pending", "published_sha": "a" * 40,
+        "files": proposal["files"], "base": base,
+        "preimage_digest": proposal["preimage_digest"],
+        "diff_digest": proposal["diff_digest"], "review": review,
+    }))
+    verifier = mock.Mock()
+    with mock.patch("harness.publication.publish_scoped",
+                    return_value={"status": "pending", "published_sha": "a" * 40}):
+        result = service.verify_with_agent(job["id"], verifier)
+    assert result["status"] == "needs_verification"
+    verifier.assert_not_called()
