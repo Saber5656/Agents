@@ -106,6 +106,37 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(second["evidence_links"], ["vault://old", "vault://new"])
         self.assertIn(first["id"], {task["id"] for task in store.list_tasks(issueization_state="unissued")})
 
+    def test_scalar_evidence_inputs_are_rejected_instead_of_split_into_characters(self):
+        store = self.store()
+        with self.assertRaises(TypeError):
+            store.create_task(purpose="reject scalar", evidence_links="vault://one")
+        origin = store.create_task(purpose="origin")
+        with self.assertRaises(TypeError):
+            store.record_discovery(originating_task=origin["id"], discovery_key="scalar",
+                                   purpose="follow-up", evidence_links="vault://one")
+        with self.assertRaises(TypeError):
+            store.add_evidence(origin["id"], "vault://one")
+        with self.assertRaises(TypeError):
+            store.create_task(purpose="reject mapping", evidence_links={"link": "vault://one"})
+
+    def test_scalar_acceptance_completion_and_dependency_inputs_are_rejected(self):
+        store = self.store()
+        with self.assertRaises(TypeError):
+            store.create_task(purpose="reject acceptance", acceptance_evidence="check")
+        with self.assertRaises(TypeError):
+            store.create_task(purpose="reject completion", completion_evidence="run")
+        with self.assertRaises(TypeError):
+            store.create_task(purpose="reject dependency", dependencies="task_other")
+        with self.assertRaises(TypeError):
+            store.create_requirement("reject acceptance", acceptance="criterion")
+
+    def test_scalar_work_unit_collections_are_rejected(self):
+        store = self.store()
+        with self.assertRaises(TypeError):
+            store.link_work_unit("unit", task_ids="task_id")
+        with self.assertRaises(TypeError):
+            store.link_work_unit("unit", issue_ids="org/repo#1")
+
     def test_optimistic_concurrency_rejects_stale_write(self):
         store = self.store()
         task = store.create_task(purpose="race")

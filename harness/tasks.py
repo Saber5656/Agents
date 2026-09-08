@@ -7,6 +7,7 @@ write back a verified Issue link through this module.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,18 @@ def _json(value, default):
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+def _list_input(value, field):
+    """Normalize collection arguments without silently splitting scalars."""
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes, Mapping)):
+        raise TypeError(f"{field} must be a collection; pass a one-item list for one item")
+    try:
+        return list(value)
+    except TypeError as exc:
+        raise TypeError(f"{field} must be a collection") from exc
 
 
 def _id(prefix: str) -> str:
@@ -334,10 +347,10 @@ class TaskStore:
         if not purpose or not str(purpose).strip():
             raise ValueError("purpose is required")
         now, task_id = _now(), task_id or _id("task")
-        evidence_links = list(dict.fromkeys(evidence_links or []))
-        acceptance_evidence = list(dict.fromkeys(acceptance_evidence or []))
-        completion_evidence = list(dict.fromkeys(completion_evidence or []))
-        dependencies = list(dict.fromkeys(dependencies or []))
+        evidence_links = list(dict.fromkeys(_list_input(evidence_links, "evidence_links")))
+        acceptance_evidence = list(dict.fromkeys(_list_input(acceptance_evidence, "acceptance_evidence")))
+        completion_evidence = list(dict.fromkeys(_list_input(completion_evidence, "completion_evidence")))
+        dependencies = list(dict.fromkeys(_list_input(dependencies, "dependencies")))
         with self._tx() as conn:
             conn.execute("""INSERT INTO tasks
               (id,purpose,source,source_task_id,source_event_key,expected_result,repository,
@@ -367,6 +380,9 @@ class TaskStore:
                          dependencies=None, acceptance_evidence=None):
         if not discovery_key:
             raise ValueError("discovery_key is required for idempotent capture")
+        evidence_links = list(dict.fromkeys(_list_input(evidence_links, "evidence_links")))
+        acceptance_evidence = list(dict.fromkeys(_list_input(acceptance_evidence, "acceptance_evidence")))
+        dependencies = list(dict.fromkeys(_list_input(dependencies, "dependencies")))
         with self._tx() as conn:
             found = conn.execute("SELECT id FROM tasks WHERE source_task_id=? AND source_event_key=?",
                                  (originating_task, discovery_key)).fetchone()
@@ -376,10 +392,10 @@ class TaskStore:
                 current = conn.execute("SELECT expected_result FROM tasks WHERE id=?", (task_id,)).fetchone()
                 if expected_result is not None and expected_result != current[0]:
                     self._record_task_revision(conn, task_id, "expected_result", expected_result, now)
-                for link in dict.fromkeys(evidence_links or []):
+                for link in evidence_links:
                     conn.execute("INSERT OR IGNORE INTO task_evidence VALUES (?,?,?,?)",
                                  (task_id, link, "context", now))
-                for evidence in dict.fromkeys(acceptance_evidence or []):
+                for evidence in acceptance_evidence:
                     conn.execute("INSERT OR IGNORE INTO task_acceptance VALUES (?,?,0,?)",
                                  (task_id, evidence, now))
                 conn.execute("UPDATE tasks SET updated_at=?, expected_result=COALESCE(?,expected_result), version=version+1 WHERE id=?",
@@ -395,10 +411,10 @@ class TaskStore:
                 if expected_result is not None:
                     self._record_task_revision(conn, task_id, "expected_result", expected_result, now)
                 conn.executemany("INSERT INTO task_evidence VALUES (?,?,?,?)",
-                                 [(task_id, x, "context", now) for x in dict.fromkeys(evidence_links or [])])
+                                 [(task_id, x, "context", now) for x in evidence_links])
                 conn.executemany("INSERT INTO task_acceptance VALUES (?,?,0,?)",
-                                 [(task_id, x, now) for x in dict.fromkeys(acceptance_evidence or [])])
-                for dependency in dict.fromkeys(dependencies or []):
+                                 [(task_id, x, now) for x in acceptance_evidence])
+                for dependency in dependencies:
                     conn.execute("INSERT INTO task_dependencies VALUES (?,?)", (task_id, dependency))
         return self.get_task(task_id)
 
@@ -424,11 +440,12 @@ class TaskStore:
         return self.get_task(task_id)
 
     def add_evidence(self, task_id, links, *, kind="context"):
+        links = list(dict.fromkeys(_list_input(links, "links")))
         with self._tx() as conn:
             self._require_task(conn, task_id)
             now = _now()
             conn.executemany("INSERT OR IGNORE INTO task_evidence VALUES (?,?,?,?)",
-                             [(task_id, link, kind, now) for link in dict.fromkeys(links)])
+                             [(task_id, link, kind, now) for link in links])
             conn.execute("UPDATE tasks SET version=version+1,updated_at=? WHERE id=?", (now, task_id))
         return self.get_task(task_id)
 
@@ -609,6 +626,7 @@ class TaskStore:
     def import_existing_issue(self, *, repository, issue_id, issue_url, title=None, body=None,
                               purpose=None, source="github-import", acceptance_evidence=None):
         self._validate_issue_reference(repository, issue_id, issue_url)
+        acceptance_evidence = list(dict.fromkeys(_list_input(acceptance_evidence, "acceptance_evidence")))
         with self._tx() as conn:
             existing = conn.execute("""SELECT t.id FROM tasks t JOIN task_issues ti ON ti.task_id=t.id
                                       WHERE ti.repository=? AND ti.issue_id=? LIMIT 1""",
@@ -623,7 +641,7 @@ class TaskStore:
                              issueization_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)""",
                              (task_id, purpose, source, repository, "planned", "issued", now, now))
                 self._ensure_issue(conn, repository, int(issue_id), issue_url, title, body)
-            for evidence in dict.fromkeys(acceptance_evidence or []):
+            for evidence in acceptance_evidence:
                 conn.execute("INSERT OR IGNORE INTO task_acceptance VALUES (?,?,0,?)", (task_id, evidence, _now()))
             conn.execute("UPDATE tasks SET version=version+1,updated_at=? WHERE id=?", (_now(), task_id))
             conn.execute("INSERT OR IGNORE INTO task_issues VALUES (?,?,?,?)",
@@ -680,6 +698,9 @@ class TaskStore:
             return [dict(r) for r in self._conn.execute(query + " ORDER BY linked_at", args)]
 
     def link_work_unit(self, work_unit, *, task_ids=(), issue_ids=(), pr_ids=(), purpose=None):
+        task_ids = _list_input(task_ids, "task_ids")
+        issue_ids = _list_input(issue_ids, "issue_ids")
+        pr_ids = _list_input(pr_ids, "pr_ids")
         with self._tx() as conn:
             self._ensure_work_unit(conn, work_unit, purpose)
             for task_id in task_ids:
@@ -706,10 +727,11 @@ class TaskStore:
             return {"id": row["id"], "purpose": row["purpose"], "created_at": row["created_at"], "tasks": tasks, "issues": issues, "prs": prs}
 
     def create_requirement(self, text, *, source=None, acceptance=None, requirement_id=None):
+        acceptance = _list_input(acceptance, "acceptance")
         now, requirement_id = _now(), requirement_id or _id("req")
         with self._tx() as conn:
             conn.execute("INSERT INTO requirements VALUES (?,?,?,?,?,?,?,?)",
-                         (requirement_id, text, source, json.dumps(list(acceptance or [])), "open", 0, now, now))
+                         (requirement_id, text, source, json.dumps(acceptance), "open", 0, now, now))
         return self.get_requirement(requirement_id)
 
     def get_requirement(self, requirement_id):

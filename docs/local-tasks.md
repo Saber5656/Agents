@@ -36,6 +36,12 @@ with TaskStore() as store:
     )
 ```
 
+Collection arguments such as `evidence_links`, `acceptance_evidence`,
+`completion_evidence`, `dependencies`, and work-unit link IDs must be passed as
+sequences. Scalar strings, bytes, and mappings raise `TypeError` instead of
+being split into characters or keys; pass a one-item list when recording one
+value.
+
 `record_discovery` is idempotent for `(originating_task, discovery_key)`. A
 retry returns the same task and merges new evidence and acceptance records.
 It only captures a follow-up locally; it does not call GitHub or start work.
