@@ -286,13 +286,18 @@ def _payload_view(ruleset: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def ruleset_preimage_hash(ruleset: dict[str, Any]) -> str:
-    """Hash an observed ruleset, excluding server timestamps only."""
-    stable = {
-        key: value
+def ruleset_preimage(ruleset: dict[str, Any]) -> dict[str, Any]:
+    """Return the observed preimage with only server timestamps normalized out."""
+    return {
+        key: copy.deepcopy(value)
         for key, value in ruleset.items()
         if key not in VOLATILE_RULESET_FIELDS
     }
+
+
+def ruleset_preimage_hash(ruleset: dict[str, Any]) -> str:
+    """Hash an observed ruleset, excluding server timestamps only."""
+    stable = ruleset_preimage(ruleset)
     encoded = json.dumps(stable, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -693,7 +698,7 @@ def main() -> int:
                "payload_sha256": hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                "operation": args.operation, "ruleset_id": args.ruleset_id,
                "target_preimage_sha256": ruleset_preimage_hash(existing) if existing is not None else None,
-               "target_preimage": copy.deepcopy(existing) if existing is not None else None,
+               "target_preimage": ruleset_preimage(existing) if existing is not None else None,
                "allow_stored_gh_auth": args.allow_stored_gh_auth,
                "replace_existing": args.replace_existing}
     if args.mode == "apply":

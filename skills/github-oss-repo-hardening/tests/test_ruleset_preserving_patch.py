@@ -84,6 +84,11 @@ def test_preimage_changes_are_detected_before_mutation():
     after["rules"].append({"type": "later_unrelated_rule"})
     assert helper.ruleset_preimage_hash(before) != helper.ruleset_preimage_hash(after)
 
+    timestamp_only = deepcopy(before)
+    timestamp_only["updated_at"] = "2026-09-08T01:00:00Z"
+    assert helper.ruleset_preimage_hash(before) == helper.ruleset_preimage_hash(timestamp_only)
+    assert "updated_at" not in helper.ruleset_preimage(timestamp_only)
+
 
 def test_lost_response_readback_reconciles_without_retry():
     expected = existing_ruleset()
