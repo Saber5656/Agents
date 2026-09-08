@@ -224,6 +224,17 @@ class DeliveryTests(unittest.TestCase):
             with self.assertRaises(DeliveryError): client.merge(1, 'a' * 40, 'b' * 40)
             sent.assert_not_called()
 
+    def test_merge_queue_policy_is_rejected_before_mutation(self):
+        client = GitHub('fixture/repository'); state = self.state()
+        rules = [{'type': 'merge_queue', 'parameters': {'merge_method': 'MERGE'}}]
+        with patch.object(client, 'pr', return_value=state), \
+             patch.object(client, 'api', side_effect=[rules, {'protected': False}]), \
+             patch.object(client, 'threads', return_value=[]), \
+             patch('harness.delivery.command') as sent, \
+             self.assertRaisesRegex(DeliveryError, 'merge queue'):
+            client.merge(1, 'a' * 40, 'b' * 40)
+        sent.assert_not_called()
+
     def test_issue_marker_is_stable_and_english(self):
         body=issue_body('task-1','Expected result',['Run the fixture'])
         self.assertIn('<!-- agents-local-task:task-1 -->',body)

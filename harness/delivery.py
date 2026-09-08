@@ -327,11 +327,14 @@ class GitHub:
         # Both modern rules and legacy branch protection must be observed.
         from urllib.parse import quote
         name=quote(branch,safe='');rules=self.api('rules/branches/'+name)
-        detail=self.api('branches/'+name);requirements=[]
+        requirements=[]
         for rule in rules:
+            if rule.get('type') == 'merge_queue':
+                raise DeliveryError('merge queue target requires supported queue observation')
             if rule['type']=='required_status_checks':
                 requirements.extend((x['context'],x.get('integration_id'))
                     for x in rule['parameters']['required_status_checks'])
+        detail=self.api('branches/'+name)
         if detail.get('protected'):
             # Unavailable discovery remains incomplete, never an empty policy.
             protection=self.api('branches/'+name+'/protection')
