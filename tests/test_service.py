@@ -470,6 +470,17 @@ class ServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "worker future failed"):
                 scheduler.run_forever(executor=lambda _: {"status": "failed"})
 
+    def test_scheduler_restarts_when_verification_cleanup_fails(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        scheduler = Scheduler(self.service, poll_interval=0.01,
+                              verification_executor=lambda _: {"acceptance": False})
+        with mock.patch.object(self.service, "verify_with_agent", side_effect=RuntimeError("escaped")), \
+             mock.patch.object(self.service, "_reset_verification", side_effect=RuntimeError("db unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "verification cleanup failed"):
+                scheduler.run_forever(executor=lambda _: {"status": "failed"})
+        self.assertEqual(self.service.get_job(job["id"])["state"], "verifying")
+
     def test_scheduler_reserves_coordinator_slot_and_runs_bounded_pool(self):
         workspace2 = self.root / "workspace-2"; workspace2.mkdir()
         task2 = self.tasks.create_task(purpose="scheduled work 2")

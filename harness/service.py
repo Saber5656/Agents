@@ -1068,8 +1068,8 @@ class Scheduler:
                             try:
                                 self.store._reset_verification(
                                     verification_job_id, f"verification future failed: {exc}")
-                            except Exception:
-                                pass
+                            except Exception as reset_error:
+                                raise RuntimeError("verification cleanup failed") from reset_error
                             completed_results.append({"status": "needs_verification",
                                                       "job_id": verification_job_id})
                         else:
