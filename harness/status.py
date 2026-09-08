@@ -332,7 +332,7 @@ def build_status(*, db_path=None, service_db_path=None, agents_root=None):
             uncertainties.append("task store schema or content is unreadable")
         finally:
             task_connection.close()
-    elif task_source["state"] in {"missing", "corrupt"}:
+    elif task_source["state"] in {"missing", "corrupt", "not_configured"}:
         uncertainties.append("task store is unavailable")
     service = {"state": service_source["state"], "jobs": [], "queued_resources": [],
                "retries": [], "holds": [], "usage": {}, "updates": [], "attempts": []}
