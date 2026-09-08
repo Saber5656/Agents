@@ -153,11 +153,20 @@ def _is_privacy_safe(path: Path, data: bytes) -> bool:
 
 
 def _privacy_history(root: Path, base: str, head: str, files: list[str]) -> None:
-    """Check the complete selected diff and commit messages before merge."""
-    diff = _run(root, "diff", "--binary", f"{base}..{head}", "--", *files).stdout
-    messages = _run(root, "log", "--format=fuller", f"{base}..{head}").stdout
-    if not _is_privacy_safe(Path("selected-history"), diff) or not _is_privacy_safe(Path("commit-metadata"), messages):
-        raise PublicationError("privacy check rejected commit history")
+    """Check every unpublished commit, including paths removed later.
+
+    Reviewing only ``base..head`` misses a secret that was introduced and
+    removed by two unpublished commits.  Inspect each commit's complete patch
+    and metadata so the content that would actually be sent to the remote is
+    safe as a history, rather than merely safe as a final tree.
+    """
+    commits = _out(root, "rev-list", "--reverse", f"{base}..{head}").splitlines()
+    for commit in commits:
+        diff = _run(root, "show", "--format=", "--binary", "--no-renames", commit).stdout
+        message = _run(root, "show", "-s", "--format=fuller", commit).stdout
+        if (not _is_privacy_safe(Path(f"commit-{commit}"), diff)
+                or not _is_privacy_safe(Path(f"commit-message-{commit}"), message)):
+            raise PublicationError("privacy check rejected commit history")
 
 
 def _validate_review(review: Any) -> None:
@@ -223,6 +232,10 @@ def _validate_spec(spec: Any) -> dict[str, Any]:
             raise PublicationError(f"{key} must be an explicit absolute path")
     if not isinstance(spec["remote"], str) or not spec["remote"].strip():
         raise PublicationError("remote must be explicit")
+    if (_is_nonlocal_remote(spec["remote"])
+            and not (spec["remote"].startswith("file://")
+                     or _authorized_github_remote(spec["repository"], spec["remote"]))):
+        raise PublicationError("remote is not the authorized GitHub repository")
     _validate_review(spec["review"])
     return spec
 
@@ -325,6 +338,27 @@ def _ci_status(ci: Any, sha: str, observer=None) -> str:
     return "pending"
 
 
+def _authorized_github_remote(repository: str, remote: str) -> bool:
+    """Return whether *remote* is an allowed URL for the production repo."""
+    return remote in {
+        f"git@github.com:{repository}.git",
+        f"ssh://git@github.com/{repository}.git",
+        f"https://github.com/{repository}.git",
+        f"https://github.com/{repository}",
+    }
+
+
+def _looks_like_github_remote(remote: str) -> bool:
+    return remote.startswith(("git@github.com:", "ssh://git@github.com/", "https://github.com/"))
+
+
+def _is_nonlocal_remote(remote: str) -> bool:
+    """Recognize URL/scp remotes that cannot be local bare test fixtures."""
+    return remote.startswith(("file://", "http://", "https://", "ssh://", "git://")) or bool(
+        re.match(r"^[^/\s@]+@[^/\s:]+:", remote)
+    )
+
+
 def _github_ci_status(repository: str, remote: str, sha: str) -> str:
     """Observe workflow/check state for a real GitHub remote.
 
@@ -332,8 +366,14 @@ def _github_ci_status(repository: str, remote: str, sha: str) -> str:
     service. A real remote with workflows requires an observed successful
     check set; missing, pending, or failed checks remain incomplete.
     """
-    if remote.startswith("file://") or "://" not in remote:
-        return "not_configured"
+    # A scp-style SSH URL has no ``://``.  Only the explicit production
+    # allowlist may reach the GitHub observer; local fixtures remain outside
+    # this path and can use the explicit callable adapter in ``_ci_status``.
+    if not _authorized_github_remote(repository, remote):
+        # Never downgrade a GitHub-looking but unauthorized remote to a local
+        # ``not_configured`` result.  The publication validator rejects it;
+        # this helper remains conservative when called directly.
+        return "pending" if _looks_like_github_remote(remote) else "not_configured"
     try:
         from .delivery import GitHub
         github = GitHub(repository)
@@ -434,8 +474,11 @@ def publish_scoped(spec: dict[str, Any]) -> dict[str, Any]:
                 observed_ci = (_ci_status(spec.get("ci"), published, spec.get("ci_observer"))
                                if spec.get("ci") is not None or spec.get("ci_observer") is not None
                                else _github_ci_status(spec["repository"], spec["remote"], published))
-                if existing.get("ci") == "success" and observed_ci != "success":
-                    raise PublicationError("published receipt CI observation no longer verifies")
+                if observed_ci in {"pending", "failed"} and existing.get("status") in {"published", "success"}:
+                    # A stale receipt must not turn a newly pending or failed
+                    # check set into a successful/not-configured result.
+                    existing.update({"status": observed_ci, "ci": observed_ci})
+                    _save(receipt, existing)
                 return existing
         state: dict[str, Any] = existing or {"schema": 1, "request_digest": request_digest, "status": "planned", "attempts": 0}
         state["attempts"] = int(state.get("attempts", 0)) + 1
