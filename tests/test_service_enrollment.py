@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 from harness.context import RequirementLedger, ContextError
-from harness.service import ServiceStore
+from harness.service import ServiceStore, main as service_main
 from harness.tasks import TaskStore
 
 
@@ -259,6 +259,24 @@ class SelectedEnrollmentTests(unittest.TestCase):
 
         self.assertEqual(outcome["status"], "blocked")
         self.assertEqual(service.get_job(job["id"])["state"], "pending")
+
+    def test_run_cli_forwards_explicit_worker_capacity_to_scheduler(self):
+        with mock.patch(
+            "harness.service.load_agents_env",
+            return_value={"AGENTS_ROOT": str(self.agents), "AGENTS_VAULT_ROOT": str(self.vault)},
+        ), mock.patch("harness.service.Scheduler") as scheduler:
+            scheduler.return_value.run_forever.return_value = "stopped"
+            result = service_main([
+                "--db", str(self.root / "cli-service.sqlite3"), "run",
+                "--poll", "7", "--max-workers", "3", "--coordinator-reserved", "1",
+            ])
+
+        self.assertEqual(result, 0)
+        scheduler.assert_called_once()
+        kwargs = scheduler.call_args.kwargs
+        self.assertEqual(kwargs["poll_interval"], 7.0)
+        self.assertEqual(kwargs["max_workers"], 3)
+        self.assertEqual(kwargs["coordinator_reserved"], 1)
 
     def test_requirement_dependency_chain_and_cycle_fail_closed(self):
         leaf = self.ledger.add("leaf", acceptance=["leaf acceptance"])

@@ -148,6 +148,16 @@ App-quit and host-reboot continuation still require a live acceptance run on
 the supported host. The subprocess and restart fixtures here prove durable
 local recovery and lock behavior only.
 
+The supported service entrypoint exposes its concurrency policy explicitly;
+the defaults remain two total slots with one reserved coordinator/verifier
+slot. A host that has validated capacity can choose the worker count without
+changing the service code:
+
+```sh
+python3 -m harness.service --db "$AGENTS_ROOT/.local/service.sqlite3" run \
+  --max-workers 3 --coordinator-reserved 1
+```
+
 ## Explicit RequirementLedger enrollment
 
 The coordinator can connect one already selected requirement to one already

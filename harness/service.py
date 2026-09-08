@@ -2107,7 +2107,7 @@ def main(argv=None):
     selected.add_argument("--json", action="store_true")
     ls = sub.add_parser("list"); ls.add_argument("--db", default=argparse.SUPPRESS); ls.add_argument("--state"); ls.add_argument("--json", action="store_true")
     sh = sub.add_parser("show"); sh.add_argument("--db", default=argparse.SUPPRESS); sh.add_argument("job_id"); sh.add_argument("--json", action="store_true")
-    run = sub.add_parser("run"); run.add_argument("--db", default=argparse.SUPPRESS); run.add_argument("--poll", type=float, default=30)
+    run = sub.add_parser("run"); run.add_argument("--db", default=argparse.SUPPRESS); run.add_argument("--poll", type=float, default=30); run.add_argument("--max-workers", type=int, default=2); run.add_argument("--coordinator-reserved", type=int, default=1)
     once = sub.add_parser("run-once"); once.add_argument("--db", default=argparse.SUPPRESS); once.add_argument("--json", action="store_true")
     resume = sub.add_parser("resume-held"); resume.add_argument("--db", default=argparse.SUPPRESS); resume.add_argument("job_id"); resume.add_argument("--recheck", required=True, help="path to a read-only safety recheck JSON object"); resume.add_argument("--json", action="store_true")
     ver = sub.add_parser("verify"); ver.add_argument("--db", default=argparse.SUPPRESS); ver.add_argument("job_id"); ver.add_argument("--evidence", required=True, help="path to structured acceptance review JSON"); ver.add_argument("--json", action="store_true")
@@ -2140,7 +2140,7 @@ def main(argv=None):
             recheck = json.loads(Path(args.recheck).read_text())
             value = store.resume_held(args.job_id, lambda _: recheck)
         elif args.command == "run-once": value = Scheduler(store, verification_executor=default_verifier).run_once()
-        elif args.command == "run": value = Scheduler(store, poll_interval=args.poll, verification_executor=default_verifier).run_forever()
+        elif args.command == "run": value = Scheduler(store, poll_interval=args.poll, max_workers=args.max_workers, coordinator_reserved=args.coordinator_reserved, verification_executor=default_verifier).run_forever()
         else:
             launchd = Launchd(store.tasks.agents_root, store.db_path, store.tasks.vault_root)
             value = launchd.generate(args.label) if args.action == "generate" else getattr(launchd, args.action)(args.label, args.path) if args.action in ("install", "start") else launchd.status(args.label)
