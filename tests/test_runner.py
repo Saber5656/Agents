@@ -125,6 +125,13 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(c[second+1], dirs[1])
         self.assertNotIn('--add-dir', h.build_command('codex','run','gpt-5.6-luna','low'))
 
+    def test_local_codex_workers_omit_unrelated_apps_gui_and_skill_catalog(self):
+        for mode in ('run','review'):
+            c=h.build_command('codex',mode,'gpt-5.6-luna','low')
+            disabled={c[i+1] for i,arg in enumerate(c[:-1]) if arg=='--disable'}
+            self.assertTrue({'multi_agent','apps','plugins','browser_use','computer_use','image_generation'} <= disabled)
+            self.assertIn('skills.max_context_tokens=1',c)
+
 
 class JobTests(unittest.TestCase):
     def setUp(self):

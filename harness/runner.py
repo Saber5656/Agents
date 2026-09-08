@@ -483,7 +483,9 @@ def build_command(provider, mode, model, effort, *, add_dirs=()):
     command = ['codex', 'exec', '--ignore-user-config', '--ephemeral', '--json',
             '--skip-git-repo-check', '-m', model, '-s', 'read-only' if mode == 'review' else 'workspace-write',
             '-c', 'approval_policy="never"', '-c', f'model_reasoning_effort="{effort}"',
-            '--disable', 'multi_agent']
+            '-c', 'skills.max_context_tokens=1']
+    for feature in ('multi_agent', 'apps', 'plugins', 'browser_use', 'computer_use', 'image_generation'):
+        command.extend(['--disable', feature])
     for directory in (add_dirs if mode == 'run' else ()):
         command.extend(['--add-dir', str(directory)])
     command.append('-')

@@ -1,5 +1,10 @@
 # Worker discovery capture
 
+Local CLI workers omit Apps, plugins, GUI/browser and image tools and minimize
+the ambient skill catalog. Supply the selected instructions and evidence in
+the job prompt. Core local shell/file tools remain subject to the job sandbox;
+App-specific work uses the supported App integration separately.
+
 Run mode can attach a worker to an existing local TaskStore task with
 `--task-id`. The runner loads the trusted `.env` supplied by the caller and
 uses `AGENTS_ROOT/.local/tasks.sqlite3` unless an explicit `--task-db` is
