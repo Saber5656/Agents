@@ -21,9 +21,20 @@ if sys.argv[1:] == ['--version']:
 with open(os.environ['CALLS'], 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')
 if os.environ.get('FAIL'):
  print('HTTP 401 SECRET_MARKER Authorization: SECRET_MARKER', file=sys.stderr);sys.exit(1)
-if '--method' in sys.argv and sys.argv[sys.argv.index('--method')+1] != 'GET':
- print('{}')
-else: print('[]')
+method = sys.argv[sys.argv.index('--method')+1] if '--method' in sys.argv else 'GET'
+endpoint = next((arg for arg in sys.argv if arg.startswith('repos/')), '')
+state = Path(os.environ['CALLS']).with_name('ruleset-state.json')
+if method in ('POST', 'PUT'):
+ payload = json.loads(Path(sys.argv[sys.argv.index('--input')+1]).read_text())
+ payload['id'] = 99
+ state.write_text(json.dumps(payload))
+ print(json.dumps(payload))
+elif '/rulesets/' in endpoint and state.exists():
+ print(state.read_text())
+elif state.exists():
+ print('[' + state.read_text() + ']')
+else:
+ print('[]')
 ''')
     executable.chmod(0o755)
     env = {'PATH': str(tmp_path)+os.pathsep+os.path.dirname(sys.executable)+os.pathsep+'/usr/bin:/bin',
@@ -86,6 +97,32 @@ def test_payload_drift_stops(cli):
     assert not (cli[1]/'calls').exists()
 
 
+def test_existing_ruleset_drift_stops_before_write(cli):
+    run, root, _ = cli
+    state = root / 'ruleset-state.json'
+    state.write_text(json.dumps({
+        'id': 99,
+        'name': 'protect-main-branch-of-OSS',
+        'target': 'branch',
+        'enforcement': 'active',
+        'bypass_actors': [],
+        'conditions': {'ref_name': {'include': ['~DEFAULT_BRANCH'], 'exclude': []}},
+        'rules': [{'type': 'deletion'}],
+    }))
+    payload, binding = root / 'payload.json', root / 'context.private.json'
+    reviewed = run('--payload-out', str(payload), '--context-out', str(binding))
+    assert reviewed.returncode == 0, reviewed.stderr
+    changed = json.loads(state.read_text())
+    changed['rules'].append({'type': 'unrelated_future_rule'})
+    state.write_text(json.dumps(changed))
+
+    result = apply(cli, payload, binding)
+    assert result.returncode != 0
+    assert 'context_drift' in result.stderr
+    calls = (root / 'calls').read_text().splitlines()
+    assert not any('POST' in call or 'PUT' in call for call in calls)
+
+
 def test_selected_invalid_credential_never_falls_back_or_leaks(cli):
     run, root, _ = cli
     result = run('--payload-out',str(root/'p.json'),changes={'FAIL':'1'})
@@ -120,10 +157,28 @@ def test_context_output_refuses_existing_symlink(cli):
 def test_success_response_is_not_forwarded(cli):
     payload,binding=prepare(cli)
     executable=cli[1]/'gh'
-    executable.write_text(executable.read_text().replace("print('{}')", "print('SECRET_MARKER')"))
+    executable.write_text(executable.read_text().replace("print(json.dumps(payload))", "print('SECRET_MARKER')"))
     result=apply(cli,payload,binding)
     assert result.returncode == 0
+    assert 'reconciled as applied' in result.stdout
     assert 'SECRET_MARKER' not in result.stdout+result.stderr
+
+
+def test_lost_response_with_mismatched_readback_is_ambiguous_without_retry(cli):
+    payload, binding = prepare(cli)
+    executable = cli[1] / 'gh'
+    contents = executable.read_text()
+    contents = contents.replace(
+        "state.write_text(json.dumps(payload))",
+        "state.write_text(json.dumps({'id': 99, 'name': 'other', 'rules': []}))",
+    ).replace("print(json.dumps(payload))", "print('SECRET_MARKER')")
+    executable.write_text(contents)
+    result = apply(cli, payload, binding)
+    assert result.returncode != 0
+    assert 'ambiguous_mutation' in result.stderr
+    assert 'SECRET_MARKER' not in result.stdout + result.stderr
+    calls = (cli[1] / 'calls').read_text().splitlines()
+    assert sum('POST' in call or 'PUT' in call for call in calls) == 1
 
 
 def test_last_moment_config_symlink_drift_stops_mutation(cli):
@@ -136,7 +191,7 @@ def test_last_moment_config_symlink_drift_stops_mutation(cli):
     executable=root/'gh'
     # Change a non-secret config-directory identity during discovery, after the
     # initial snapshot has matched. The next observation must stop the POST.
-    executable.write_text(executable.read_text().replace("else: print('[]')", "else:\n Path(os.environ['GH_CONFIG_DIR']).unlink()\n Path(os.environ['GH_CONFIG_DIR']).symlink_to('"+str(second)+"')\n print('[]')"))
+    executable.write_text(executable.read_text().replace("else:\n print('[]')", "else:\n Path(os.environ['GH_CONFIG_DIR']).unlink()\n Path(os.environ['GH_CONFIG_DIR']).symlink_to('"+str(second)+"')\n print('[]')"))
     # Use upsert for discovery at both preparation and apply.
     data=json.loads(binding.read_text());data['operation']='upsert';binding.write_text(json.dumps(data))
     result=run('--mode','apply','--yes','--payload-in',str(payload),'--context-in',str(binding),'--executor-surface','codex-app')
