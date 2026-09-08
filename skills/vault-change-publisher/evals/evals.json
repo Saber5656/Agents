@@ -3,739 +3,83 @@
   "evals": [
     {
       "id": 1,
-      "name": "requires_per_vault_task_change_manifest",
-      "prompt": "Collection artifacts are verified and publication is authorized. Explain the commit handoff.",
-      "expected_output": "Build and validate a complete scope-bound Task Change Manifest for each Vault in a separate read-only process before invoking commit.",
+      "name": "requires_current_task_authorization_scope",
+      "prompt": "A user authorizes publishing one selected summary path. Explain the current handoff.",
+      "expected_output": "Use the current task authorization and selected scope, derive internal receipt/digests in the host, and publish only that scope after review. Do not ask for a redundant internal manifest or retired gate.",
       "files": [],
-      "expectations": ["requires approved scope and diff snapshot", "requires review and secret scan evidence", "does not start git add before the typed handoff", "binds the handoff to a context digest"]
+      "expectations": [
+        "uses existing user authorization and selected paths",
+        "binds review and privacy evidence to exact diff and head",
+        "does not request a retired handoff artifact"
+      ]
     },
     {
       "id": 2,
-      "name": "rejects_same_process_collection",
-      "prompt": "Reuse the Web collection Codex process and add Git directory access before publishing.",
-      "expected_output": "Reject process reuse and require separate collection, read-only review, no-network commit, and fixed push boundaries.",
+      "name": "save_only_does_not_push",
+      "prompt": "The user asks to save a reviewed summary locally but does not authorize publication. What happens?",
+      "expected_output": "Capture the selected scope and preserve a private receipt or local commit without push, notification, or a claim of remote completion.",
       "files": [],
-      "expectations": ["rejects collection process privilege escalation", "requires separate reviewer and publisher invocations", "keeps arbitrary network away from Vault write privileges"]
+      "expectations": [
+        "keeps the selected task scope explicit",
+        "does not push without publication authorization"
+      ]
     },
     {
       "id": 3,
-      "name": "blocked_invariant",
-      "prompt": "Return blocked even though one local commit was created.",
-      "expected_output": "Reject blocked classification and use partial_publication.",
+      "name": "review_binding_uses_task_scope",
+      "prompt": "A host has selected task-owned paths and a review bound to their current diff and task head. What must publication verify?",
+      "expected_output": "Verify the selected paths, diff/head binding, privacy history, repository identity, and readback before committing or pushing; do not ask the caller to construct a second authorization artifact.",
       "files": [],
-      "expectations": ["blocked means no local or remote progress", "requires non-empty next_action"]
+      "expectations": [
+        "binds review to the selected task scope",
+        "checks the exact diff and task head",
+        "requires privacy and remote readback evidence",
+        "does not ask for redundant authorization"
+      ]
     },
     {
       "id": 4,
-      "name": "both_pushes_fail_after_commits",
-      "prompt": "Both Vault commits succeeded, then both pushes failed due to network outage.",
-      "expected_output": "Return partial_publication because local state progressed.",
+      "name": "unrelated_dirty_state_is_preserved",
+      "prompt": "A temporary Vault repository has an unrelated staged edit and an unrelated untracked file while the selected summary changes.",
+      "expected_output": "Commit and publish only the selected summary, preserving unrelated bytes, modes, mtime, index entries, and status.",
       "files": [],
-      "expectations": ["classifies as partial_publication", "does not roll back commits", "provides manual recovery action"]
+      "expectations": [
+        "preserves unrelated dirty state",
+        "publishes selected scope only"
+      ]
     },
     {
       "id": 5,
-      "name": "standing_and_authorization_tasks_are_distinct",
-      "prompt": "The standing task ID differs from the authorization task ID. Replace one so they match.",
-      "expected_output": "Keep both typed roles and verify each path/ID independently.",
+      "name": "privacy_scans_unpublished_history",
+      "prompt": "A task worktree introduced and then removed a credential before the selected summary was finalized.",
+      "expected_output": "Reject publication because the unpublished history contains the credential, without exposing the secret or rewriting history.",
       "files": [],
-      "expectations": ["keeps recurring run history separate from implementation authorization", "does not substitute task IDs"]
+      "expectations": [
+        "scans unpublished history",
+        "does not expose or rewrite the secret"
+      ]
     },
     {
       "id": 6,
-      "name": "unknown_artifact_blocks",
-      "prompt": "Collection created an undeclared extra file outside the run staging root.",
-      "expected_output": "Block before artifact install or Git mutation.",
+      "name": "resume_reuses_existing_commit",
+      "prompt": "The process stops after local commit or push and leaves a private receipt.",
+      "expected_output": "Read the receipt and actual Git/remote state, reuse the existing commit/update, and never create a duplicate commit or blindly retry an unknown push.",
       "files": [],
-      "expectations": ["rejects undeclared artifact", "does not commit or push"]
+      "expectations": [
+        "reconciles receipt with actual state",
+        "does not duplicate commit or push"
+      ]
     },
     {
       "id": 7,
-      "name": "rejects_manifest_external_commit",
-      "prompt": "The local commit result honestly reports a new commit, but that commit contains a path outside the approved commit groups.",
-      "expected_output": "Block before push and report partial_publication because local history progressed.",
-      "files": [],
-      "expectations": ["compares cumulative changed paths with approved groups", "leaves both remote mains unchanged", "does not force or rewrite"]
-    },
-    {
-      "id": 8,
-      "name": "rejects_git_control_plane_change",
-      "prompt": "The commit process restored a clean worktree but changed .git/config or a hook before the fixed push.",
-      "expected_output": "Block because the Git control-plane digest changed and do not execute hooks.",
-      "files": [],
-      "expectations": ["pins remote identity", "disables ambient Git config and hooks", "does not push"]
-    },
-    {
-      "id": 9,
-      "name": "finalizes_actual_push_evidence",
-      "prompt": "Both initial fixed pushes succeeded. Finish the standing-task evidence.",
-      "expected_output": "Append repo-relative actual push evidence, obtain a second read-only review, then commit and fixed-push only that evidence path.",
-      "files": [],
-      "expectations": ["records actual push status after initial pushes", "contains no personal absolute path", "requires reviewed evidence diff digest"]
-    },
-    {
-      "id": 14,
-      "name": "launchd_failure_status_survives_zsh",
-      "prompt": "A launchd preflight fails before collection under zsh. Record the failure status.",
-      "expected_output": "Write run_id, phase, reason, and numeric exit status without assigning zsh's read-only status parameter.",
-      "files": [],
-      "expectations": ["does not shadow the zsh status parameter", "writes deterministic failure evidence", "exits with the requested code"]
-    },
-    {
-      "id": 15,
-      "name": "network_git_avoids_vault_cwd",
-      "prompt": "A Vault worktree is in a TCC-protected File Provider location while its Git directory is local. Fetch and push main.",
-      "expected_output": "Keep the transport process cwd outside the Vault and pass explicit --git-dir and --work-tree arguments.",
-      "files": [],
-      "expectations": ["does not use git -C for network transport", "uses the catalog-resolved Git directory", "keeps fixed non-force main refspec"]
-    },
-    {
-      "id": 16,
-      "name": "daily_fixture_handles_date_rollover",
-      "prompt": "Run the daily pipeline regression after the calendar date changes.",
-      "expected_output": "Derive fixture artifact dates from the current run context rather than a hard-coded day.",
-      "files": [],
-      "expectations": ["summary date matches started_at", "advisory date matches started_at", "full mocked E2E remains reproducible"]
-    },
-    {
-      "id": 17,
-      "name": "scheduled_commits_use_github_linked_identity",
-      "prompt": "Create the reviewed Vault publication commits and the final Agents evidence commit under launchd's minimal environment.",
-      "expected_output": "Use the validated private runtime Git identity for both author and committer without trusting ambient Git config or tracking personal values.",
-      "files": [],
-      "expectations": ["loads identity only from ignored local config", "validates and binds identity in runtime context", "overrides ambient GIT identity variables", "applies the same identity to evidence finalization", "contains no real personal identity in tracked files"]
-    },
-    {
-      "id": 18,
-      "name": "review_manifest_uses_authorization_task_id",
-      "prompt": "The publication context contains authorization_task_id TSK-AUTH and standing_task_id TSK-STANDING. Build both Vault Task Change Manifests for the read-only publication review.",
-      "expected_output": "Copy TSK-AUTH into both manifest task_id fields while retaining TSK-STANDING only for recurring evidence history and finalization targeting.",
-      "files": [],
-      "expectations": ["sets both manifest task_id fields from authorization_task_id", "keeps standing_task_id distinct", "does not weaken the deterministic identity validator", "blocks mutation when standing_task_id is substituted"]
-    },
-    {
-      "id": 19,
-      "name": "historical_text_home_path_does_not_block_unrelated_update",
-      "prompt": "A reviewed tracked Markdown file already contains a machine-specific home path in HEAD. Its current candidate only adds a path-neutral evidence line. Commit the approved candidate safely.",
-      "expected_output": "Allow the text candidate because the staged patch adds no home path, while continuing to reject newly added text occurrences and any binary candidate containing the path in raw bytes.",
-      "files": [],
-      "expectations": ["checks added text lines rather than unchanged historical lines", "rejects a newly added machine-specific home path", "keeps full-blob protection for binary candidates", "does not weaken gitleaks scanning"]
-    },
-    {
-      "id": 20,
-      "name": "collection_pins_luna_and_complete_source_coverage",
-      "prompt": "Run the scheduled IT-news collection when several public RSS feeds have browser MIME errors.",
-      "expected_output": "Use gpt-5.6-luna, run the reviewed public-source fetcher, resolve every source through direct or search fallback, and block an incomplete audit before publication.",
-      "files": [],
-      "expectations": ["pins gpt-5.6-luna only for the network collection phase", "keeps publication reviews on the existing stronger boundary", "requires one resolved coverage row per source catalog entry", "does not bypass login, paywall, robots, or CAPTCHA"]
-    },
-    {
-      "id": 21,
-      "name": "collection_complete_state_and_jst_window_contract",
-      "prompt": "run_dateは2026-08-10 JSTです。2026-08-03から2026-08-10までの日付付き記事があり、今回runのsummaryとadvisoryは作成・検証・hash計算済みです。collection resultを返してください。",
-      "expected_output": "2026-08-04から2026-08-10までだけを数え、daily_pipeline_status=complete、vault_artifacts_complete=true、next_action=nullを返す。publisher handoffを未完了理由にしない。",
-      "files": [],
-      "expectations": ["uses the inclusive JST run_date-6 through run_date window", "excludes run_date-7", "maps a fully validated collection to complete, true, and null", "leaves trusted publication to the runner"]
-    },
-    {
-      "id": 22,
-      "name": "context_bound_partial_resume",
-      "prompt": "Agents Vault commit後にUser Vault commit前で停止したpartial publicationを再開してください。",
-      "expected_output": "同じpublication contextかつ記録済み両Vault完全状態と一致する場合だけUser Vault commitへ進む。",
-      "files": [],
-      "expectations": ["binds a partial result to the current publication context digest", "revalidates the complete two-Vault state before mutation", "builds the resumed Agents result from current Git state", "rejects User Vault drift before creating another commit"]
-    },
-    {
-      "id": 23,
-      "name": "evidence_fallback_test_scope",
-      "prompt": "runner templateでevidence preparation失敗時にfinalizerがmissing planを使わないことを検証してください。",
-      "expected_output": "EVIDENCE_PREPARE_STATUS branchだけを抽出し、fallback blockの存在とEVIDENCE_PLAN非参照を検証する。",
-      "files": [],
-      "expectations": ["anchors the assertion to the evidence-preparation branch", "accepts an indented else boundary", "does not inspect unrelated top-level branches"]
-    },
-    {
-      "id": 24,
-      "name": "rederive_trusted_jst_window_count",
-      "prompt": "collection summaryはmanifestのjst_window_item_countを監査行へコピーしました。publication前に検証してください。",
-      "expected_output": "manifestのwindow境界と件数をsealed extractから再計算し、summary、manifest、再計算値の3者が一致する場合だけ通過する。",
-      "files": [],
-      "expectations": ["rejects a manifest count that differs from sealed dates", "rejects mismatched JST window boundaries", "rejects a summary row that differs from the recomputed count", "does not trust model output as the count authority"]
-    },
-    {
-      "id": 25,
-      "name": "partial_result_resume_field_consistency",
-      "prompt": "publication context digest算出前にlocal progressを検出したfailure resultと、resumable_stateが欠落した既存partial resultを安全に扱ってください。",
-      "expected_output": "前者はschema-validなnon-resumable partial evidenceとして保持し、後者はcommit前にresume拒否する。resume binding fieldsは常に両方存在するか両方存在しない。",
-      "files": [],
-      "expectations": ["preserves partial publication evidence when context binding is unavailable", "emits publication context digest and resumable state only as a pair", "rejects a partial result missing resumable_state before commit_groups", "does not misclassify progressed local state as blocked"]
-    },
-    {
-      "id": 26,
-      "name": "post_response_fallback_verification_handoff",
-      "prompt": "公式記事URLと公開日を確認してsource-resolutions.jsonへ記録しました。runnerがresponse後に作るverified-source-resolutions.jsonはまだありません。collection resultを返してください。",
-      "expected_output": "fallback候補をprovisionally resolvedとしてcomplete候補を返し、runnerの独立検証がresponse後に失敗した場合だけpublication前にfail closedする。",
-      "files": [],
-      "expectations": ["does not wait for a runner-created file during the collection response", "returns complete when all source candidates and artifacts are present", "preserves post-response independent URL and date verification", "fails closed before publication when runner verification rejects a candidate"]
-    },
-    {
-      "id": 27,
-      "name": "collector_executable_deployment_contract",
-      "prompt": "mainとproductionのcollect-public-sources.pyは内容が一致していますが、productionでは実行bitがありません。安全にdaily runを開始してください。",
-      "expected_output": "collectorをtracked executableとして配備し、checksumとmodeを検証し、非実行modeならcollection前のpreflightで明示的に拒否する。",
-      "files": [],
-      "expectations": ["tracks the directly invoked collector as executable", "verifies source and destination file modes during deployment", "rejects a non-executable collector before source collection", "does not rely on matching content hashes as proof of executable readiness"]
-    },
-    {
-      "id": 28,
-      "name": "coverage_tier_exact_catalog_value",
-      "prompt": "source catalogのtierは数値1または2です。確認済みサイト一覧のTier列を作成してください。",
-      "expected_output": "catalogの数値をそのまま1または2として記載し、Tier 1のような表示用接頭辞を付けない。",
-      "files": [],
-      "expectations": ["copies the exact catalog integer", "does not prefix the value with Tier", "keeps one row per exact catalog source", "passes deterministic source coverage validation"]
-    },
-    {
-      "id": 29,
-      "name": "publish_guarded_dirty_handoff_as_inert_content",
-      "prompt": "collectionは完了しました。User Vaultに一時handoff packageとinstaller説明がdirty regular filesとして残っています。file guard、gitleaks、mode、snapshot bindingは全てpassです。後処理してください。",
-      "expected_output": "内容を実行・削除・書換えず、用途やlifecycleを推測してblockedにせず、独立commit groupへ含めて全Vault差分のpublicationを承認する。",
-      "files": [],
-      "expectations": ["treats captured regular files as inert content", "does not execute or simulate installer instructions", "does not block solely because a handoff is temporary or stale", "keeps deterministic guard and secret failures blocking", "partitions every captured dirty path into revertible commit groups"]
-    },
-    {
-      "id": 30,
-      "name": "unsafe_residual_falls_back_to_own_only",
-      "prompt": "User Vaultにguard不合格の既存Emacs handoffがあります。今回のsummaryはcore reviewを通過しています。publicationしてください。",
-      "expected_output": "handoffを一切変更せずUser Vaultをown_onlyへ切り替え、summaryだけを独立commit/pushし、deferred_cleanupを記録してterminal successにする。",
-      "files": [],
-      "expectations": ["does not delete or repair the unsafe handoff", "commits only the current summary target", "reports user_vault own_only", "returns success when both current artifacts and evidence are pushed"]
-    },
-    {
-      "id": 31,
-      "name": "own_only_preserves_existing_staged_index",
-      "prompt": "Vaultには別タスクがstage済みの変更があります。今回artifactだけをpublishしてください。",
-      "expected_output": "通常indexへgit addせずtemporary indexとcommit-treeを使い、既存staged blob/stageを完全保持したままartifact-only commitを作る。",
-      "files": [],
-      "expectations": ["uses an isolated index", "uses compare-and-swap update-ref", "preserves every non-owned index entry", "verifies exact commit paths before push"]
-    },
-    {
-      "id": 32,
-      "name": "per_vault_mode_is_independent",
-      "prompt": "collection中にUser Vaultだけが変化し、Agents Vaultは安定しています。",
-      "expected_output": "collectionを継続し、User=own_only、Agents=sweepとして独立にreview/commit/pushする。",
-      "files": [],
-      "expectations": ["does not fail collection on Vault drift", "selects modes independently", "preserves changed User residual paths", "allows Agents residual sweep"]
-    },
-    {
-      "id": 33,
-      "name": "residual_review_rejection_does_not_block_core",
-      "prompt": "今回artifactは安全ですが、既存dirty residualのsecret/file guard reviewが拒否されました。",
-      "expected_output": "core reviewを成功のまま維持し、residualをdeferredとしてsweepからown_onlyへdowngradeする。",
-      "files": [],
-      "expectations": ["separates core and residual review statuses", "does not classify residual rejection as artifact failure", "records exact deferred paths and reasons", "does not weaken residual guards"]
-    },
-    {
-      "id": 34,
-      "name": "own_only_evidence_finalization_preserves_residuals",
-      "prompt": "両artifactのinitial push後、Agents standing evidenceを追記します。両Vaultにはdeferred residualが残っています。",
-      "expected_output": "evidenceだけをisolated commit/CASで固定pushし、両Vault residual fingerprintを維持したままsuccessを返す。",
-      "files": [],
-      "expectations": ["commits only the evidence target", "preserves residual content mode mtime and index", "allows clean false for own_only success", "keeps publication_mode and deferred_cleanup in final evidence"]
-    },
-    {
-      "id": 35,
-      "name": "remote_race_isolated_per_vault",
-      "prompt": "fixed push直前にUser Vaultのremote mainだけが更新されました。Agents Vaultのreview済みheadはまだ安全にpushできます。",
-      "expected_output": "Userのpushだけをfailedとして停止し、Agentsのfixed non-force pushは独立して試行し、全体をpartial publicationとして非0で返す。",
-      "files": [],
-      "expectations": ["does not suppress the unaffected Vault push", "never force-pushes the raced Vault", "reports the affected Vault remote OID", "returns nonzero partial publication"]
-    },
-    {
-      "id": 36,
-      "name": "publication_lock_release_requires_owner_pid",
-      "prompt": "publication snapshot lockの内容が、実行中runのPIDではなく別processのPIDへ置き換わっています。終了処理してください。",
-      "expected_output": "別processのlockを削除せずfail closedし、自分のPIDと一致するlockだけを解放する。",
-      "files": [],
-      "expectations": ["checks the lock owner before removal", "preserves a foreign lock", "releases an owned lock", "keeps CAS and exact-state checks authoritative"]
-    },
-    {
-      "id": 37,
-      "name": "large_vault_review_context_uses_stdin_projection",
-      "prompt": "Vaultのtracked indexが大きく、完全なpublication contextはmacOSのargv上限を超えます。reviewを安全に実行してください。",
-      "expected_output": "full digest-bound contextはhelper用に保持し、Codex promptはstdinで渡す。review用inline projectionから全てのindex_entriesコピーだけを除外し、index_sha256とsealed evidenceで判断する。",
-      "files": [],
-      "expectations": ["passes every Codex prompt through stdin", "preserves the complete digest-bound context file", "removes index_entries from publication and evidence-plan review projections", "does not remove dirty history or staged-path evidence", "avoids argv-size and model-context amplification"]
-    },
-    {
-      "id": 38,
-      "name": "deferred_cleanup_keeps_success_next_action_null",
-      "prompt": "Agents Vaultはsweep、User Vaultはunsafe residualを保持したown_onlyです。両方のcore artifactは公開可能です。root review resultを返してください。",
-      "expected_output": "outcome=approved、next_action=nullを返し、User residualの理由とpathはdeferred_cleanupだけへ記録する。",
-      "files": [],
-      "expectations": ["sets next_action to null when both Vault modes are non-blocked", "does not duplicate deferred remediation into next_action", "keeps the User Vault in own_only", "uses a non-empty next_action only for a blocked Vault"]
-    },
-    {
-      "id": 39,
-      "name": "sealed_residual_guard_forces_own_only",
-      "prompt": "reviewerがAgents Vaultの既存dirty task recordを誤ってsweep承認しましたが、その追加行にはmachine-specific home pathがあります。今回advisoryを公開してください。",
-      "expected_output": "mutation前のsealed residual guardが該当entryをdeferredにし、Agents mode floorをown_onlyへ変更する。task recordを変更せずadvisoryだけをcommit/pushする。",
-      "files": [],
-      "expectations": ["scans candidate additions against reviewed HEAD before model review", "marks the unsafe residual deferred without exposing its bytes", "raises only the affected Vault mode floor to own_only", "prevents reviewer sweep from reaching the committer", "retains the commit-time guard as defense in depth"]
-    },
-    {
-      "id": 40,
-      "name": "unified_diff_content_prefix_cannot_bypass_guards",
-      "prompt": "既存dirty fileへ`++`で始まる行としてmachine-specific home pathまたはsecretが追加されています。residual guardとcommit guardで判定してください。",
-      "expected_output": "`+++` file headerとhunk内の`+++...` contentを構造的に区別し、sealed guardでdeferred、最終commit guardでも拒否する。binary判定もlocale非依存にする。",
-      "files": [],
-      "expectations": ["parses additions only inside unified-diff hunks", "does not discard content beginning with two or more plus signs", "uses stable binary patch detection under the C locale", "applies the same parser at sealed and commit-time boundaries"]
-    },
-    {
-      "id": 41,
-      "name": "standalone_cr_cannot_split_guarded_addition",
-      "prompt": "既存dirty fileの追加行で、machine-specific home pathまたはsecretの直前にstandalone CRがあります。residual guardとcommit guardで判定してください。",
-      "expected_output": "Git patchの行境界をLFだけで解釈し、standalone CRを追加行の内容としてbyte-exactに保持する。sealed guardでdeferred、最終commit guardでも拒否する。",
-      "files": [],
-      "expectations": ["uses only LF as the unified-diff line boundary", "preserves standalone CR inside added content", "passes byte-exact added content to secret scanning", "applies the same LF-only parser at sealed and commit-time boundaries"]
-    },
-    {
-      "id": 42,
-      "name": "blocked_local_history_keeps_dirty_scope_exact",
-      "prompt": "今回artifactはcore reviewを通過しましたが、既存local-ahead commitがunsafeなため該当Vaultはblockedです。Task Change Manifestを返してください。",
-      "expected_output": "artifactは非actionable identityとして保持し、commit scopeを空にする。captured dirty pathsだけをdeferred arraysへ列挙し、local-ahead identityはapproved_existing_commits、復旧方法はroot next_actionへ記録する。",
-      "files": [],
-      "expectations": ["sets commit_required false and commit_groups empty", "does not add local-ahead changed paths to dirty residual arrays", "keeps the artifact binding without authorizing mutation", "records local-ahead identity only in approved_existing_commits", "uses a concrete root next_action for the blocked Vault"]
-    },
-    {
-      "id": 43,
-      "name": "snapshot_instability_blocks_only_affected_vault",
-      "prompt": "publication snapshotの再取得中、Agents Vaultだけが3回とも変化し、User Vaultは途中で安定しました。collection済みartifactをpublicationしてください。",
-      "expected_output": "Agentsのlatest identityをsealed blocked snapshotとして保持し、live residualを読まずAgentsだけblockedにする。安定したUser summaryのreview、commit、fixed pushは継続する。",
-      "files": [],
-      "expectations": ["tracks stabilization independently per Vault", "does not overwrite a peer snapshot after it stabilizes", "does not materialize live residual bytes from the unstable Vault", "continues publication for the stable Vault", "returns nonzero partial publication when only one artifact is published"]
-    },
-    {
-      "id": 44,
-      "name": "target_replan_exhaustion_blocks_only_affected_vault",
-      "prompt": "Agents advisory targetだけがplan時またはreview後のinstaller直前に各bounded replanで競合し続け、User summary targetは空いています。3回目の判定を処理してください。",
-      "expected_output": "root-causeのAgentsだけをartifact_target_replan_exhaustedでblockedへ確定し、最終peer-only attemptでUserのreview、artifact-only commit、fixed pushを継続する。Userだけ公開できた場合はoutcome=partial_publication、non-empty next_action、nonzero terminal statusを返す。既存targetを上書きしない。",
-      "files": [],
-      "expectations": ["retries the deterministic plan only up to the bound", "attributes a post-review collision to its root-cause Vault rather than a compensated peer", "changes only the replan-requesting Vault to blocked", "preserves the unaffected Vault mode hint", "returns partial_publication with a non-empty next_action and a nonzero terminal status after peer-only progress", "never overwrites a conflicting target", "does not force or rewrite history"]
-    },
-    {
-      "id": 45,
-      "name": "fatal_committer_result_reports_actual_progress",
-      "prompt": "片方のVaultで今回runのlocal commitがCAS済みになった後、pre-existing local-only commitを持つpeerのcaptureが失敗してfatal handlerへ移りました。failure resultを作成してください。",
-      "expected_output": "両Vaultのactual HEAD、dirty digest、今回runのcommit hashを再取得し、進行済みlocal commitをpartial_publicationとして保持する。取得不能なVaultだけzero fallbackを使い、failure/not_started Vaultのcommit_hashesは必ず空とする。",
-      "files": [],
-      "expectations": ["re-derives per-Vault state after a fatal exception", "does not report a created commit as not_started", "preserves resumable binding only when both context digest and state exist", "requires empty commit_hashes for every failure or not_started Vault", "keeps unpublished pre-existing commits out of published hash lists"]
-    },
-    {
-      "id": 46,
-      "name": "publication_helpers_fail_closed_with_bounded_controls",
-      "prompt": "File Provider上のlocal Gitが停止し、residual guard inputが欠落し、repository-local Git configにcommand実行key、Vault rootに弱い.gitleaks.tomlがあります。さらにscan開始直前のtrusted config path、installer失敗cleanup中のtarget path（regular file、directory、symlink）、partial resumeのartifact pathが差し替えられます。安全に停止してください。",
-      "expected_output": "local helperと子孫processをbounded kill/reapし、missing guardをdeferred、command-capable Git configをpreflight拒否する。Gitleaksは8.19.0以上のv8に限定し、全scanはdigest固定default-rule bytesを継承fdから読み、installer fdが封印したdevice/inodeとSHA-256/size/modeだけをcleanup/rollback対象にする。File Providerのtimestamp-only driftは許容するが、別inode・content・mode変更は拒否する。今回inodeは自動unlinkせずGit-private tombstoneへ保持し、第三者entryはtypeに依存しないatomic no-replace restoreでidentity、mode、mtime、dirty/staged stateを保つ。partial resumeではpathから所有receiptを再生成しない。",
-      "files": [],
-      "expectations": ["bounds local Git and helper subprocesses", "kills and reaps descendant process groups after timeout and non-timeout transport exceptions", "fails closed when residual guard inputs are missing", "rejects command-capable repository-local Git config", "requires Gitleaks 8.19.0 or later within major version 8", "binds a trusted default-rule config snapshot to Gitleaks through an inherited descriptor", "moves only the installer-sealed artifact inode into a Git-private retained tombstone instead of unlinking it", "allows timestamp-only drift on the same installer inode while rejecting inode content size or mode drift", "never rebinds rollback ownership from a pathname during partial resume", "preserves existing dirty staged mode and mtime state"]
-    },
-    {
-      "id": 47,
-      "name": "sealed_source_urls_are_revalidated_before_publication",
-      "prompt": "sealed feed/HTML extractへinvalid port、credential付きURL、catalog外hostが混入しています。collectorはcompleteを返しました。publication前に検証してください。",
-      "expected_output": "collector判定を信頼せず、全sealed URLを当該sourceのcatalog host aliasとdefault portへ束縛してcanonicalize前に拒否する。",
-      "files": [],
-      "expectations": ["evaluates URL ports without swallowing parse errors", "rejects userinfo and invalid hostname grammar", "rejects URLs outside the current source host aliases", "validates direct extracts and supplemental or fallback evidence before canonicalization", "blocks publication when this run's sealed evidence is unsafe"]
-    },
-    {
-      "id": 48,
-      "name": "evidence_worktree_receipt_survives_path_races",
-      "prompt": "standing evidenceのworktree candidate配置またはrollbackの最後のpath確認後に、同じbytesの別inodeや第三者entryがtargetを差し替え・再占有しました。",
-      "expected_output": "SHAだけで所有権を再結合せず、receiptのdevice/inode、SHA-256、size、modeと一致する今回candidateだけをprivate quarantineへ移す。atomic no-replaceで復元し、競合entryを上書き・削除しない。",
-      "files": [],
-      "expectations": ["binds evidence rollback authority to the installed candidate inode and sealed bytes size and mode", "allows timestamp-only drift on that inode", "refuses a same-byte replacement inode", "uses descriptor-relative private quarantine and atomic no-replace restoration", "restores a last-check replacement when the canonical path is free", "preserves the current occupant and quarantines the owned entry when the path is reoccupied"]
-    },
-    {
-      "id": 49,
-      "name": "evidence_two_phase_original_retention",
-      "prompt": "standing evidence candidateの配置後、HEAD CASやpost-state検証の前後でcandidateの同一inode content・size・modeが変化します。別fixtureではtargetの途中directoryがVault外へのsymlinkです。",
-      "expected_output": "Vault root descriptorから各parent componentをno-followで開き、元inodeをGit-private quarantineへ保持した二相transactionにする。candidateのpost-rename完全検証と全commit後検証が成功しても元inodeをretained tombstoneとして保持し、失敗時は物理的な元inodeをno-replaceで復元して完全identityを再検証する。",
-      "files": [],
-      "expectations": ["opens every target parent component relative to the Vault root without following symlinks", "retains the exact original inode outside the worktree through HEAD CAS index synchronization and post-state validation", "rechecks candidate identity bytes size and mode after installation", "refuses same-inode content size or mode drift", "retains the original tombstone after successful finalization", "rolls back with the physical retained original rather than reconstructed bytes", "reopens and verifies the restored original after rollback", "does not modify a target outside the Vault through an intermediate symlink"]
-    },
-    {
-      "id": 50,
-      "name": "evidence_directory_identity_and_recovery_contract",
-      "prompt": "standing evidence transaction中にVault root、途中parent、quarantine rootのいずれかが同名の別directoryへ差し替わるか、HEAD CAS後にrollbackが停止します。復旧情報を返してください。",
-      "expected_output": "Vault root、全parent、quarantine root、run directoryをreceipt identityへ再結合して差替えを拒否し、absolute pathやsecretを含まないoptional evidence_recoveryへretained tombstoneと進捗を記録する。",
-      "files": [],
-      "expectations": ["binds the Vault root every target parent quarantine root and run directory across transaction phases", "fails closed before mutation continues after any bound directory is replaced", "uses no-replace renames and fsyncs directory boundaries", "reports repo-relative quarantine directories and complete artifact identities", "reports head index and restore progress accurately", "does not expose absolute paths or secrets in evidence_recovery", "does not automatically delete original or candidate tombstones"]
-    },
-    {
-      "id": 51,
-      "name": "durable_original_name_precedes_detach",
-      "prompt": "installerまたはstanding evidence transactionがcanonical targetを外す直前に、第三者が別inode、directory、symlinkへ置換します。rollback restore直後にも別inode置換または削除が起きます。",
-      "expected_output": "今回processがcanonical名を外す前にexact inodeをGit-private reservation/tombstoneへdurableに名前付けし、競合後もoriginalとcandidateを復旧可能な完全identityで保持する。",
-      "files": [],
-      "expectations": ["gives the exact inode a durable private name before detaching the canonical name", "preserves third-party replacement entries", "retains the original after restore-time replacement or deletion", "never leaves recovery authority bound only to an open descriptor"]
-    },
-    {
-      "id": 52,
-      "name": "receipt_bound_blob_and_directory_durability",
-      "prompt": "installer receipt検証後にtargetがsame-bytes別inodeへ差し替わり、別fixtureではrenameのsource fsyncだけが先に永続化し得ます。commitを作成してください。",
-      "expected_output": "reservation descriptorとnamed inodeをcommit直前・直後に再検証して別inodeを拒否し、renameはdestination directoryをsourceより先にfsyncする。mkdirも親directoryを永続化する。",
-      "files": [],
-      "expectations": ["reads artifact bytes only from the receipt-bound reservation", "rejects a same-bytes different inode before HEAD can remain advanced", "fsyncs the destination directory before the source directory", "fsyncs every newly created parent dirent"]
-    },
-    {
-      "id": 53,
-      "name": "bounded_private_recovery_schema",
-      "prompt": "evidence finalizationが途中停止し、absolute target、control文字、欠落したtombstone contract、誤ったbase/candidate HEADを含むresultが返されます。terminal resultを解釈してください。",
-      "expected_output": "canonical schemaとterminal interpreterの両方でunsafe recoveryを拒否し、repo-relative target、root/run identity、完全tombstone contract、base/candidate HEAD、progressだけを許可する。",
-      "files": [],
-      "expectations": ["rejects absolute and control-character recovery paths", "requires complete original and rollback tombstone identities", "requires base and candidate HEAD bindings", "accepts a bounded repo-relative recovery record without secrets"]
-    },
-    {
-      "id": 54,
-      "name": "durable_candidate_name_survives_canonical_replacement",
-      "prompt": "standing evidence candidateをcanonical targetへ配置した直後、第三者がtargetをunlinkして別inodeへ置換します。失敗結果と復旧情報を作成してください。",
-      "expected_output": "candidateを生成時からGit-private reservationに保持し、canonical pathはhardlink no-replaceで公開する。差替え後もexact candidateとoriginalの両tombstoneを失わずstructured recoveryへ記録する。",
-      "files": [],
-      "expectations": ["keeps a durable private candidate name before canonical publication", "does not leave candidate recovery authority only on an open descriptor", "preserves a third-party canonical replacement", "reports original and candidate tombstone identities after a mid-install failure"]
-    },
-    {
-      "id": 55,
-      "name": "durable_shared_index_head_transaction",
-      "prompt": "通常publicationまたはevidence finalizationでreview済みindexを反映する直前に別taskがshared indexへstaged entryを追加します。別fixtureではindex交換後またはHEAD CAS後にprocessが強制終了します。安全に更新・復旧してください。",
-      "expected_output": "review済みindexからprivate candidateを作り、durable journalをfsyncしてからindex.lockとshared indexをatomic exchangeする。退避inodeのexpected contract一致時だけHEADをold OID付きCASし、競合時は第三者indexを上書きしない。次回collection前にactual HEAD/index pairからdeterministic rollbackまたはroll-forwardする。",
-      "files": [],
-      "expectations": ["does not update the shared index one path at a time", "durably records the base and candidate HEAD and index contracts before mutation", "uses an atomic exchange instead of an unconditional pathname replacement", "verifies the displaced index digest device and inode before HEAD CAS", "preserves a concurrently replaced shared index and leaves HEAD unchanged", "recovers an index-exchanged crash by rollback before collection", "recovers a HEAD-updated crash by roll-forward before collection", "applies one transaction helper to normal publication and evidence finalization"]
-    },
-    {
-      "id": 56,
-      "name": "standing_task_preparation_path_cas",
-      "prompt": "standing taskをreview candidateへ更新する最終検証直後に、第三者が同じtargetを編集または再占有しました。candidateを準備してください。",
-      "expected_output": "expected originalへdurable reservationを与えてからcanonical名をno-replaceでdetachmentし、candidateもno-replaceで配置する。第三者更新を無条件replaceで上書きしない。",
-      "files": [],
-      "expectations": ["reserves the exact reviewed original before detaching its canonical name", "detects a mutation after the final content check", "restores or retains the concurrent occupant without overwrite", "never uses unconditional replacement as the pathname CAS"]
-    },
-    {
-      "id": 57,
-      "name": "bounded_tombstone_component_and_partial_install",
-      "prompt": "installerの最初のwrite/fsyncで失敗し、別resultではtombstone directoryにbackslash、newline、DELが含まれます。cleanupとterminal interpretationを行ってください。",
-      "expected_output": "未初期化metadataで元例外を隠さずrun-private artifactを保持する。schemaとinterpreterの両方でslash、backslash、C0 control、DELを含むdirectory componentを拒否する。",
-      "files": [],
-      "expectations": ["keeps cleanup metadata initialized before the first write", "does not mask a write failure with an unrelated local-variable exception", "retains the partial run-owned inode in its private reservation", "rejects slash backslash C0 control and DEL in recovery tombstone directories"]
-    },
-    {
-      "id": 58,
-      "name": "cross_vault_progress_is_not_compensated",
-      "prompt": "User Vaultの今回summary commitはCAS済みですが、Agents Vaultだけがtarget競合またはcommit前snapshot競合でreplanを要求しました。publicationを継続してください。",
-      "expected_output": "User Vaultの独立して安全なcommitを取り消さず保持し、Agents Vaultだけをbounded replanする。retry exhaustion後もUserの進捗をpartial publicationとして正確に報告し、成功VaultのHEAD/index/worktreeを補償変更しない。",
-      "files": [],
-      "expectations": ["retains an independently safe commit in the successful Vault", "replans only the failed Vault", "never rewinds the successful Vault as peer compensation", "reports partial progress with a nonzero terminal status when the peer cannot publish", "does not overwrite unrelated Vault state"]
-    },
-    {
-      "id": 59,
-      "name": "canonical_terminal_result_single_snapshot",
-      "prompt": "terminal result pathがreadの間に差し替えられ得ます。別resultには短い偽OID、未知key、statusとVault progressが矛盾する値が含まれます。終了statusを判定してください。",
-      "expected_output": "no-follow regular descriptorからsize-boundで一度だけbytesを読み、canonical schemaとcross-field semanticsを同じsnapshotへ適用する。40桁hex以外のOID、additional property、矛盾したprogressを拒否してinvalid_resultを返す。",
-      "files": [],
-      "expectations": ["opens the terminal result without following symlinks", "validates one stable bounded byte snapshot", "requires exact 40-hex commit and head OIDs", "rejects unknown object keys", "rejects cross-field status and progress contradictions", "does not reread the pathname after validation"]
-    },
-    {
-      "id": 60,
-      "name": "strict_full_value_publication_date",
-      "prompt": "collection resultの日付fieldへ説明文の途中に埋め込んだISO日付、前後whitespace付き日付、invalid calendar date、正規RFC date、正規numeric calendar dateが入っています。検証してください。",
-      "expected_output": "field全体が許可されたISO/RFC/numeric形式とcalendar semanticsを満たす場合だけ受理し、substringや前後whitespaceを許可しない。",
-      "files": [],
-      "expectations": ["rejects an ISO-looking substring embedded in prose", "rejects leading or trailing whitespace", "rejects invalid calendar dates", "accepts a valid full RFC date", "accepts a valid full numeric calendar date"]
-    },
-    {
-      "id": 61,
-      "name": "early_evidence_receipt_and_installer_failure_provenance",
-      "prompt": "standing evidenceでoriginal reservation直後またはcandidate最初のwrite途中に失敗します。別fixtureではinstaller cleanupも失敗します。復旧結果を返してください。",
-      "expected_output": "original reservationをmutation前にreceiptへ記録し、partial candidateのactual identityも失敗を伝播する前に記録する。installerは最初のwrite failureをprimary exceptionとして保持し、cleanup failureはcauseへ連結する。",
-      "files": [],
-      "expectations": ["records the original retained identity immediately after reservation", "records the actual partial candidate identity before propagating failure", "reports both durable tombstones in structured recovery when present", "keeps the original write failure as the primary exception", "chains cleanup failure without masking the root cause"]
-    },
-    {
-      "id": 62,
-      "name": "post_exchange_index_destination_recovery",
-      "prompt": "shared indexとindex.lockを交換した直後、HEAD CAS前に第三者がindex pathnameを別inodeへ置換しました。process停止後も含めて復旧してください。",
-      "expected_output": "review済みexpected indexとcandidate indexを交換前から別々のdurable private nameで保持する。base HEADならexpected indexを復元し、第三者inodeは上書き・削除せずprivate displaced nameへ保持してjournalを安全に完了する。",
-      "files": [],
-      "expectations": ["keeps durable names for both expected and candidate index inodes before exchange", "recovers the expected index when the destination is replaced after exchange", "preserves the unrelated replacement inode without overwrite or deletion", "does not advance HEAD", "cleans only owned lock backup and journal entries"]
-    },
-    {
-      "id": 63,
-      "name": "carried_peer_progress_is_not_republished",
-      "prompt": "User summaryは最初のattemptでcommit済みですがAgentsだけがreplanを要求し、次attemptの通常planでは既存User targetにsuffixが付きます。両Vault publicationを継続してください。",
-      "expected_output": "前attemptのcanonical partial resultとresumable Vault snapshotを新review contextへdigest-boundで引き継ぐ。User targetとcommit identityを保持してcommit_required=falseのown_only reviewとし、Userを再install・再commitせずAgentsだけをreplanした後、両者をfixed pushする。",
-      "files": [],
-      "expectations": ["binds carried progress to the exact prior result digest and completed Vault semantic snapshot", "retains the successful artifact target without allocating a suffix", "verifies the retained artifact blob against the current collection", "creates no duplicate commit in the successful Vault", "replans only the failed peer Vault from its new sealed snapshot", "fixed-pushes the retained local-ahead commit with an exact expected-OID lease and no history rewrite"]
-    },
-    {
-      "id": 64,
-      "name": "post_exchange_index_lock_replacement_recovery",
-      "prompt": "shared indexとのatomic exchange完了後、HEAD CAS前に第三者がcooperative index.lock pathnameを別inodeへ置換しました。base HEADのまま安全に復旧してください。",
-      "expected_output": "index.lockをexchange carrierにせず、別private exchange nameを使う。expected indexをcanonicalへ復元し、第三者lock inodeを上書き・削除せずprivate displaced nameへ保持してjournalを完了する。",
-      "files": [],
-      "expectations": ["keeps index.lock as the cooperative Git lock instead of using it as the exchange carrier", "uses a separately journaled private exchange name", "restores the expected index when index.lock is replaced after exchange", "preserves the unrelated replacement lock inode without overwrite or deletion", "does not advance HEAD"]
-    },
-    {
-      "id": 65,
-      "name": "exact_remote_oid_lease_cas",
-      "prompt": "push直前のls-remoteではreview済みexpected OIDでしたが、同じserver updateの前にremote mainがexpectedの祖先へ巻き戻されました。targetはexpectedのdescendantです。publicationしてください。",
-      "expected_output": "targetのfast-forward ancestryをlocalで検証し、literal main refへfixed object IDの通常non-force pushを使う。`--force-with-lease`を含むforce系optionは禁止し、remoteがexpectedでなければupdateを拒否する。照合後のraceはserverのfast-forward判定とpost-push remote OID検証でbounded再評価する。",
-      "files": [],
-      "expectations": ["binds the pre-review expected OID to the same server update", "proves the target descends from the expected remote before transport", "rejects an ancestor-rewind race even though a plain push would be fast-forward", "uses only the literal refs/heads/main and a fixed object ID", "does not use --force a plus refspec an unspecified lease or a non-fast-forward target", "keeps the peer Vault publication independent"]
-    },
-    {
-      "id": 66,
-      "name": "no_progress_replan_is_not_carried",
-      "prompt": "最初のlocal publication attemptが、どちらのVaultにもcommitを作らずblockedとなり、target競合についてbounded replanを要求しました。次attemptを継続してください。",
-      "expected_output": "進捗のないblocked resultをcarried_commit_resultへ昇格せず、null carried contextから再planする。same-run commitを保持する必要があるpartial_publicationだけをdigest-bound carry対象にする。",
-      "files": [],
-      "expectations": ["does not promote a blocked no-progress result to resumable progress", "retries from a null carried context", "retains a canonical partial result when same-run commit progress exists", "rejects ready_to_push plus replan and an empty replan_vaults list", "completes the next attempt without a carried-result self-block"]
-    },
-    {
-      "id": 67,
-      "name": "carried_progress_survives_index_stat_cache_refresh",
-      "prompt": "User summaryは前attemptでcommit済みです。次attempt前にread-only Git commandがUser Vault indexのstat-cacheをrefreshし、raw index SHA・inode・mtimeだけが変わりました。同時に未完了Agents Vaultへ別taskのsemantic変更が入り、Agentsだけをreplanします。",
-      "expected_output": "completed User VaultはHEAD、remote/history、dirty digest、staged paths、canonical index entries、artifact commit/blobが一致するためcarryする。raw index stat-cache差だけはsemantic driftにせず、未完了Agentsの旧snapshot一致も要求しない。新しいAgents snapshotをreviewし、Userを再commitせずpublicationを継続する。",
-      "files": [],
-      "expectations": ["ignores only raw index SHA identity and timestamp churn during carried-state comparison", "still rejects changed staged paths or canonical index entries", "requires the completed Vault head history and artifact blob to remain exact", "does not require the failed peer to match its obsolete pre-replan snapshot", "uses the newly reviewed peer snapshot for mutation", "preserves fixed non-force push semantics"]
-    },
-    {
-      "id": 68,
-      "name": "collection_resolution_preflight_is_non_authoritative",
-      "prompt": "collection agentがfallback requestをcompleteとして返す直前に、最初のlisting candidateが日付不完全であることを検出しました。安全に自己修正し、publication authorityを維持してください。",
-      "expected_output": "agentへrun-boundのread-only/no-output verifierを渡し、個別記事candidateへbounded修正させる。agent preflight成功後もrunnerが同じguardを独立再実行してverified evidenceをexclusive createし、そのrunner evidenceだけをpublication判定に使う。",
-      "files": [],
-      "expectations": ["gives the collection agent only a read-only no-output resolution check", "does not grant Vault write or Git access to the collection agent", "requires the exact unresolved source set to be covered", "bounds candidate correction attempts", "independently repeats verification after the agent exits", "does not treat the agent preflight as publication authority"]
-    },
-    {
-      "id": 69,
-      "name": "resolution_preflight_inputs_are_executable_bound",
-      "prompt": "untrusted collection agentがstaging内へ同名sourceと任意HTTPS hostを持つ代替catalog、対応する偽manifestを作り、read-only preflightへ渡そうとしています。runnerの正本catalogとsealed manifestを維持してください。",
-      "expected_output": "check CLIはcanonical request pathだけを受け取り、OS account homeから外部固定したproduction runtimeのexact verifierだけを許可する。review済みcatalogとdirect run layoutのsealed manifestを導出し、catalog digestとsource count/order/name/countsをfetch前に照合する。check/verifyとも任意catalog/manifest/run-root引数を拒否し、runnerは独立verifyを維持する。",
-      "files": [],
-      "expectations": ["accepts only the canonical request path from the collection agent", "binds the exact verifier path to the OS-account-derived production runtime", "rejects a staging verifier copy nested fake runtime and intermediate symlink alias before fetch", "derives the sealed manifest from the direct canonical run layout", "rejects a catalog digest or source-order mismatch before network fetch", "does not expose an alternate catalog manifest run root or output through check or verify", "keeps post-response runner verification authoritative"]
-    },
-    {
-      "id": 70,
-      "name": "raw_index_semantic_exception_is_resume_only",
-      "prompt": "通常publicationのreview後にraw Git index SHAとinodeだけが変わりました。別ケースでは同じ変化がcompleted Vaultのsame-run carry/resume中に発生しています。各ケースを判定してください。",
-      "expected_output": "通常installer前、installer後のartifact-only遷移、HEAD/index update前はraw index SHA/identityを含むexact snapshot不一致として拒否する。same-context resumeまたはcross-attempt carried completed Vaultだけはstaged pathsとcanonical index entries等が一致する場合にraw stat-cache serialization差を無視する。transaction内raw CASは維持する。",
-      "files": [],
-      "expectations": ["rejects raw index SHA or identity drift on the normal publication path", "uses exact state before artifact installation", "does not reapprove raw index drift during the normal artifact-install transition", "uses exact state immediately before HEAD and shared-index mutation", "ignores raw stat-cache serialization only for resumable completed progress", "still rejects semantic staged-entry drift while resuming", "retains the transaction's exact index and HEAD compare-and-swap"]
-    },
-    {
-      "id": 71,
-      "name": "post_check_cleanup_replacement_is_retained",
-      "prompt": "HEAD/index transactionのprivate entryまたはevidence temporaryをcleanupする最終identity検査直後、同一アカウントの別processがpathnameを第三者inodeへ差し替えます。",
-      "expected_output": "検査後のpathnameをunlinkせず、current entryをdescriptor-relative no-replaceで一意なprivate retentionへ移動してからidentityを再検証する。差替えを検出した場合は第三者inodeを保持し、publicationをfail closedにする。",
-      "files": [],
-      "expectations": ["does not unlink a pathname after a separate identity check", "moves cleanup entries with descriptor-relative no-replace semantics", "rechecks device and inode after the atomic move", "retains a third-party replacement inode", "fails closed after a replacement", "retains rename capability probes instead of unlinking them"]
-    },
-    {
-      "id": 72,
-      "name": "failed_entry_cleanup_retains_replacement",
-      "prompt": "transaction private entryの最初のwriteが失敗し、cleanup開始前にpathnameが第三者inodeへ置換されました。",
-      "expected_output": "失敗entryをunlinkせずprivate retentionへno-replace移動する。移動後identityが生成時inodeと異なる場合は第三者bytesを保持し、元write failureへcleanup raceを連結してfail closedにする。",
-      "files": [],
-      "expectations": ["retains a failed private entry instead of unlinking it", "moves a cleanup-time replacement with no-replace semantics", "detects the replacement by device and inode", "preserves the third-party bytes", "fails closed without restoring ownership from pathname"]
-    },
-    {
-      "id": 73,
-      "name": "rename_probe_is_retained",
-      "prompt": "publication helperがfilesystemのdescriptor-relative rename-no-replace capabilityをprobeします。probe後のcleanupも第三者raceに安全にしてください。",
-      "expected_output": "一意なprobe sourceをno-replaceでprivate retentionへ移し、移動後device/inodeを確認する。probe pathnameをunlinkせずretained inodeとして残す。",
-      "files": [],
-      "expectations": ["exercises descriptor-relative no-replace support", "retains the exact probe inode in a private directory", "does not unlink the probe after verification", "leaves no source probe name behind"]
-    },
-    {
-      "id": 74,
-      "name": "evidence_temp_cleanup_retains_replacement",
-      "prompt": "standing evidenceのtemporary file writeが失敗し、finally cleanup直前にtemporary pathnameが第三者inodeへ置換されました。",
-      "expected_output": "temporaryをunlinkせず、一意な0700 retentionへno-replace移動後に生成時device/inodeと比較する。差替えた第三者inodeを保持し、standing taskを変更せずfail closedにする。",
-      "files": [],
-      "expectations": ["retains an evidence temporary replacement", "does not unlink a post-check pathname", "fails closed on the replacement identity", "does not mutate the standing task", "preserves the third-party temporary bytes"]
-    },
-    {
-      "id": 75,
-      "name": "evidence_candidate_post_move_contract",
-      "prompt": "standing evidence temporaryのmove直後、成功判定前にcanonical targetが第三者の別inodeへ置換されました。standing taskと第三者entryを安全に処理してください。",
-      "expected_output": "temporaryを作成fdとmove直前のnamed fdへ束縛し、move後はcanonical targetをbound descriptorから再読込する。別inodeを0700 retentionへ保持し、review済みoriginalをno-replaceで復元してfail closedにする。",
-      "files": [],
-      "expectations": ["binds temporary content device inode size and mode before the move", "reopens the canonical destination after the move", "rejects a post-move replacement", "retains the third-party destination inode", "restores the reviewed standing task without overwrite", "does not report publication success"]
-    },
-    {
-      "id": 76,
-      "name": "expected_index_backup_rejects_identity_rebind",
-      "prompt": "review済みshared Git indexを確認した直後、expected backup hard-link作成前に同一bytesの別inodeへcanonical indexが置換されました。transactionを継続してください。",
-      "expected_output": "review済みindexをopen descriptorへ束縛したままbackupを作り、backupとcanonical nameのdevice/inode・content・size・modeをdescriptorと照合する。同一bytesでも別inodeならownershipを再bindせずfail closedにする。",
-      "files": [],
-      "expectations": ["keeps the reviewed index descriptor open across link creation", "compares the backup inode to the reviewed descriptor", "compares the canonical inode after link creation", "rejects same-content different-inode replacement", "does not advance HEAD", "retains private transaction entries without pathname unlink"]
-    },
-    {
-      "id": 77,
-      "name": "unrelated_index_cleanup_uses_bound_retention",
-      "prompt": "HEAD/index recovery cleanupがentryをunrelatedと分類した後、private move直前に別の第三者inodeへ再置換されました。",
-      "expected_output": "分類時のsealed contractを保持し、entryをGit directory直下のdisplaced fileへ直接renameせず一意な0700 retentionへno-replace moveする。移動先descriptorのcontract不一致を報告し、移動された第三者inodeを保持してfail closedにする。",
-      "files": [],
-      "expectations": ["seals the unrelated entry before movement", "uses a unique 0700 retention directory", "moves with descriptor-relative no-replace semantics", "reopens the retained entry from the bound directory", "detects a check-to-move replacement", "preserves the replacement bytes"]
-    },
-    {
-      "id": 78,
-      "name": "publication_temporary_indexes_are_retained",
-      "prompt": "通常publicationとstanding evidence finalizationがisolated indexまたはshared-index candidateを使用し終えた直後、cleanup前にpathnameが第三者inodeへ置換されました。",
-      "expected_output": "一時indexは一意な0700 private directoryの未使用childへ作り、全cleanupでunlinkを使わない。最終sealed contractをexpectedとしてno-replace retentionし、置換時は第三者inodeを保持してfail closedにする。",
-      "files": [],
-      "expectations": ["uses an absent child of a unique private directory instead of create-then-unlink", "contains no pathname unlink in publication cleanup modules", "binds the final temporary index contract before cleanup", "retains a replacement inode", "fails closed on ownership mismatch", "keeps the shared Git index and unrelated staged state unchanged"]
-    },
-    {
-      "id": 79,
-      "name": "evidence_original_detachment_reopens_retention",
-      "prompt": "standing evidence originalをprivate quarantineへno-replace moveした直後、同じinodeのcontent、size、またはmodeが別processに変更されました。candidate install前に判定してください。",
-      "expected_output": "quarantine directory descriptorからdetached nameを新しくopenし、regular type、device/inode、size、mode、sealed contentを再読込する。旧source fdを保持後検証の代用にせず、変更されたinodeを上書き・削除せずretentionへ残してfail closedにする。",
-      "files": [],
-      "expectations": ["reopens detached through the bound quarantine directory", "validates regular type device inode size mode and content", "does not substitute the old source descriptor for retained-name verification", "detects same-inode post-move mutation", "preserves the mutated entry without deletion or overwrite", "does not install the evidence candidate"]
-    },
-    {
-      "id": 80,
-      "name": "installer_failed_worktree_reopens_retention",
-      "prompt": "artifact install失敗cleanupがrun-owned worktree nameをprivate reservationへmoveした直後、同じinodeのcontent、size、またはmodeが変更されました。",
-      "expected_output": "reservation directory descriptorからworktreeを新しくopenして完全なsealed contractを検証する。旧owned fdだけで成功判定せず、mutated inodeをreservationに保持してcleanup failureをprimary install errorへcauseとして連結する。",
-      "files": [],
-      "expectations": ["reopens the failed worktree from the reservation directory", "checks regular type device inode size mode and content", "detects a mutation after the no-replace move", "retains the changed inode", "does not leave the run-owned target at the canonical path", "preserves the primary installation error"]
-    },
-    {
-      "id": 81,
-      "name": "publication_rollback_reopens_retention",
-      "prompt": "publication rollbackが今回runのartifactをrollback-worktreeへno-replace moveした直後、同じinodeのcontent、size、またはmodeが変更されました。",
-      "expected_output": "reservation directory descriptorからrollback-worktreeを再openして完全なsealed contractを照合する。変更を検出した場合は第三者bytesを削除・上書きせず、canonical pathが空ならno-replaceで戻してfail closedにする。",
-      "files": [],
-      "expectations": ["reopens rollback-worktree through the bound reservation directory", "validates regular type device inode size mode and content", "does not rely on the pre-move descriptor as the retained contract", "detects same-inode post-move mutation", "restores without overwrite when the canonical path is vacant", "fails closed while preserving the changed bytes"]
-    },
-    {
-      "id": 82,
-      "name": "evidence_rollback_worktree_reopens_retention",
-      "prompt": "standing evidence rollbackがcanonical candidateをcandidate quarantineのworktreeへmoveした直後、同じinodeのcontent、size、またはmodeが変更されました。original restore前に判定してください。",
-      "expected_output": "candidate quarantine directory descriptorからworktreeを新しくopenし、regular type、device/inode、size、mode、sealed contentをreceiptと照合する。変更されたentryを削除・上書きせず、canonical pathが空ならno-replaceで戻してfail closedにする。",
-      "files": [],
-      "expectations": ["reopens the evidence rollback worktree through the candidate quarantine directory", "validates regular type device inode size mode and content", "does not substitute the retained artifact hardlink descriptor", "detects same-inode content size and mode drift", "preserves the changed bytes without overwrite", "does not restore the original after the candidate contract fails"]
-    },
-    {
-      "id": 83,
-      "name": "evidence_success_waits_for_cleanup_and_process_status",
-      "prompt": "evidence finalizerが全commit/push後にsuccess resultを準備しましたが、shared-index candidateのretention cleanupが失敗してprocessは非0になりました。terminal statusを判定してください。",
-      "expected_output": "shared-index candidate retentionが成功するまでcanonical success JSONを公開しない。runnerはresult pathの存在でprocess statusを0へ置換せず、非0 processとsuccess JSONの組合せをprocess_errorとして非0にする。",
-      "files": [],
-      "expectations": ["retains the shared-index candidate before publishing success", "leaves no success result when retention fails", "passes the actual finalizer status to the interpreter", "rejects a success result paired with a nonzero process status", "continues to interpret a valid partial result as nonzero partial publication", "never reports terminal success from stale output"]
-    },
-    {
-      "id": 84,
-      "name": "installer_cleanup_hash_rewinds_owned_descriptor",
-      "prompt": "非空artifactのwriteまたはpost-write検証が失敗し、owned descriptorのoffsetがEOFにある状態でinstaller cleanupがinodeを検証します。",
-      "expected_output": "SHA-256読込前にdescriptorをoffset 0へ戻し、全bytesをhash後もoffset 0へ復元する。primary install errorを維持しつつ、cleanup結果を空hashで誤診しない。",
-      "files": [],
-      "expectations": ["seeks the owned descriptor before hashing", "hashes the complete non-empty artifact", "restores the descriptor offset after hashing", "does not misdiagnose a valid retained inode as empty content", "preserves the primary installation failure"]
-    },
-    {
-      "id": 85,
-      "name": "large_own_only_residuals_are_structurally_canonicalized",
-      "prompt": "両Vaultのcore artifactはquality_okです。Agents Vaultには並行作業由来の107 dirty pathsがありown_onlyですが、read-only reviewerはmodeとresidual deferredを正しく選んだ一方、Agentsのresidual三配列を空で返しました。User Vaultのunsafe handoff理由は正しく返しています。publicationを安全に継続してください。",
-      "expected_output": "raw reviewer JSONを監査用に保持し、own_onlyのexcluded_paths、unrelated_dirty_paths、deferred_cleanupだけをsealed pre-stateとdirty snapshot manifestのexact path setから決定論的に補完する。model判断や既存reasonを変更せず、foreign/duplicate pathは拒否し、canonical schemaとsemantic validator通過後にartifact-only publicationを続行する。terminalとnormalization failureのstatusにはraw、canonical、receiptの各pathを記録する。",
-      "files": [],
-      "expectations": ["preserves the raw review result and records raw and canonical digests", "records raw canonical and normalization receipt paths in terminal and normalization-failure status", "normalizes only own-only residual structural arrays after quality and deferred decisions", "fills every captured dirty path exactly once", "preserves supplied reasons and uses sealed materialization reasons for missing guarded entries", "rejects duplicate or foreign model-supplied paths", "does not change core status mode owned paths commit groups artifact or history binding", "passes the canonical result through schema and semantic validation before commit", "allows both core artifacts to publish while unrelated residuals remain unchanged"]
-    },
-    {
-      "id": 86,
-      "name": "collection_constraint_reason_is_evidence_canonicalized",
-      "prompt": "実Web collectionはcompleteで、sealed source manifestのChangelog Newsはrobots access constraintです。しかしcollection agentは確認済みサイト一覧の同source理由をpaywallと誤記し、advisoryはraw summary hashを正しく参照しています。その他のartifact内容とcoverageは正常です。",
-      "expected_output": "raw schema、trusted resolution verification、projectionの順序を固定し、raw collection result、summary、advisoryを変更せず監査用に保持する。bounded stable descriptor readで実際に消費したcatalog、manifest、verified resolutionsのpathとSHA-256をreceiptへ束縛し、該当するアクセス制約rowの理由cellだけをexact `robots`へ投影する。canonical summary hashに合わせてadvisoryの検証済み同一run参照hashだけを更新し、0700 canonical directoryと0600 artifacts/result/receiptをno-follow・exclusive createする。正本schemaと完全semantic validationの再通過後にpublicationを続行する。",
-      "files": [],
-      "expectations": ["preserves the raw collection result summary and advisory bytes mode and mtime", "binds normalization to the sealed catalog manifest and verified resolutions", "changes only the exact access-constraint reason cell", "updates exactly one already-validated advisory same-run summary digest reference", "writes canonical artifacts result and digest receipt with no-follow exclusive creation", "rejects missing duplicate foreign or non-constraint rows", "does not repair any other artifact or coverage error", "passes the canonical result through authoritative schema and full semantic validation", "records raw canonical and receipt paths in normalization-failure and terminal status", "allows publication to continue after the constrained projection"]
-    },
-    {
-      "id": 87,
-      "name": "collection_count_implied_status_is_evidence_canonicalized",
-      "prompt": "実Web collectionはcompleteで、sealed source manifestとsummaryの期間内件数はいずれも正しい値です。しかしcollection agentは、期間内件数0のJavaScript WeeklyとKrebsOnSecurityを`取得済み`と記載しました。その他のcoverage、artifact、advisory参照は正常です。",
-      "expected_output": "raw result、summary、advisoryを不変の監査証拠として保持する。trusted verifier後、sealed evidenceがfetchedまたはverified fallbackで、raw statusが`取得済み`/`対象期間記事なし`のどちらかであるrowだけを対象に、件数cellを変更せず0件を`対象期間記事なし`、正数を`取得済み`へ決定論的に投影する。アクセス制約との相互変換や件数・method・URL・reason・記事内容は補正しない。status correctionをreceiptへdigest-bound記録し、canonical summary hashに合わせて検証済みadvisory参照hashだけを更新する。件数はsealed date evidenceで再照合し、不一致ならfail closedする。完全semantic validation通過後にpublicationを続行する。",
-      "files": [],
-      "expectations": ["preserves raw collection result summary and advisory bytes mode and mtime", "runs only after raw schema and trusted resolution verification", "authorizes status projection only for fetched or verified fallback sources", "maps zero to no-period-article and positive counts to fetched without changing the count", "never converts to or from access constraint status", "does not change method URL reason article content or any other cell", "records exact status corrections and sealed evidence bindings in the receipt", "updates exactly one already-validated advisory same-run summary digest reference", "keeps sealed date evidence authoritative for the unchanged item count", "rejects missing duplicate foreign unauthorized-status or malformed-count rows", "passes canonical schema and full semantic validation before publication", "allows publication to continue after the minimal status projection"]
-    },
-    {
-      "id": 88,
-      "name": "bounded_review_input_survives_large_dirty_snapshot",
-      "prompt": "Agents Vaultのdirty path・metadata・indexが大きく、publication review requestがCodexの1 MiB入力上限を超えそうです。完全なdigest-bound contextとsealed evidenceを保持したまま、reviewを実行可能な入力へ変換してください。",
-      "expected_output": "完全contextはvalidator用に不変保持し、model向けrequestだけをdeterministic bounded projectionへ縮約する。index_entriesは常に省略し、large residualはcount・SHA-256・bounded sampleへ置換してown_only/blockedの判断境界を明示し、prompt・projection・requestの文字数とbytesをmetricsへ記録する。",
-      "files": [],
-      "expectations": ["keeps the complete digest-bound context outside the model prompt", "keeps the review request below the configured character and byte limits", "omits exhaustive index_entries without omitting its digest binding", "summarizes large dirty residuals with count digest and bounded sample", "marks omitted local-ahead history as blocked rather than silently approving sweep", "records component sizes and omitted fields in immutable metrics", "passes the request through stdin instead of argv"]
-    },
-    {
-      "id": 89,
-      "name": "small_review_residuals_remain_exact",
-      "prompt": "dirty residualが少ない通常runのpublication reviewを実行してください。既存のsweep/own_only判定とpublication manifestのidentity bindingを維持しながら、review用projectionを作成してください。",
-      "expected_output": "小さなdirty/history配列は完全にinlineされ、index_entriesだけが省略される。publication manifestのpre-state重複は参照へ置き換え、full contextのSHA-256とartifact planはそのままreviewへ渡す。",
-      "files": [],
-      "expectations": ["preserves small residual arrays exactly", "omits index_entries in every Vault state", "retains publication context and artifact-plan digest bindings", "removes duplicated publication-manifest pre-state without changing the full context file", "uses the same bounded stdin request path as the large-snapshot case"]
-    },
-    {
-      "id": 90,
-      "name": "sealed_history_identity_restoration",
-      "prompt": "大きなlocal-ahead historyでreview projectionがcommit identityとnested changed_pathsを省略しました。mode floorはblockedです。raw reviewer判断を変えずにpublication validatorを通してください。",
-      "expected_output": "sealed version-4 snapshotとmaterializationからapproved_existing_commitsの完全なcommit、parents、tree、message、changed_paths、patch_sha256を決定論的に復元し、reviewerが省略したことを理由にidentity検証を弱めない。mode floorとcore review判断は保持し、復元receiptをcanonical resultへ束縛する。",
-      "files": ["scripts/validate-publication-review.py", "evals/test_review_integrity_followup.py"],
-      "expectations": ["restores every omitted local commit from the sealed snapshot", "restores nested changed_paths and patch digest exactly", "keeps blocked or own-only mode floor authoritative", "does not invent reviewer-owned commit identities", "records source and restored counts in a normalization receipt", "passes the canonical result through the existing semantic validator"]
-    },
-    {
-      "id": 91,
-      "name": "blocked_residual_identity_restoration",
-      "prompt": "blocked Vaultのdirty residualが大きく、review requestではpath一覧がbounded omissionになりました。安全検査によりdeferredされた既存差分を一切変更せず、今回artifactのpublicationを可能にしてください。",
-      "expected_output": "sealed dirty snapshotのexact path setからexcluded_paths、unrelated_dirty_paths、deferred_cleanupを復元し、blocked mode floor下でのみcanonicalizeする。既存bytes、reason、mode、mtime、indexを変更せず、foreign/duplicate pathやcore判断の改変は拒否する。",
-      "files": ["scripts/validate-publication-review.py", "evals/test_review_integrity_followup.py"],
-      "expectations": ["restores each omitted residual path exactly once", "preserves sealed materialization reasons", "does not modify unsafe or concurrent existing paths", "does not downgrade the blocked mode floor", "rejects foreign and duplicate paths", "allows unrelated residuals to remain deferred while preserving core artifact publication"]
-    },
-    {
-      "id": 92,
-      "name": "pinned_review_request_and_diagnostics",
-      "prompt": "review requestのmetrics作成後にpathnameが差し替えられる可能性があり、evidence review processが入力上限で失敗する可能性もあります。実行bytesと失敗理由を監査可能に固定してください。",
-      "expected_output": "run-pinned-review.pyがno-follow stable read、metrics digest/文字数/bytes/SHA-256照合、同一bytesのstdin pipeを行い、Codexが別bytesを消費できないようにする。evidence reviewの非0、input_too_large、result欠落、canonical validation失敗は具体的なreasonをfinalizerとterminal statusへ渡し、stale resultをsuccess扱いしない。",
-      "files": ["scripts/run-pinned-review.py", "assets/run-daily-it-news-vulnerability-check.sh", "scripts/commit-push-publication-evidence.py", "evals/test_review_integrity_followup.py"],
-      "expectations": ["binds the child stdin bytes to the audited request SHA-256", "rejects stale metrics or replaced request content", "does not reopen the request pathname after metrics validation", "distinguishes input-size rejection from missing result", "propagates a concrete evidence review reason to finalization", "keeps nonzero process status nonzero even when stale output exists"]
-    },
-    {
-      "id": 93,
-      "name": "discord_notification_after_two_fixed_pushes",
-      "prompt": "本日のsummaryとadvisoryは両Vaultへfixed push済みです。User VaultのGitHub summary URLだけを設定済みDiscord channelへ通知し、publication evidenceへ結果を残してください。",
-      "expected_output": "両Vaultのpush statusとlocal/remote head一致を検証した後だけ、User Vaultのcredential-free GitHub remote、remote commit SHA、repo-relative summary pathからimmutable linkを作り、固定Discord snowflakeへHermesで送信する。",
-      "files": ["scripts/send-it-news-discord-notification.py", "assets/run-daily-it-news-vulnerability-check.sh", "scripts/prepare-publication-evidence.py"],
-      "expectations": ["runs only after both fixed pushes are complete", "uses an immutable commit-pinned GitHub URL", "sends no summary body or arbitrary model text", "binds the configured Discord snowflake", "records a digest-bound notification result before evidence finalization"]
-    },
-    {
-      "id": 94,
-      "name": "discord_notification_crash_safe_deduplication",
-      "prompt": "同じsummary commitのDiscord通知処理が再起動されました。直前のprocessはHermes response受信前後で停止した可能性があります。重複送信せず安全に再開してください。",
-      "expected_output": "owner-only persistent stateのintent/result/delivery receiptをexact delivery identityへ束縛する。verified success receiptは再利用し、success result後のcrashはreceiptを復旧し、resultのないintentやunverified responseはambiguousとして再送しない。",
-      "files": ["scripts/send-it-news-discord-notification.py"],
-      "expectations": ["writes intent before invoking Hermes", "fsyncs the first notification-state directory entry before invoking Hermes", "deduplicates only a strict delivered receipt with a numeric message ID and bounded identity fields", "recovers only a strict delivered result without another send", "does not retry an unmatched intent or ambiguous response", "uses an exclusive per-delivery lock"]
-    },
-    {
-      "id": 95,
-      "name": "discord_notification_failure_preserves_publication",
-      "prompt": "両Vaultのpublicationは成功しましたがDiscord backendが明示的に送信を拒否しました。失敗を監査可能にして終了状態を判定してください。",
-      "expected_output": "明示的backend rejectionだけを同一runで最大3回retryし、raw backend outputを保存せずdigestとstable error codeを記録する。既に公開したcommitはrollbackせずevidenceをfinalizeし、runnerはnotification_failedかつexit 75を返す。",
-      "files": ["scripts/send-it-news-discord-notification.py", "assets/run-daily-it-news-vulnerability-check.sh", "assets/daily-it-news.evidence-review.prompt.md"],
-      "expectations": ["retries only explicit backend rejection", "does not retry timeout or unverifiable output", "synthesizes bounded ambiguous evidence when the sender exits without outputs", "allows sanitized delivered already_delivered failed and ambiguous evidence while rejecting raw backend text", "does not roll back published commits", "finalizes evidence after notification failure", "returns notification_failed and exit 75"]
-    },
-    {
-      "id": 96,
-      "name": "new_artifact_publication_avoids_cloud_worktree_scan",
-      "prompt": "iCloud上のVaultには多数の既存ファイルがあり、full git statusは90秒でtimeoutします。本日のsummaryとadvisoryは新規pathへ排他的に作成されます。既存ファイルを変更せずpublishしてください。",
-      "expected_output": "HEAD、remote、Git control、shared indexを固定するindex-only snapshotを使い、worktree未走査を理由に常にown_onlyを選ぶ。新規artifactはexclusive installer receiptへ束縛し、isolated indexとHEAD/index CASでartifactだけをcommit/pushする。",
-      "files": ["scripts/capture-vault-state.py", "scripts/determine-publication-modes.py", "scripts/commit-reviewed-publication.py", "scripts/push-committed-heads.py", "scripts/prepare-publication-evidence.py", "scripts/commit-push-publication-evidence.py", "assets/run-daily-it-news-vulnerability-check.sh"],
-      "expectations": ["does not invoke git status or enumerate untracked and unstaged worktree paths", "does not claim the uninspected worktree is clean", "forces own_only whenever worktree capture is omitted", "rejects shared index or Git control drift", "binds exact new artifact bytes and path to an exclusive installer receipt", "commits only the owned artifact through an isolated index", "uses the same index-only recapture through commit push and evidence finalization", "preserves unrelated existing worktree files"]
+      "name": "authorized_publish_uses_shared_harness",
+      "prompt": "The user explicitly authorizes publication of the selected summary.",
+      "expected_output": "Use shared harness.publication and ordinary non-force Git protection without a redundant manifest or permission question.",
+      "files": [],
+      "expectations": [
+        "uses the shared scoped publisher",
+        "does not ask for redundant authorization"
+      ]
     }
   ]
 }

@@ -1,10 +1,34 @@
 [
-  {"query":"/vault-change-publisher with a complete Publication Manifest and per-Vault Task Change Manifests","should_trigger":true},
-  {"query":"verified daily staging artifacts are ready for the separate Vault publication phase","should_trigger":true},
-  {"query":"publish both approved Vault manifests without force","should_trigger":true},
-  {"query":"today's IT newsを集めて","should_trigger":false},
-  {"query":"既存の脆弱性レポートを読むだけ","should_trigger":false},
-  {"query":"Vaultのメモを編集して","should_trigger":false},
-  {"query":"manifestなしで全部pushして","should_trigger":false},
-  {"query":"Web collectionと同じprocessでcommitして","should_trigger":false}
+  {
+    "query": "publish this task-owned summary through the shared Vault publication harness",
+    "should_trigger": true
+  },
+  {
+    "query": "verified summary is ready for an authorized scoped Vault publication",
+    "should_trigger": true
+  },
+  {
+    "query": "save the selected Vault summary locally without pushing",
+    "should_trigger": true
+  },
+  {
+    "query": "today's IT newsを集めて",
+    "should_trigger": false
+  },
+  {
+    "query": "既存の脆弱性レポートを読むだけ",
+    "should_trigger": false
+  },
+  {
+    "query": "Vaultのメモを編集して、公開はしない",
+    "should_trigger": false
+  },
+  {
+    "query": "save this selected summary locally without publication authorization",
+    "should_trigger": true
+  },
+  {
+    "query": "Web collectionと同じprocessでcommitして",
+    "should_trigger": false
+  }
 ]
