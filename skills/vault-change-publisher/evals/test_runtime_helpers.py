@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -12105,6 +12106,90 @@ def load_environment(*, checkout_root, environ, require_catalog):
                 False,
                 "own_only",
             )
+
+    def test_daily_runner_lock_does_not_require_bsd_shlock(self) -> None:
+        """The Bash runner must also acquire its lock on Linux images."""
+        runner = SKILL_ROOT / "assets" / "run-daily-it-news-vulnerability-check.sh"
+        source = runner.read_text(encoding="utf-8")
+        self.assertIn("acquire_publication_lock()", source)
+        self.assertIn("fcntl.flock", source)
+        self.assertIn('exec 9<>"$PUBLICATION_LOCK"', source)
+        self.assertNotIn("/usr/bin/shlock", source)
+
+    def test_publication_lock_rejects_competitor_and_recovers_after_owner_death(self) -> None:
+        """flock prevents overlap and is released when the owner process dies."""
+        runner = SKILL_ROOT / "assets" / "run-daily-it-news-vulnerability-check.sh"
+        source = runner.read_text(encoding="utf-8")
+        start = source.index("release_publication_lock() {")
+        end = source.index("\nfail_run() {", start)
+        probe = self.root / "publication-lock-probe.sh"
+        probe.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -u\n"
+            'PUBLICATION_LOCK="$1"\n'
+            "PUBLICATION_LOCK_OWNED=0\n"
+            "PUBLICATION_LOCK_FD_ACTIVE=0\n"
+            f"{source[start:end]}\n"
+            "if ! acquire_publication_lock; then exit 75; fi\n"
+            "PUBLICATION_LOCK_OWNED=1\n"
+            "trap 'release_publication_lock' EXIT\n"
+            "printf 'ready\\n'\n"
+            'if [[ "${2:-once}" == hold ]]; then sleep 30; fi\n',
+            encoding="utf-8",
+        )
+        probe.chmod(0o700)
+        lock = self.root / "publication.lock"
+
+        owner = subprocess.Popen(
+            [str(probe), str(lock), "hold"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            self.assertEqual(owner.stdout.readline().strip(), "ready")
+            competitor = subprocess.run(
+                [str(probe), str(lock), "once"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(competitor.returncode, 75, competitor.stderr)
+            os.killpg(owner.pid, signal.SIGKILL)
+            owner.wait(timeout=5)
+            recovered = subprocess.run(
+                [str(probe), str(lock), "once"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(recovered.returncode, 0, recovered.stderr)
+
+            lock.write_text(str(os.getpid()), encoding="ascii")
+            legacy_live = subprocess.run(
+                [str(probe), str(lock), "once"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(legacy_live.returncode, 75)
+            lock.write_text("unknown-owner", encoding="ascii")
+            unknown = subprocess.run(
+                [str(probe), str(lock), "once"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(unknown.returncode, 75)
+        finally:
+            if owner.poll() is None:
+                os.killpg(owner.pid, signal.SIGKILL)
+                owner.wait(timeout=5)
+            if owner.stdout is not None:
+                owner.stdout.close()
+            if owner.stderr is not None:
+                owner.stderr.close()
 
     def test_dedicated_runner_completes_separated_publication(self) -> None:
         """Complete collection, two reviews, local commits, and fixed pushes."""
