@@ -1,4 +1,5 @@
 """Local bare-Git acceptance fixtures for scoped publication."""
+import errno
 import json
 from pathlib import Path
 import subprocess
@@ -13,6 +14,28 @@ from harness.publication import (
     publish_scoped,
 )
 import harness.publication as publication
+
+
+def test_receipt_read_error_preserves_os_cause_and_errno(tmp_path):
+    receipt = tmp_path / "publication.json"
+    with mock.patch.object(publication.os, "open", side_effect=OSError(errno.EACCES, "Permission denied")):
+        with pytest.raises(PublicationError, match=r"EACCES") as raised:
+            publication._read_json(receipt)
+    assert raised.value.__cause__.errno == errno.EACCES
+    assert "Permission denied" in str(raised.value)
+
+
+def test_receipt_read_error_distinguishes_malformed_json(tmp_path):
+    receipt = tmp_path / "publication.json"
+    receipt.write_text("{not-json")
+    with pytest.raises(PublicationError, match="malformed JSON") as raised:
+        publication._read_json(receipt)
+    assert raised.value.__cause__.__class__.__name__ == "JSONDecodeError"
+
+
+def test_missing_receipt_reports_enoent_for_restart_diagnosis(tmp_path):
+    with pytest.raises(PublicationError, match=r"ENOENT"):
+        publication._read_json(tmp_path / "missing-publication.json")
 
 
 def git(cwd, *args):

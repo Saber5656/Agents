@@ -8,6 +8,7 @@ receipt is the recovery record when a process stops between Git operations.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
@@ -23,6 +24,15 @@ from typing import Any
 
 class PublicationError(ValueError):
     """An input, precondition, or recoverable publication error."""
+
+
+class ReceiptReadError(PublicationError):
+    """A receipt could not be read; retain the OS/format cause for recovery."""
+
+    def __init__(self, message: str, *, category: str, errno_name: str | None = None):
+        super().__init__(message)
+        self.category = category
+        self.errno_name = errno_name
 
 
 _OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -436,8 +446,15 @@ def _read_json(path: Path) -> dict[str, Any]:
         finally:
             if fd is not None:
                 os.close(fd)
-    except (OSError, ValueError, TypeError) as exc:
-        raise PublicationError("Vault receipt is unreadable") from exc
+    except OSError as exc:
+        error_name = errno.errorcode.get(exc.errno, "UNKNOWN")
+        detail = exc.strerror or str(exc)
+        raise ReceiptReadError(
+            f"Vault receipt is unreadable ({error_name}: {detail})",
+            category="os", errno_name=error_name,
+        ) from exc
+    except (ValueError, TypeError) as exc:
+        raise ReceiptReadError("Vault receipt is malformed JSON", category="format") from exc
     if not isinstance(value, dict):
         raise PublicationError("Vault receipt has an invalid shape")
     return value

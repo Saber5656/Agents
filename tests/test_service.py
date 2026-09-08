@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 from harness.tasks import TaskStore
+from harness.publication import PublicationError
 from harness.service import (AuthError, ServiceStore, WorkspaceLock,
                              Scheduler, Launchd, default_verifier, load_agents_env)
 
@@ -87,6 +88,26 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
         self.assertEqual(len(self.service.list_attempts(job["id"])), 1)
         self.assertEqual(self.service.run_once(executor=executor)["status"], "idle")
+
+    def test_verify_completion_clears_current_error_and_verifier_owner_only(self):
+        task = self.tasks.create_task(purpose="clear completion state", repository="org/repo",
+                                      acceptance_evidence=["check:complete"])
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        self.service.run_once(executor=lambda _: {"status": "completed", "text": "worker complete"})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        with self.service.tx() as conn:
+            conn.execute("UPDATE service_jobs SET last_error=? WHERE id=?", ("old receipt failure", job["id"]))
+            conn.execute("UPDATE service_attempts SET error=? WHERE job_id=?", ("historical worker error", job["id"]))
+        evidence = {"acceptance": True, "findings": [],
+                    "criteria": [{"criterion": "check:complete", "verified": True,
+                                  "evidence": "vault://check-complete"}]}
+        with mock.patch("harness.service.observe_publication", return_value={"commit": "a" * 40}):
+            result = self.service.verify(job["id"], evidence)
+        self.assertEqual(result["state"], "completed")
+        self.assertIsNone(result["last_error"])
+        self.assertIsNone(result["verification_pid"])
+        self.assertIsNone(result["verification_identity"])
+        self.assertEqual(self.service.get_job(job["id"])["attempts"][0]["error"], "historical worker error")
 
     def test_failure_persists_retry_backoff_without_whole_task_max(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)
@@ -709,6 +730,28 @@ class ServiceTests(unittest.TestCase):
             result = self.service.verify_with_agent(job["id"], lambda _: review)
         self.assertEqual(result["status"], "verified")
         publish.assert_called_once()
+
+    def test_restart_receipt_os_diagnostic_is_preserved_without_verifier_turn(self):
+        task = self.tasks.create_task(purpose="receipt restart", repository="Saber5656/Agents")
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        proposal = {"repository": "Saber5656/Agents", "canonical_repo": str(self.root),
+                    "task_worktree": str(self.workspace), "files": ["README.md"],
+                    "immutable_base": "a" * 40, "commit_message": "Publish change",
+                    "remote": "https://github.com/Saber5656/Agents.git",
+                    "vault_receipt": str(self.vault / "publication.json")}
+        self.service.run_once(executor=lambda _: {"status": "completed", "publication_proposal": proposal})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        detail = self.service.get_job(job["id"])
+        receipt = Path(detail["run_dir"]) / "publication.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text("{}")
+        verifier = mock.Mock(side_effect=AssertionError("receipt failure must not spend verifier turn"))
+        with mock.patch("harness.publication._read_json",
+                        side_effect=PublicationError("Vault receipt is unreadable (EACCES: Permission denied)")):
+            result = self.service.verify_with_agent(job["id"], verifier)
+        self.assertEqual(result["status"], "needs_verification")
+        self.assertIn("EACCES", result["verification_error"])
+        verifier.assert_not_called()
 
     def test_host_rejects_worker_self_reported_publication_digest(self):
         task = self.tasks.create_task(purpose="host publication CAS", repository="Saber5656/Agents")
