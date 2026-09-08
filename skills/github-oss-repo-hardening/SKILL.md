@@ -318,6 +318,62 @@ required checks are stable and workflows report on `merge_group`. Add it as a
 second hardening pass after CI has passed at least once and queue behavior has
 been verified.
 
+### Merge Queue Eligibility and Workflow Evidence
+
+Do not infer merge-queue availability from a successful `gh auth status`, an
+Administration permission, or readable rulesets. GitHub currently documents
+merge queues for public repositories owned by an organization and for private
+organization repositories on GitHub Enterprise Cloud. Personal-account
+repositories, internal repositories, private repositories without confirmed
+Enterprise Cloud entitlement, and missing plan evidence are respectively
+unsupported or unknown; unknown evidence must stop activation.
+
+Use `scripts/merge_queue_eligibility.py` with a read-only JSON fixture or
+adapter result to keep product eligibility separate from workflow readiness:
+
+```bash
+python3 scripts/merge_queue_eligibility.py --input /PRIVATE/DIR/merge-queue-observation.json
+```
+
+The repository observation uses `owner_type`, `visibility`, and, for private
+repositories, an explicit boolean `enterprise_cloud`. The workflow observation
+uses exact required check identities and each check's observed `on` events.
+Every required check must report on `merge_group`; a `pull_request` success
+does not prove queue readiness. The command emits JSON and never changes GitHub
+settings. Activation remains a separate, explicitly reviewed mutation after
+the eligibility and workflow results are both ready.
+
+The product rule is documented in GitHub's [merge queue guide](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue),
+and the ruleset relationship is covered by GitHub's [rulesets documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets).
+
+### Preserving Existing Rulesets
+
+For an existing ruleset, `scripts/apply-default-branch-ruleset.py` first reads
+the repository-owned object and creates the reviewed update from that
+preimage. `merge_existing_ruleset` preserves existing enforcement, bypass
+actors, conditions, unknown rule types, unknown rule parameters, and existing
+status-check identities; it adds requested managed checks without discarding
+their integration metadata. Server-owned `source`, `source_type`, and
+`inherited` metadata is used for drift detection and is never sent in the
+repository write body.
+
+The reviewed context stores a hash of the complete observed preimage (apart
+from server timestamps). A change to an unrelated rule or setting causes the
+apply to stop before any mutation. This is a scoped patch, not an atomic
+multi-repository transaction: callers coordinating multiple repositories must
+record each result independently and stop the remaining batch after a failure.
+There is no automatic retry after a transport failure or an incomplete
+mutation response. The helper performs a fresh read-back and reports
+`applied` only when the persisted ruleset matches the reviewed payload;
+otherwise it reports `ambiguous_mutation` and requires a new observation before
+any retry. A saved preimage can be used to prepare a separate rollback review,
+which is also rejected if the target has drifted since that review.
+
+The ruleset API's current write/read fields and inherited behavior should be
+checked against GitHub's [REST ruleset endpoints](https://docs.github.com/en/rest/repos/rules),
+rather than treating a successful HTTP response as proof that all intended
+fields persisted.
+
 ## Output Format
 
 通常はこの形で返す。

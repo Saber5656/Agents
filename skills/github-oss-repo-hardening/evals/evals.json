@@ -115,6 +115,46 @@
         "secret absent from stdout/stderr",
         "exactly one API attempt"
       ]
+    },
+    {
+      "id": 18,
+      "prompt": "Merge Queue を有効にしたい。個人 public repo で gh auth status は成功している。",
+      "expected_output": "認証成功や管理権限から機能適格性を推測せず、個人所有 public repo は対象外と説明し、設定変更を行わず organization-owned public/private Enterprise Cloud の判定に分ける。",
+      "files": [
+        "scripts/merge_queue_eligibility.py"
+      ],
+      "assertions": [
+        "personal owner is unsupported",
+        "can_propose_activation is false",
+        "no mutation is performed"
+      ]
+    },
+    {
+      "id": 19,
+      "prompt": "required check は pull_request で成功している。Merge Queue を有効化してよい？",
+      "expected_output": "required check の exact identity と merge_group trigger を別々に確認し、pull_request の成功だけでは不十分と説明する。missing evidence は unknown/incomplete として activation proposal を出さない。",
+      "files": [
+        "scripts/merge_queue_eligibility.py"
+      ],
+      "assertions": [
+        "merge_group is required",
+        "workflow readiness is separate from product eligibility",
+        "unknown evidence fails closed"
+      ]
+    },
+    {
+      "id": 20,
+      "prompt": "既存 ruleset に required check を追加したい。既存 bypass、条件、未知の rule、drift を失わず、応答が失われても二重作成したくない。",
+      "expected_output": "read preimage から preserving patch を作り、レビュー済み preimage の drift で mutation 前に停止する。未知の rule/check metadata を保持し、失われた mutation response は read-back で applied/ambiguous に分け、retry しない。",
+      "files": [
+        "scripts/apply-default-branch-ruleset.py",
+        "tests/test_ruleset_preserving_patch.py"
+      ],
+      "assertions": [
+        "unrelated rules and bypass actors preserved",
+        "drift causes zero mutation",
+        "ambiguous response never retries"
+      ]
     }
   ]
 }
