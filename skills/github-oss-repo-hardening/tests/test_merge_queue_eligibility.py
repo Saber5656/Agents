@@ -19,7 +19,7 @@ spec.loader.exec_module(module)
         ({"owner_type": "Organization", "visibility": "private", "enterprise_cloud": True}, "supported"),
         ({"owner_type": "Organization", "visibility": "private", "enterprise_cloud": False}, "unsupported"),
         ({"owner_type": "Organization", "visibility": "private"}, "unknown"),
-        ({"owner_type": "Organization", "visibility": "internal", "enterprise_cloud": True}, "unsupported"),
+        ({"owner_type": "Organization", "visibility": "internal", "enterprise_cloud": True}, "unknown"),
         ({"owner_type": "Organization", "visibility": "unknown", "enterprise_cloud": True}, "unknown"),
     ],
 )

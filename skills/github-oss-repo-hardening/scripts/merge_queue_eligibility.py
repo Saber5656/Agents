@@ -52,7 +52,7 @@ def evaluate_eligibility(repository: Mapping[str, Any]) -> dict[str, Any]:
     if visibility == "public":
         return _result(SUPPORTED, "public organization-owned repository is eligible", can_propose_activation=True)
     if visibility == "internal":
-        return _result(UNSUPPORTED, "internal repositories are not eligible for merge queues")
+        return _result(UNKNOWN, "internal-repository eligibility is not established by the documented public/private matrix")
     if enterprise_cloud is True:
         return _result(
             SUPPORTED,

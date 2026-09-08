@@ -324,9 +324,14 @@ Do not infer merge-queue availability from a successful `gh auth status`, an
 Administration permission, or readable rulesets. GitHub currently documents
 merge queues for public repositories owned by an organization and for private
 organization repositories on GitHub Enterprise Cloud. Personal-account
-repositories, internal repositories, private repositories without confirmed
+repositories, private repositories without confirmed
 Enterprise Cloud entitlement, and missing plan evidence are respectively
 unsupported or unknown; unknown evidence must stop activation.
+
+Internal repository eligibility is `unknown` in this adapter: the cited GitHub
+documentation specifies public/private eligibility without establishing an internal
+case. Keep activation disabled until direct product evidence resolves it; do not
+turn missing evidence into a claim of unsupported product behavior.
 
 Use `scripts/merge_queue_eligibility.py` with a read-only JSON fixture or
 adapter result to keep product eligibility separate from workflow readiness:
