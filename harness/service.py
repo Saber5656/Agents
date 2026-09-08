@@ -651,7 +651,7 @@ class ServiceStore:
                 diagnostic = f"held inference route remains blocked: {type(exc).__name__}: {exc}"
                 self.record_update(job_id, diagnostic, ["local://cost-security/recheck-auth-failed"])
                 return {"status": "held", "safe": False, "reason": diagnostic}
-        return {"status": "ready", "safe": True,
+        return {"status": "ready", "safe": True, "hold_reason": job.get("last_error"),
                 "reason": result.get("reason", "explicit safety recheck passed"),
                 "evidence": list(result.get("evidence", [])) if isinstance(result.get("evidence", []), list) else []}
 
@@ -670,21 +670,31 @@ class ServiceStore:
             diagnostic = "held recheck passed but dependencies are not ready"
             self.record_update(job_id, diagnostic, ["local://cost-security/recheck-dependencies"])
             return {"status": "held", "safe": False, "reason": diagnostic}
-        self.record_update(job_id, "Held job explicitly cleared for resume after safety recheck: " + str(result.get("reason", "passed")),
+        self.record_update(job_id, "Held job recheck passed; attempting bound resume: " + str(result.get("reason", "passed")),
                            result.get("evidence", []) or ["local://cost-security/recheck-passed"])
         try:
-            current = self.tasks.get_task(job["task_id"])
-            self.tasks.update_task(job["task_id"], expected_version=current["version"], execution_status="planned")
+            # Serialize competing resumers/claimers while both databases are
+            # updated. A crash after the task CAS leaves the job held, so no
+            # worker starts until another explicit recheck completes.
+            with self.tx() as conn:
+                current_job = conn.execute(
+                    "SELECT state,last_error FROM service_jobs WHERE id=?", (job_id,)).fetchone()
+                if (current_job is None or current_job["state"] != "held"
+                        or current_job["last_error"] != result["hold_reason"]):
+                    return {"status": current_job["state"] if current_job else "missing",
+                            "safe": False, "reason": "held job changed during recheck"}
+                current = self.tasks.get_task(job["task_id"])
+                if current is None or current["execution_status"] not in ("held", "planned"):
+                    return {"status": "held", "safe": False,
+                            "reason": "task state changed during recheck"}
+                self.tasks.update_task(job["task_id"], expected_version=current["version"], execution_status="planned")
+                conn.execute(
+                    "UPDATE service_jobs SET state='retry',next_attempt_at=NULL,last_error=NULL,updated_at=? WHERE id=?",
+                    (now(), job_id))
         except Exception as exc:
             diagnostic = f"held resume task update failed: {type(exc).__name__}: {exc}"
             self.record_update(job_id, diagnostic, ["local://cost-security/recheck-task-update-failed"])
             return {"status": "held", "safe": False, "reason": diagnostic}
-        with self.tx() as conn:
-            changed = conn.execute(
-                "UPDATE service_jobs SET state='retry',next_attempt_at=NULL,last_error=NULL,updated_at=? WHERE id=? AND state='held'",
-                (now(), job_id)).rowcount
-        if not changed:
-            return {"status": "held", "safe": False, "reason": "held job changed during resume"}
         return {"status": "retry", "safe": True, "job_id": job_id}
 
     def _dependencies_ready(self, task):

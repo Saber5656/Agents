@@ -211,6 +211,36 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "retry")
         self.assertEqual(states, ["held"])
 
+    def test_held_resume_does_not_rewind_a_concurrently_started_task(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        blocked = AuthError("cost hold", hold=True, action="purchase", source="fixture")
+        with mock.patch.object(self.service, "auth_guard", side_effect=blocked):
+            self.service.run_once()
+        def checker(snapshot):
+            # Another coordinator resumed and claimed the job during this check.
+            with self.service.tx() as conn:
+                conn.execute("UPDATE service_jobs SET state='running' WHERE id=?", (job["id"],))
+            task = self.tasks.get_task(self.task["id"])
+            self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="running")
+            return {"job_id": job["id"], "hold_reason": snapshot["last_error"], "safe": True}
+        result = self.service.resume_held(job["id"], checker)
+        self.assertFalse(result["safe"])
+        self.assertEqual(self.tasks.get_task(self.task["id"])["execution_status"], "running")
+
+    def test_held_resume_rejects_a_changed_hold_reason(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        blocked = AuthError("initial hold", hold=True, action="purchase", source="fixture")
+        with mock.patch.object(self.service, "auth_guard", side_effect=blocked):
+            self.service.run_once()
+        def checker(snapshot):
+            with self.service.tx() as conn:
+                conn.execute("UPDATE service_jobs SET last_error='new unresolved hold' WHERE id=?", (job["id"],))
+            return {"job_id": job["id"], "hold_reason": snapshot["last_error"], "safe": True}
+        result = self.service.resume_held(job["id"], checker)
+        self.assertFalse(result["safe"])
+        self.assertEqual(self.service.get_job(job["id"])["state"], "held")
+        self.assertEqual(self.tasks.get_task(self.task["id"])["execution_status"], "held")
+
     def test_worker_timeout_is_recorded_and_rescheduled_without_model_promotion(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)
         seen = []
