@@ -16,7 +16,9 @@ python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/herme
 python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/hermes_bridge.py" \
   send \
   --target "discord:#secretary" \
-  --message "確認待ち: 明日15:00の予定を作成してよいですか？"
+  --message "確認待ち: 明日15:00の予定を作成してよいですか？" \
+  --timeout 30 \
+  --receipt-dir "$AGENTS_VAULT_ROOT/hermes-receipts"
 ```
 
 ## What It Does
@@ -27,6 +29,9 @@ python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/herme
 - Discord返信でCodexを再開するにはMCP/event polling/runtimeが必要だと明示する
 - Secretary-AIとの責務境界を守る
 - `oneshot --timeout SECONDS` で呼び出しをboundedにし、timeout・実行ファイル欠落を構造化結果で返す
+- `oneshot`、`send`、`list-targets` は既定30秒で終了し、`--timeout`で調整できる
+- `--receipt-dir DIR` を指定すると、request/state/result/stdout/stderrをprivate receiptへ保存する
+- 明示routeはChatGPT OAuthの`openai-codex`だけを許可し、APIキー環境変数・fallback・他providerは実行前に拒否する
 
 ## Triggers
 
