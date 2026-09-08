@@ -44,6 +44,12 @@ local follow-up while the original verification continues. Call `verify` with
 completion evidence only after all task acceptance records have been explicitly
 verified.
 
+A concrete cost or security boundary moves a job to `held`, which is excluded
+from ready work. An operator must call `resume_held(job_id, checker)` with an
+explicit read-only checker returning `{"safe": true}` after the held operation
+has been addressed. A failed or unavailable checker keeps the job held; the
+original attempt and all recheck diagnostics remain in the service history.
+
 ```sh
 python3 -m harness.service run-once --json
 python3 -m harness.service verify JOB_ID --evidence /path/to/acceptance-review.json
