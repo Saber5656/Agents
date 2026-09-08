@@ -89,6 +89,26 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(self.service.list_attempts(job["id"])), 1)
         self.assertEqual(self.service.run_once(executor=executor)["status"], "idle")
 
+    def test_verify_completion_clears_current_error_and_verifier_owner_only(self):
+        task = self.tasks.create_task(purpose="clear completion state", repository="org/repo",
+                                      acceptance_evidence=["check:complete"])
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        self.service.run_once(executor=lambda _: {"status": "completed", "text": "worker complete"})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        with self.service.tx() as conn:
+            conn.execute("UPDATE service_jobs SET last_error=? WHERE id=?", ("old receipt failure", job["id"]))
+            conn.execute("UPDATE service_attempts SET error=? WHERE job_id=?", ("historical worker error", job["id"]))
+        evidence = {"acceptance": True, "findings": [],
+                    "criteria": [{"criterion": "check:complete", "verified": True,
+                                  "evidence": "vault://check-complete"}]}
+        with mock.patch("harness.service.observe_publication", return_value={"commit": "a" * 40}):
+            result = self.service.verify(job["id"], evidence)
+        self.assertEqual(result["state"], "completed")
+        self.assertIsNone(result["last_error"])
+        self.assertIsNone(result["verification_pid"])
+        self.assertIsNone(result["verification_identity"])
+        self.assertEqual(self.service.get_job(job["id"])["attempts"][0]["error"], "historical worker error")
+
     def test_failure_persists_retry_backoff_without_whole_task_max(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)
         result = self.service.run_once(executor=lambda _: {"status": "failed", "text": "temporary"})

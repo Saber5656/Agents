@@ -826,7 +826,14 @@ class ServiceStore:
         task = self.tasks.add_completion_evidence(task["id"], str(receipt))
         task = self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="verified")
         with self.tx() as conn:
-            conn.execute("UPDATE service_jobs SET state='completed',next_attempt_at=NULL,updated_at=? WHERE id=?", (now(), job_id))
+            # Completion clears only current scheduling/ownership state.  The
+            # attempt rows and service_updates remain the durable history of
+            # earlier failures and recovery diagnostics.
+            conn.execute("""UPDATE service_jobs
+                           SET state='completed', next_attempt_at=NULL,
+                               last_error=NULL, verification_pid=NULL,
+                               verification_identity=NULL, updated_at=?
+                           WHERE id=?""", (now(), job_id))
         return self.get_job(job_id)
 
     def verify_with_agent(self, job_id, verifier):
