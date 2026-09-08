@@ -268,6 +268,8 @@ class JobTests(unittest.TestCase):
 
     def test_usage_summary_aggregates_duration_once_and_keeps_missing_fields_explicit(self):
         attempts = [
+            {'attempt_id': 'a', 'usage': None, 'elapsed_seconds': None},
+            # A later reconciliation has the complete provider record.
             {'attempt_id': 'a', 'usage': {'input_tokens': 10, 'cached_input_tokens': 2},
              'elapsed_seconds': 1.5},
             {'attempt_id': 'b', 'usage': None, 'elapsed_seconds': None},
@@ -283,6 +285,16 @@ class JobTests(unittest.TestCase):
         self.assertEqual(summary['elapsed_seconds'], 1.5)
         self.assertEqual(summary['elapsed_attempts_reported'], 1)
         self.assertEqual(summary['elapsed_attempts_missing'], 1)
+
+    def test_usage_summary_treats_nonfinite_or_negative_elapsed_as_missing(self):
+        summary = h._usage_summary([
+            {'attempt_id': 'negative', 'elapsed_seconds': -1, 'usage': None},
+            {'attempt_id': 'nan', 'elapsed_seconds': float('nan'), 'usage': None},
+            {'attempt_id': 'infinite', 'elapsed_seconds': float('inf'), 'usage': None},
+        ])
+        self.assertEqual(summary['elapsed_seconds'], 0.0)
+        self.assertEqual(summary['elapsed_attempts_reported'], 0)
+        self.assertEqual(summary['elapsed_attempts_missing'], 3)
 
     def test_provider_model_mismatch_is_not_verified_requested_model(self):
         job = h.Job(self.root/'work', self.root/'vault', 'Review', provider='codex',

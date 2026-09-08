@@ -6,6 +6,7 @@ import fcntl
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -682,16 +683,35 @@ def _usage_summary(attempts):
     elapsed = 0.0
     elapsed_reported = 0
     elapsed_missing = 0
-    seen = set()
+    selected = []
+    positions = {}
+
+    def quality(attempt):
+        usage = _usage_record(attempt.get('usage'))
+        elapsed_value = attempt.get('elapsed_seconds')
+        elapsed_ok = (isinstance(elapsed_value, (int, float))
+                      and not isinstance(elapsed_value, bool)
+                      and math.isfinite(elapsed_value) and elapsed_value >= 0)
+        return (int(usage['available']), len(usage.get('values', {})),
+                int(elapsed_ok), int(attempt.get('actual_model') is not None),
+                int(attempt.get('status') not in (None, 'running')))
+
     for attempt in attempts:
         # A reconciliation can expose the same durable attempt more than
-        # once.  Count it once, while keeping distinct attempts (including
-        # cached-input usage) separate.
+        # once. Keep the most complete observation (and never add it twice),
+        # so a later provider usage record replaces an earlier missing one.
         identity = attempt.get('attempt_id', attempt.get('attempt_number'))
-        if identity is not None:
-            if identity in seen:
-                continue
-            seen.add(identity)
+        if identity is None:
+            selected.append(attempt)
+            continue
+        position = positions.get(identity)
+        if position is None:
+            positions[identity] = len(selected)
+            selected.append(attempt)
+        elif quality(attempt) >= quality(selected[position]):
+            selected[position] = attempt
+
+    for attempt in selected:
         usage = attempt.get('usage')
         record = _usage_record(usage)
         if record['available']:
@@ -701,7 +721,8 @@ def _usage_summary(attempts):
         else:
             missing += 1
         value = attempt.get('elapsed_seconds')
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value >= 0):
             elapsed += value
             elapsed_reported += 1
         else:
