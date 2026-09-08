@@ -257,7 +257,11 @@ fi
 /usr/bin/grep -F -- 'PUBLICATION_MODE_HINT="$ATTEMPT_ROOT/publication-mode-hint.json"' "$RUNNER" >/dev/null
 /usr/bin/grep -F -- '"$MODE_DETERMINER" --apply-residual-guards' "$RUNNER" >/dev/null
 /usr/bin/grep -F -- '"$DIRTY_SNAPSHOT_MANIFEST"' "$RUNNER" >/dev/null
-/usr/bin/grep -F -- '/usr/bin/shlock -f "$PUBLICATION_LOCK" -p $$' "$RUNNER" >/dev/null
+/usr/bin/grep -F -- 'acquire_publication_lock()' "$RUNNER" >/dev/null
+if /usr/bin/grep -F -- '/usr/bin/shlock' "$RUNNER" >/dev/null; then
+  echo "runner must not depend on the BSD-only shlock path" >&2
+  exit 1
+fi
 /usr/bin/grep -F -- '[[ "$observed_owner" == "$$" ]] || return 1' "$RUNNER" >/dev/null
 /usr/bin/grep -F -- 'vault_state_snapshot_unstable' "$RUNNER" >/dev/null
 /usr/bin/grep -F -- 'artifact_target_replan_exhausted' "$RUNNER" >/dev/null
