@@ -27,13 +27,14 @@ class SecurityProfessorRetirementTest(unittest.TestCase):
                 failures.append(str(path.relative_to(REPO_ROOT)))
         self.assertEqual([], failures)
 
-    def test_commit_eval_routes_security_work_to_tech_security(self) -> None:
+    def test_commit_eval_keeps_scope_and_secret_boundaries(self) -> None:
         evals = json.loads(
             (REPO_ROOT / "commit/evals/evals.json").read_text(encoding="utf-8")
         )
         case = next(item for item in evals["evals"] if item["id"] == 4)
         contract = f"{case['prompt']}\n{case['expected_output']}\n{case.get('assertions', {})}"
-        self.assertIn("tech-security", contract)
+        self.assertIn("scope", contract)
+        self.assertIn("blocked", contract)
         self.assertNotIn(LEGACY_NAME, contract)
 
     def test_skill_updater_does_not_select_a_security_review_provider(self) -> None:

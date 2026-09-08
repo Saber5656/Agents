@@ -88,7 +88,7 @@ class ControlPlaneRemovalTest(unittest.TestCase):
                 for marker in required_markers:
                     self.assertIn(marker, text)
 
-    def test_migrated_evals_return_missing_context_to_the_caller(self) -> None:
+    def test_migrated_evals_use_current_context_contracts(self) -> None:
         secretary_evals = json.loads(
             (REPO_ROOT / "secretary-ai/evals/evals.json").read_text(encoding="utf-8")
         )
@@ -97,12 +97,12 @@ class ControlPlaneRemovalTest(unittest.TestCase):
         )
 
         secretary_case = next(case for case in secretary_evals["evals"] if case["id"] == 3)
-        commit_case = next(case for case in commit_evals["evals"] if case["id"] == 8)
+        commit_case = next(case for case in commit_evals["evals"] if case["id"] == 6)
 
-        for case in [secretary_case, commit_case]:
-            self.assertIn("caller-supplied Saihai task context", case["expected_output"])
+        self.assertIn("task handoff draft", secretary_case["expected_output"])
         self.assertIn("呼び出し元へ返す", secretary_case["expected_output"])
-        self.assertIn("caller へ差し戻し", commit_case["expected_output"])
+        self.assertIn("blocked", commit_case["expected_output"])
+        self.assertIn("秘密値", commit_case["expected_output"])
 
 
 if __name__ == "__main__":
