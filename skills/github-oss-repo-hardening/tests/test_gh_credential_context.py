@@ -162,7 +162,11 @@ def test_windows_observer_initializes_actual_dry_apply(windows_observer, monkeyp
         if args[1:] == ['--version']:
             return subprocess.CompletedProcess(args, 0, 'gh version 2.80.0 (fixture)', '')
         calls.append(args)
-        return subprocess.CompletedProcess(args, 0, '{}', '')
+        if '--method' in args and args[args.index('--method') + 1] != 'GET':
+            payload = json.loads(Path(args[args.index('--input') + 1]).read_text())
+            payload['id'] = 99
+            return subprocess.CompletedProcess(args, 0, json.dumps(payload), '')
+        return subprocess.CompletedProcess(args, 0, '[]', '')
 
     monkeypatch.setattr(context.subprocess, 'run', transport)
     # The helper's environment selection must use the same synthetic selectors.

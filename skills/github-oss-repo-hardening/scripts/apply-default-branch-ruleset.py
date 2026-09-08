@@ -13,6 +13,7 @@ This script never prints token values.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -33,6 +34,16 @@ TARGET_HOST = "github.com"
 
 
 DEFAULT_RULESET_NAME = "protect-main-branch-of-OSS"
+
+
+class AmbiguousMutation(RuntimeError):
+    """A mutation may have reached GitHub but its response was unavailable."""
+
+
+class RollbackDrift(RuntimeError):
+    """A scoped restore would overwrite a later unrelated change."""
+
+
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
@@ -262,6 +273,137 @@ def load_payload(path: Path) -> dict[str, Any]:
     return payload
 
 
+RULESET_PAYLOAD_FIELDS = ("name", "target", "enforcement", "bypass_actors", "conditions", "rules")
+VOLATILE_RULESET_FIELDS = frozenset(("created_at", "updated_at"))
+
+
+def _payload_view(ruleset: dict[str, Any]) -> dict[str, Any]:
+    """Return only fields accepted by the repository-ruleset write endpoint."""
+    return {
+        field: copy.deepcopy(ruleset[field])
+        for field in RULESET_PAYLOAD_FIELDS
+        if field in ruleset
+    }
+
+
+def ruleset_preimage_hash(ruleset: dict[str, Any]) -> str:
+    """Hash an observed ruleset, excluding server timestamps only."""
+    stable = {
+        key: value
+        for key, value in ruleset.items()
+        if key not in VOLATILE_RULESET_FIELDS
+    }
+    encoded = json.dumps(stable, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _merge_status_check_parameters(
+    existing: dict[str, Any], desired: dict[str, Any]
+) -> dict[str, Any]:
+    result = copy.deepcopy(existing)
+    for key, value in desired.items():
+        if key != "required_status_checks":
+            result[key] = copy.deepcopy(value)
+
+    old_checks = result.get("required_status_checks", [])
+    if not isinstance(old_checks, list):
+        old_checks = []
+    desired_checks = desired.get("required_status_checks", [])
+    if not isinstance(desired_checks, list):
+        desired_checks = []
+    checks = copy.deepcopy(old_checks)
+    contexts = {
+        check.get("context")
+        for check in checks
+        if isinstance(check, dict) and isinstance(check.get("context"), str)
+    }
+    for check in desired_checks:
+        if not isinstance(check, dict):
+            continue
+        context = check.get("context")
+        if context not in contexts:
+            checks.append(copy.deepcopy(check))
+            if isinstance(context, str):
+                contexts.add(context)
+    result["required_status_checks"] = checks
+    return result
+
+
+def _merge_rule(existing: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(existing)
+    for key, value in desired.items():
+        if key == "parameters" and isinstance(value, dict) and isinstance(result.get(key), dict):
+            if desired.get("type") == "required_status_checks":
+                result[key] = _merge_status_check_parameters(result[key], value)
+            else:
+                merged = copy.deepcopy(result[key])
+                merged.update(copy.deepcopy(value))
+                result[key] = merged
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def merge_existing_ruleset(existing: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any]:
+    """Patch managed rules into an existing ruleset while preserving its scope.
+
+    Existing enforcement, bypass actors, conditions, unknown rules and unknown
+    rule parameters remain intact. Inherited/source metadata is observed for
+    the preimage but is deliberately excluded from the repository write body.
+    """
+    if not isinstance(existing, dict) or not isinstance(desired, dict):
+        raise ValueError("ruleset patch requires object payloads")
+    patched = _payload_view(existing)
+    for field in ("name", "target", "enforcement", "bypass_actors", "conditions"):
+        if field not in patched and field in desired:
+            patched[field] = copy.deepcopy(desired[field])
+
+    old_rules = patched.get("rules", [])
+    if not isinstance(old_rules, list):
+        old_rules = []
+    rules = copy.deepcopy(old_rules)
+    by_type: dict[str, dict[str, Any]] = {}
+    for rule in rules:
+        if isinstance(rule, dict) and isinstance(rule.get("type"), str):
+            by_type.setdefault(rule["type"], rule)
+    for desired_rule in desired.get("rules", []):
+        if not isinstance(desired_rule, dict) or not isinstance(desired_rule.get("type"), str):
+            continue
+        rule_type = desired_rule["type"]
+        current = by_type.get(rule_type)
+        if current is None:
+            current = copy.deepcopy(desired_rule)
+            rules.append(current)
+            by_type[rule_type] = current
+        else:
+            merged = _merge_rule(current, desired_rule)
+            current.clear()
+            current.update(merged)
+    patched["rules"] = rules
+    return patched
+
+
+def reconcile_mutation_readback(actual: dict[str, Any], expected: dict[str, Any]) -> str:
+    """Classify an uncertain write from a fresh read-back without retrying."""
+    if _payload_view(actual) == _payload_view(expected):
+        return "applied"
+    return "ambiguous"
+
+
+def prepare_scoped_restore(
+    current: dict[str, Any], reviewed_preimage: dict[str, Any], applied_postimage: dict[str, Any]
+) -> dict[str, Any]:
+    """Prepare a restore only when the target still equals this operation's postimage.
+
+    Batch callers can invoke this independently for each successfully applied
+    target after another target fails. Any later unrelated change, including an
+    inherited/source change, raises before a rollback request is made.
+    """
+    if ruleset_preimage_hash(current) != ruleset_preimage_hash(applied_postimage):
+        raise RollbackDrift("rollback_drift; target changed after the reviewed mutation")
+    return _payload_view(reviewed_preimage)
+
+
 def default_payload_path(repo: str) -> Path:
     safe_repo = repo.replace("/", "_")
     return Path(tempfile.gettempdir()) / f"github-default-branch-ruleset-{safe_repo}.json"
@@ -288,11 +430,15 @@ def run_gh_api(endpoint: str, *, method: str | None = None, input_path: Path | N
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=60)
     except (OSError, subprocess.SubprocessError):
+        if method:
+            raise AmbiguousMutation("mutation response unavailable") from None
         fail("transport_failure; check connectivity in this executor context manually.")
     if result.returncode != 0:
         # Consume only a status code, never forward raw stderr, auth headers or body.
         match = re.search(r"\bHTTP (\d{3})\b", result.stderr)
         status = int(match[1]) if match else None
+        if method and (status is None or status >= 500):
+            raise AmbiguousMutation("mutation response unavailable")
         diagnostic = classify_observation(http_status=status)
         fail(diagnostic + "; manually check the selected credential and target host in this executor. "
              "No credential fallback was attempted.")
@@ -322,29 +468,54 @@ def list_rulesets(repo: str) -> list[dict[str, Any]]:
     return rulesets
 
 
-def discover_ruleset_id(repo: str, ruleset_name: str) -> str | None:
-    rulesets = list_rulesets(repo)
+def fetch_ruleset(repo: str, ruleset_id: str) -> dict[str, Any]:
+    output = run_gh_api(f"repos/{repo}/rulesets/{ruleset_id}")
+    try:
+        ruleset = json.loads(output)
+    except json.JSONDecodeError as exc:
+        fail(f"could not parse gh ruleset response as JSON: {exc}")
+    if not isinstance(ruleset, dict):
+        fail("gh ruleset response was not a JSON object.")
+    return ruleset
 
-    matches = [ruleset for ruleset in rulesets if ruleset.get("name") == ruleset_name]
-    if len(matches) > 1:
-        ids = ", ".join(str(match.get("id")) for match in matches)
-        fail(f"multiple rulesets named {ruleset_name!r} found: {ids}. Pass --ruleset-id.")
-    if not matches:
+
+def find_existing_ruleset(args: argparse.Namespace) -> dict[str, Any] | None:
+    if args.operation == "create":
         return None
-    return str(matches[0]["id"])
+    rulesets = list_rulesets(args.repo)
+    if args.operation == "update":
+        matches = [ruleset for ruleset in rulesets if str(ruleset.get("id")) == str(args.ruleset_id)]
+        if not matches:
+            fail(f"ruleset id {args.ruleset_id!r} was not found in the repository-owned rulesets.")
+    else:
+        matches = [ruleset for ruleset in rulesets if ruleset.get("name") == args.ruleset_name]
+        if len(matches) > 1:
+            ids = ", ".join(str(match.get("id")) for match in matches)
+            fail(f"multiple rulesets named {args.ruleset_name!r} found: {ids}. Pass --ruleset-id.")
+        if not matches:
+            return None
+    existing = matches[0]
+    if not isinstance(existing, dict) or not existing.get("id"):
+        fail("matched ruleset did not contain a stable id.")
+    if "rules" not in existing or "conditions" not in existing:
+        existing = fetch_ruleset(args.repo, str(existing["id"]))
+    return existing
 
 
-def choose_mutation(args: argparse.Namespace) -> tuple[str, str]:
+def discover_ruleset_id(repo: str, ruleset_name: str) -> str | None:
+    args = argparse.Namespace(operation="upsert", repo=repo, ruleset_name=ruleset_name)
+    existing = find_existing_ruleset(args)
+    return str(existing["id"]) if existing else None
+
+
+def choose_mutation(args: argparse.Namespace, existing: dict[str, Any] | None = None) -> tuple[str, str]:
     if args.operation == "create":
         return "POST", f"repos/{args.repo}/rulesets"
-
-    if args.operation == "update":
-        return "PUT", f"repos/{args.repo}/rulesets/{args.ruleset_id}"
-
-    ruleset_id = args.ruleset_id or discover_ruleset_id(args.repo, args.ruleset_name)
-    if ruleset_id:
-        return "PUT", f"repos/{args.repo}/rulesets/{ruleset_id}"
-    return "POST", f"repos/{args.repo}/rulesets"
+    if existing is None:
+        existing = find_existing_ruleset(args)
+    if existing is None:
+        return "POST", f"repos/{args.repo}/rulesets"
+    return "PUT", f"repos/{args.repo}/rulesets/{existing['id']}"
 
 
 def auth_source(args: argparse.Namespace) -> str:
@@ -445,6 +616,48 @@ def guard_replace(args: argparse.Namespace, method: str) -> None:
         )
 
 
+def _response_object(output: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) and "rules" in value else None
+
+
+def _ruleset_id_from_endpoint(endpoint: str) -> str | None:
+    match = re.search(r"/rulesets/(\d+)$", endpoint)
+    return match.group(1) if match else None
+
+
+def reconcile_lost_mutation(
+    *, repo: str, method: str, endpoint: str, expected: dict[str, Any]
+) -> str:
+    """Read the target after an uncertain write; never retry automatically."""
+    actual: dict[str, Any] | None = None
+    ruleset_id = _ruleset_id_from_endpoint(endpoint)
+    if method == "PUT" and ruleset_id:
+        actual = fetch_ruleset(repo, ruleset_id)
+    elif method == "POST":
+        matches = [item for item in list_rulesets(repo) if item.get("name") == expected.get("name")]
+        if len(matches) == 1 and matches[0].get("id"):
+            actual = fetch_ruleset(repo, str(matches[0]["id"]))
+    if actual is not None and reconcile_mutation_readback(actual, expected) == "applied":
+        print("Mutation outcome: reconciled as applied; no retry was attempted.")
+        return "applied"
+    fail("ambiguous_mutation; read-back did not match the reviewed payload; no retry was attempted.")
+
+
+def verify_mutation_response(
+    *, repo: str, method: str, endpoint: str, expected: dict[str, Any], output: str
+) -> str:
+    actual = _response_object(output)
+    if actual is None:
+        return reconcile_lost_mutation(repo=repo, method=method, endpoint=endpoint, expected=expected)
+    if reconcile_mutation_readback(actual, expected) != "applied":
+        fail("readback_mismatch; persisted ruleset differs from reviewed payload; no retry was attempted.")
+    return "applied"
+
+
 def main() -> int:
     global ACTIVE_CONTEXT, EXECUTOR_SURFACE, TARGET_HOST
     args = parse_args()
@@ -467,8 +680,11 @@ def main() -> int:
         if args.ruleset_name != DEFAULT_RULESET_NAME and args.ruleset_name != payload_name:
             fail("--ruleset-name conflicts with the name in --payload-in.")
         args.ruleset_name = payload_name
-    else:
+    existing = find_existing_ruleset(args)
+    if not args.payload_in:
         payload = build_payload(args)
+        if existing is not None:
+            payload = merge_existing_ruleset(existing, payload)
         payload_path = Path(args.payload_out) if args.payload_out else default_payload_path(args.repo)
         write_payload(payload, payload_path)
 
@@ -476,6 +692,8 @@ def main() -> int:
     binding = {"context": ACTIVE_CONTEXT, "repo": args.repo,
                "payload_sha256": hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                "operation": args.operation, "ruleset_id": args.ruleset_id,
+               "target_preimage_sha256": ruleset_preimage_hash(existing) if existing is not None else None,
+               "target_preimage": copy.deepcopy(existing) if existing is not None else None,
                "allow_stored_gh_auth": args.allow_stored_gh_auth,
                "replace_existing": args.replace_existing}
     if args.mode == "apply":
@@ -488,7 +706,7 @@ def main() -> int:
             fail("context_drift; reviewed context is missing, invalid, or differs from this execution.")
     if args.mode == "apply":
         guard_apply_auth(args)
-    method, endpoint = choose_mutation(args)
+    method, endpoint = choose_mutation(args, existing)
     binding.update(method=method, endpoint=endpoint)
     if args.mode == "apply":
         try:
@@ -513,7 +731,12 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="gh-reviewed-payload-") as directory:
         pinned_payload = Path(directory) / "payload.json"
         write_payload(payload, pinned_payload)
-        run_gh_api(endpoint, method=method, input_path=pinned_payload)
+        try:
+            response = run_gh_api(endpoint, method=method, input_path=pinned_payload)
+        except AmbiguousMutation:
+            reconcile_lost_mutation(repo=args.repo, method=method, endpoint=endpoint, expected=payload)
+        else:
+            verify_mutation_response(repo=args.repo, method=method, endpoint=endpoint, expected=payload, output=response)
     print()
     print("Applied ruleset: request succeeded")
     return 0
