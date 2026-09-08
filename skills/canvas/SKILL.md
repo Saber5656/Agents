@@ -14,7 +14,7 @@ updated: 2026-09-08
 This skill describes the installed Cursor IDE Canvas surface. It is not a
 general "Codex Canvas" capability. The verified local SDK is
 `cursor/canvas`, with declarations under `~/.cursor/skills-cursor/canvas/sdk/`.
-The verified file surface is a single `.canvas.tsx` file in Cursor's managed
+The installed skill documents its file surface as a single `.canvas.tsx` file in Cursor's managed
 workspace directory:
 
 ```text
