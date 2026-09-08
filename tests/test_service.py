@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 from harness.tasks import TaskStore
+from harness.publication import PublicationError
 from harness.service import (AuthError, ServiceStore, WorkspaceLock,
                              Scheduler, Launchd, default_verifier, load_agents_env)
 
@@ -709,6 +710,28 @@ class ServiceTests(unittest.TestCase):
             result = self.service.verify_with_agent(job["id"], lambda _: review)
         self.assertEqual(result["status"], "verified")
         publish.assert_called_once()
+
+    def test_restart_receipt_os_diagnostic_is_preserved_without_verifier_turn(self):
+        task = self.tasks.create_task(purpose="receipt restart", repository="Saber5656/Agents")
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        proposal = {"repository": "Saber5656/Agents", "canonical_repo": str(self.root),
+                    "task_worktree": str(self.workspace), "files": ["README.md"],
+                    "immutable_base": "a" * 40, "commit_message": "Publish change",
+                    "remote": "https://github.com/Saber5656/Agents.git",
+                    "vault_receipt": str(self.vault / "publication.json")}
+        self.service.run_once(executor=lambda _: {"status": "completed", "publication_proposal": proposal})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        detail = self.service.get_job(job["id"])
+        receipt = Path(detail["run_dir"]) / "publication.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text("{}")
+        verifier = mock.Mock(side_effect=AssertionError("receipt failure must not spend verifier turn"))
+        with mock.patch("harness.publication._read_json",
+                        side_effect=PublicationError("Vault receipt is unreadable (EACCES: Permission denied)")):
+            result = self.service.verify_with_agent(job["id"], verifier)
+        self.assertEqual(result["status"], "needs_verification")
+        self.assertIn("EACCES", result["verification_error"])
+        verifier.assert_not_called()
 
     def test_host_rejects_worker_self_reported_publication_digest(self):
         task = self.tasks.create_task(purpose="host publication CAS", repository="Saber5656/Agents")
