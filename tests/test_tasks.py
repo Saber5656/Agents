@@ -43,6 +43,16 @@ class StoreTests(unittest.TestCase):
         try:self.assertEqual(store.db_path,real.resolve()/'tasks.sqlite3')
         finally:store.close()
 
+
+    def test_task_and_links_expose_verified_issue_url(self):
+        with self.store() as store:
+            task=store.create_task(purpose='linked issue visibility')
+            url='https://github.com/org/repo/issues/7'
+            store.link_issue(task['id'],'org/repo',7,url,verified=True,
+                             readback={'repository':'org/repo','number':7,'url':url})
+            self.assertEqual(store.list_issue_links(task['id'])[0]['issue_url'],url)
+            self.assertEqual(store.get_task(task['id'])['github_issues'][0]['issue_url'],url)
+
     def store(self):
         return TaskStore(self.db)
 
