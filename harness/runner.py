@@ -929,6 +929,12 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
     summary['status'] = 'running'
     summary['startup'] = {'workspace': str(job.workspace), 'vault': str(job.vault),
                           'environment_keys': {key: bool(env.get(key)) for key in AUTH_KEYS}}
+    summary['configured_limits'] = {
+        'timeout_seconds': job.timeout,
+        'provider': job.provider,
+        'effort': job.effort,
+        'fallback_enabled': bool(job.fallback),
+    }
     if capture_config:
         summary['capture_config'] = capture_config
     save(run_dir/'result.json', summary, env)
@@ -974,7 +980,9 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         save(run_dir/f'{stem}-prompt.md', prompt, env)
         save(run_dir/f'{stem}-command.json', argv, env)
         attempt = {'attempt_number': attempt_no, 'attempt_id': f'{run_dir.name}:{attempt_no}',
-                   'provider':provider, 'requested_model':model, 'status':'running',
+                   'provider':provider, 'requested_model':model,
+                   'requested_effort':job.effort, 'timeout_seconds':remaining,
+                   'status':'running',
                    'started_at':datetime.now(timezone.utc).isoformat(),
                    'state_record':state_path.name}
         summary['attempts'].append(attempt)

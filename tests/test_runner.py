@@ -294,12 +294,14 @@ class JobTests(unittest.TestCase):
                            lambda *args: h.ProcessResult(0, output))
         attempt = json.loads((Path(result['run_dir'])/'result.json').read_text())['attempts'][0]
         self.assertEqual(attempt['requested_model'], 'gpt-5.6-luna')
+        self.assertEqual(attempt['requested_effort'], 'low')
         self.assertEqual(attempt['actual_model'], 'gpt-5.6-astra')
         self.assertFalse(attempt['model_verified'])
         self.assertTrue(attempt['model_mismatch'])
         self.assertEqual(result['model_observation']['model_verified'], False)
         self.assertFalse(result['model_verified'])
         self.assertTrue(result['model_mismatch'])
+        self.assertEqual(result['configured_limits']['timeout_seconds'], self.job.timeout)
 
     def test_auth_failure_never_falls_back(self):
         run=self.executor([h.ProcessResult(1,claude_result('Please run /login',True))])
