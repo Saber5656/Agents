@@ -607,6 +607,13 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(recovered, [])
         self.assertEqual(self.service.get_job(job["id"])["state"], "running")
 
+    def test_malformed_native_thread_identity_keeps_recovery_incomplete(self):
+        for invalid in ("not-a-native-id", {}, [], float("inf")):
+            with self.subTest(invalid=invalid):
+                identity = self.service._worker_identity()
+                identity["native_id"] = invalid
+                self.assertEqual("unknown", self.service._worker_thread_state(identity))
+
     def test_recovery_reclaims_dead_worker_thread_in_live_service(self):
         """A live daemon PID must not keep a vanished worker attempt occupied."""
         from concurrent.futures import ThreadPoolExecutor

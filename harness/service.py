@@ -424,7 +424,10 @@ class ServiceStore:
             return None
         try:
             thread_id = int(recorded["thread_id"])
-        except (TypeError, ValueError):
+            recorded_native_id = recorded.get("native_id")
+            if recorded_native_id is not None:
+                recorded_native_id = int(recorded_native_id)
+        except (TypeError, ValueError, OverflowError):
             return "unknown"
         for thread in threading.enumerate():
             if thread.ident != thread_id:
@@ -433,8 +436,8 @@ class ServiceStore:
                     and recorded["thread_name"] != thread.name):
                 return "unknown"
             native_id = getattr(thread, "native_id", None)
-            if (recorded.get("native_id") is not None and native_id is not None
-                    and int(recorded["native_id"]) != int(native_id)):
+            if (recorded_native_id is not None and native_id is not None
+                    and recorded_native_id != native_id):
                 return "unknown"
             return "alive"
         return "dead"
