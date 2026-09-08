@@ -13,6 +13,12 @@ the matching path/branch whose HEAD descends from that base. An existing branch
 without a matching worktree requires explicit reconciliation. This helper is not
 a scheduler or a writer lock; the task service owns concurrent worker exclusion.
 
+For a mixed same-file change, preserve the primary index by creating an alternate
+index from `HEAD`, applying the reviewed patch with
+`skills/commit/scripts/stage_approved_patch.py --index-file`, and running the
+commit with that same `GIT_INDEX_FILE`. This lets one purpose be committed while
+the other staged/unstaged purpose remains byte-for-byte in the original checkout.
+
 `public_text` rejects detected secrets and personal home paths before public
 transmission. With `english=True`, Japanese/CJK text requires English rewriting.
 This is a conservative language check, not a complete language/secret classifier.
