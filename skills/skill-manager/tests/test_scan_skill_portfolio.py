@@ -71,6 +71,13 @@ class PortfolioScannerTests(unittest.TestCase):
         self.assertEqual("active", metadata["status"])
         self.assertEqual([], errors)
 
+    def test_frontmatter_accepts_indented_sequence_metadata(self):
+        metadata, errors = MODULE.frontmatter(
+            "---\nname: list-skill\ndescription: A list-backed skill\nreferences:\n  - first\n  - \"second reference\"\nstatus: active\n---\n"
+        )
+        self.assertEqual(["first", "second reference"], metadata["references"])
+        self.assertEqual([], errors)
+
     def test_unknown_frontmatter_line_is_unverified_not_invalid(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -82,6 +89,16 @@ class PortfolioScannerTests(unittest.TestCase):
             self.assertEqual(1, len(unparsed))
             self.assertEqual("medium", unparsed[0]["severity"])
             self.assertFalse(any(item["severity"] == "blocker" for item in unparsed))
+
+    def test_unknown_frontmatter_block_does_not_create_missing_metadata_blocker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_skill(root, "alpha")
+            skill = root / "alpha" / "SKILL.md"
+            skill.write_text(skill.read_text().replace("description: Test skill", "description:\n  nested: value"))
+            findings = MODULE.scan(root, "audit-1", "repo_native")["findings"]
+            self.assertTrue(any(item["rule_id"] == "frontmatter_unparsed" for item in findings))
+            self.assertFalse(any(item["rule_id"] == "required_metadata" and "description" in item["evidence"][0] for item in findings))
 
     def test_name_path_mismatch_is_blocker(self):
         with tempfile.TemporaryDirectory() as temp:

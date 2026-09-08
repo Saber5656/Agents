@@ -85,6 +85,26 @@ def _block_scalar(
     return value, index
 
 
+def _empty_block(rows: list[str], start: int) -> tuple[Any, int, list[str]]:
+    """Parse a supported indented sequence after an empty YAML value."""
+    body: list[str] = []
+    index = start
+    while index < len(rows):
+        row = rows[index]
+        if not row.strip() or row[:1].isspace():
+            body.append(row)
+            index += 1
+            continue
+        break
+    if not body or not any(row.strip() for row in body):
+        return "", index, []
+    nonblank = [row for row in body if row.strip()]
+    if all(row.lstrip().startswith("- ") for row in nonblank):
+        return [_scalar(row.lstrip()[2:].strip()) for row in nonblank], index, []
+    raw = "\n".join(row.strip() for row in body if row.strip())
+    return raw, index, [f"unparsed frontmatter block after empty value: {row}" for row in body if row.strip()]
+
+
 def _scalar(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] == "'":
         return value[1:-1].replace("''", "'")
@@ -118,6 +138,10 @@ def frontmatter(text: str) -> tuple[dict[str, Any], list[str]]:
         block = _block_header(value) if value[:1] in {">", "|"} else None
         if block:
             data[key], index = _block_scalar(rows, index + 1, *block)
+            continue
+        if value == "" and index + 1 < len(rows) and (not rows[index + 1].strip() or rows[index + 1][:1].isspace()):
+            data[key], index, block_errors = _empty_block(rows, index + 1)
+            errors.extend(block_errors)
             continue
         if value[:1] in {">", "|"}:
             errors.append(f"unparsed frontmatter value: {row}")
