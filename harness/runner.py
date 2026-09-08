@@ -21,6 +21,8 @@ import threading
 import time
 import uuid
 
+from .status import build_status, emit_status
+
 ROOT = Path(__file__).resolve().parents[1]
 AUTH_KEYS = ('HOME', 'PATH', 'GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN',
              'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
@@ -1094,6 +1096,10 @@ def main(argv=None):
     commands=parser.add_subparsers(dest='command',required=True)
     d=commands.add_parser('doctor'); d.add_argument('--probe',action='store_true')
     g=commands.add_parser('gh'); g.add_argument('arguments',nargs=argparse.REMAINDER)
+    s=commands.add_parser('status')
+    s.add_argument('--db',type=Path,help='Read-only TaskStore SQLite path')
+    s.add_argument('--service-db',type=Path,help='Read-only service SQLite path')
+    s.add_argument('--json',action='store_true')
     for mode in ('run','review'):
         p=commands.add_parser(mode)
         p.add_argument('--workspace',type=Path,required=True)
@@ -1117,6 +1123,17 @@ def main(argv=None):
     args=parser.parse_args(argv)
     try:
         current=dict(os.environ)
+        if args.command=='status':
+            # Status is deliberately independent of login-shell startup and
+            # performs only safe dotenv parsing plus read-only inspection.
+            env=load_dotenv(args.env_file,current)
+            agents_root=env.get('AGENTS_ROOT')
+            db=args.db or (Path(agents_root)/'.local'/'tasks.sqlite3' if agents_root else None)
+            service_db=args.service_db or (
+                Path(agents_root)/'.local'/'service.sqlite3' if agents_root else None)
+            report=build_status(db_path=db, service_db_path=service_db, agents_root=agents_root)
+            print(emit_status(report,as_json=args.json))
+            return 0
         selected=terminal_environment(current) if args.environment=='terminal' else current
         env=load_dotenv(args.env_file,selected)
         vault=Path(env['AGENTS_VAULT_ROOT']) if env.get('AGENTS_VAULT_ROOT') else None
