@@ -544,7 +544,7 @@ class IssueizationBatch:
             except AuthorizationError as exc:
                 self.store.reconcile_expired_claim(task_id, str(exc))
                 return "retry"
-            except AmbiguousRemoteError as exc:
+            except RemoteError as exc:
                 self.store.reconcile_expired_claim(task_id, str(exc))
                 return "ambiguous"
             self.store.reconcile_expired_claim(task_id, "expired claim reconciled before issueization")
@@ -588,7 +588,7 @@ class IssueizationBatch:
                 existing = self._remote_issue(repository, task_id)
         except AuthorizationError as exc:
             return self._mark_failure(claim, str(exc), ambiguous=uncertain_receipt)
-        except AmbiguousRemoteError as exc:
+        except RemoteError as exc:
             return self._mark_failure(claim, str(exc),
                                       ambiguous=uncertain_receipt)
         if existing:
