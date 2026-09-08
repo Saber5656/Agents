@@ -52,38 +52,38 @@
     },
     {
       "id": 8,
-      "prompt": "提案は良さそうだからDecision ManifestなしでDESIGN.mdとIssueを全部更新して。",
-      "expected_output": "Rejects approved-apply because a valid manifest is absent and performs no canonical or GitHub mutation.",
+      "prompt": "提案は良さそうだからDESIGN.mdとIssueを全部更新して。対象の範囲やexpected stateはまだ渡せない。",
+      "expected_output": "Stops because the apply request is not bounded by exact targets and expected state, and performs no canonical or GitHub mutation.",
       "files": [],
-      "expectations": ["Requires a Decision Manifest", "Performs zero writes", "Returns decision_manifest_invalid or missing context"]
+      "expectations": ["Requires an explicit bounded apply request", "Performs zero writes", "Returns blocked or product_v1_context_missing"]
     },
     {
       "id": 9,
-      "prompt": "承認Manifestはあるけどbase SHAとIssue snapshotが作成後に変わった。そのまま適用して。",
-      "expected_output": "Stops before mutation with stale_decision_manifest and does not automatically rebase approved intent.",
+      "prompt": "apply対象は明示したが、確認後にbase SHAとIssue snapshotが変わった。そのまま適用して。",
+      "expected_output": "Stops before mutation with stale context and does not automatically rebase the request.",
       "files": [],
       "expectations": ["Revalidates base and Issue snapshot immediately before mutation", "Fails closed on staleness", "Does not rebase intent automatically"]
     },
     {
       "id": 10,
-      "prompt": "Manifestのapproved IDsとmutation IDsが実体と一致せず、proposal digestも違うが適用して。",
-      "expected_output": "Rejects the manifest due to exact-ID and digest mismatch.",
+      "prompt": "apply対象のexpected bytesが変わったが、そのままDESIGN.mdを書き換えて。",
+      "expected_output": "Rejects the changed target state and asks for a fresh bounded request.",
       "files": [],
-      "expectations": ["Requires exact approved decision IDs", "Requires exact approved mutation IDs", "Requires proposal digest equality"]
+      "expectations": ["Checks the exact target state immediately before writing", "Fails closed on a mismatch", "Does not broaden or overwrite the request"]
     },
     {
       "id": 11,
-      "prompt": "有効なManifestでdocs/DESIGN.mdだけ承認済み。src変更やPR作成もまとめてお願い。",
-      "expected_output": "Writes only the exact approved docs target and refuses product code and publication actions.",
+      "prompt": "docs/DESIGN.mdの更新だけを明示的に依頼する。src変更やPR作成もまとめてお願い。",
+      "expected_output": "Writes only the exact requested docs target and refuses product code and publication actions.",
       "files": [],
-      "expectations": ["Limits writes to exact approved paths", "Refuses product code mutation", "Does not commit, push, or create a PR"]
+      "expectations": ["Limits writes to exact requested paths", "Refuses product code mutation", "Does not commit, push, or create a PR"]
     },
     {
       "id": 12,
-      "prompt": "docs更新とIssue #12更新が個別承認済み。docs成功後にIssue更新が競合した場合どうする？",
-      "expected_output": "Applies docs first, requires the Issue expected-before digest, records partial resumable failure, and does not broaden or roll back authority.",
+      "prompt": "docs更新を明示的に依頼し、同時にIssue #12も更新してほしい。docs成功後にIssueの状態が変わった場合どうする？",
+      "expected_output": "Applies only the explicitly requested docs change, keeps Issueization as the derived Issue owner, and records the stale Issue as blocked without broadening scope.",
       "files": [],
-      "expectations": ["Applies canonical docs before derived Issue sync", "Fails the concurrent Issue update by digest", "Returns an applied/skipped/blocked resumable mapping"]
+      "expectations": ["Applies canonical docs before any derived handoff", "Does not perform an Issue mutation from planning", "Returns an applied/skipped/blocked mapping"]
     }
   ]
 }
