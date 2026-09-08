@@ -19,8 +19,16 @@ Use existing changes and verified results. Preserve unrelated files, index entri
 
 Resolve the intended repository and exact fetch/push destinations from the current assignment and origin. Verify any URL rewrite and upstream before sending data. Freeze the selected commit SHA and compare all unpublished commits and paths against the task scope; inspect their contents and public metadata for personal paths and secrets.
 
-Use the existing Git credentials to push the task branch without force. A
-repository-specific policy may explicitly authorize a reviewed coordinator to
+Use the existing Git credentials to push the task branch without force.
+The first push requires `git ls-remote --heads origin TASK_BRANCH`: an absent ref
+can be created; an existing ref must be reconciled against the local task's
+recorded branch/PR ownership and expected SHA before any mutation. An upstream
+setting or a possible fast-forward does not prove ownership. Preserve a ref
+owned by another task and select a non-colliding task branch. The shared
+`GitHub.push_branch` helper rejects an existing different remote SHA; an
+identical SHA is an idempotent readback, not permission to claim another task's PR.
+
+A repository-specific policy may explicitly authorize a reviewed coordinator to
 push its default branch; for Agents, follow
 `policies/repository-delivery.md` and keep workers on task branches. Without
 that explicit authorization, do not push the default branch. Never use an
