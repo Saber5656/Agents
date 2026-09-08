@@ -584,19 +584,32 @@ class ServiceStore:
             lock.release()
 
     def verify(self, job_id, evidence):
+        from .runner import save
+        import uuid
         job = self.get_job(job_id)
         if job is None: raise KeyError(job_id)
         task = self.tasks.get_task(job["task_id"])
-        if not task.get("acceptance_records") or not all(x["verified"] for x in task["acceptance_records"]):
-            raise ValueError("all acceptance evidence must be verified first")
-        evidence_text = [str(item).lower() for item in task.get("completion_evidence", [])]
-        evidence_text += [str(item).lower() for item in task.get("evidence_links", [])]
-        evidence_text.append(str(evidence).lower())
-        merged = any(re.search(r"\bmerge(?:d)?\b", item) or "pull request" in item or "/pull/" in item for item in evidence_text)
-        main_sync = any(("main" in item and "sync" in item) or "merged" in item for item in evidence_text)
-        if not merged or not main_sync:
-            raise ValueError("merge and main-sync evidence are required")
-        task = self.tasks.add_completion_evidence(task["id"], evidence)
+        if not isinstance(evidence, dict) or evidence.get("acceptance") is not True or evidence.get("findings"):
+            raise ValueError("a structured acceptance review with no unresolved findings is required")
+        expected = {row["evidence"] for row in task["acceptance_records"]}
+        criteria = evidence.get("criteria", [])
+        if not expected or not isinstance(criteria, list) or len(criteria) != len(expected):
+            raise ValueError("every acceptance criterion must be independently observed")
+        observed = set()
+        for item in criteria:
+            if (not isinstance(item, dict) or item.get("criterion") not in expected
+                    or item["criterion"] in observed or item.get("verified") is not True
+                    or not isinstance(item.get("evidence"), str) or not item["evidence"].strip()):
+                raise ValueError("acceptance evidence must match each exact criterion")
+            observed.add(item["criterion"])
+        publication = observe_publication(job, task, evidence.get("publication"))
+        receipt = Path(job["run_dir"]) / ("acceptance-" + uuid.uuid4().hex + ".json")
+        receipt.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        save(receipt, {"review": evidence, "publication_readback": publication,
+                       "task_version": task["version"], "observed_at": now()}, os.environ)
+        for item in criteria:
+            self.tasks.add_acceptance_evidence(task["id"], item["criterion"], verified=True)
+        task = self.tasks.add_completion_evidence(task["id"], str(receipt))
         task = self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="verified")
         with self.tx() as conn:
             conn.execute("UPDATE service_jobs SET state='completed',next_attempt_at=NULL,updated_at=? WHERE id=?", (now(), job_id))
@@ -625,16 +638,11 @@ class ServiceStore:
                 except ConflictError:
                     pass
             return {"status": "retry", "job_id": job_id, "verification": result, "repair_required": True}
-        if not isinstance(result, dict) or not result.get("acceptance") or not result.get("merge") or not result.get("main_sync"):
+        if not isinstance(result, dict) or result.get("acceptance") is not True:
             self._reset_verification(job_id, "verification criteria remain incomplete")
             return {"status": "needs_verification", "job_id": job_id, "verification": result or {}}
-        evidence = result.get("evidence")
-        if not evidence:
-            self._reset_verification(job_id, "verification returned no evidence")
-            return {"status": "needs_verification", "job_id": job_id, "verification": result}
-        proof = f"{evidence};merge;main-sync"
         try:
-            verified = self.verify(job_id, proof)
+            verified = self.verify(job_id, result)
         except Exception as exc:
             self._reset_verification(job_id, str(exc))
             return {"status": "needs_verification", "job_id": job_id, "verification": result,
@@ -703,6 +711,52 @@ def default_reconciler(job, attempt):
     return {"safe_to_resume": True, "reason": "receipt is resumable", "receipt": result}
 
 
+def observe_publication(job, task, proof):
+    """Read actual Git/GitHub state; review prose is not publication evidence."""
+    from .delivery import git, oid, GitHub
+    if not isinstance(proof, dict):
+        raise ValueError("publication commit and delivery mode are required")
+    commit = oid(proof.get("commit", ""))
+    repository = task.get("repository")
+    remote = GitHub(repository or "")
+    workspace = job["workspace"]
+    accepted_urls = {f"git@github.com:{repository}.git", f"https://github.com/{repository}.git",
+                     f"https://github.com/{repository}"}
+    if git(workspace, "remote", "get-url", "origin") not in accepted_urls:
+        raise ValueError("workspace remote does not match the assigned repository")
+    checkouts = git(workspace, "worktree", "list", "--porcelain").split("\n\n")
+    main = [entry.splitlines()[0].removeprefix("worktree ") for entry in checkouts
+            if "branch refs/heads/main" in entry.splitlines()]
+    if len(main) != 1:
+        raise ValueError("one canonical main checkout is required for synchronization readback")
+    canonical = main[0]
+    if git(canonical, "status", "--porcelain=v1", "-uall"):
+        raise ValueError("canonical main contains uncommitted work")
+    local = git(canonical, "rev-parse", "HEAD")
+    published = remote.api("commits/main")["sha"]
+    if local != published or git(canonical, "merge-base", commit, local) != commit:
+        raise ValueError("published commit and synchronized main do not match")
+    if proof.get("mode") == "direct_main":
+        if repository != "Saber5656/Agents":
+            raise ValueError("direct main policy is scoped to Saber5656/Agents")
+    elif proof.get("mode") == "pull_request":
+        number = proof.get("pr_number")
+        if type(number) is not int or number <= 0:
+            raise ValueError("a positive PR number is required")
+        pr = remote.pr(number)
+        if pr["state"] != "MERGED" or pr["baseRefName"] != "main" or (pr.get("mergeCommit") or {}).get("oid") != commit:
+            raise ValueError("PR merge readback does not match the accepted commit")
+        if any(not row.get("isResolved") and not row.get("isOutdated") for row in remote.threads(number)):
+            raise ValueError("PR has unresolved current review findings")
+    else:
+        raise ValueError("unknown delivery mode")
+    # Re-read after the multi-step observations; never certify a stale main.
+    if remote.api("commits/main")["sha"] != local or git(canonical, "rev-parse", "HEAD") != local:
+        raise ValueError("main moved during publication verification")
+    return {"repository": repository, "commit": commit, "main": local,
+            "canonical_workspace": canonical, "mode": proof["mode"]}
+
+
 def default_verifier(spec):
     """Use an actual read-only subscription Codex turn for acceptance review."""
     task = spec["task"]
@@ -715,8 +769,8 @@ def default_verifier(spec):
             "Act as an independent read-only verifier. Inspect the workspace, saved execution result and artifacts, "
             "the task acceptance criteria, current git status/log, and the public commit/merge/main synchronization. "
             "Do not edit files, run write commands, or infer completion from words alone. Return JSON only: "
-            "{acceptance:boolean, merge:boolean, main_sync:boolean, findings:[objects], evidence:string, "
-            "evidence_links:[strings]}. Every acceptance claim must cite observed evidence. "
+            "{acceptance:boolean, findings:[objects], evidence:string, criteria:[{criterion:string, verified:boolean, evidence:string}], publication:{commit:string, mode:direct_main|pull_request, pr_number:integer}, "
+            "evidence_links:[strings]}. Copy every task acceptance criterion exactly and cite observed evidence for each. Saber5656/Agents uses direct main publication; other repositories require their PR delivery policy. "
             "Use findings for any missing or incorrect implementation and explain the repair required."
         ),
     }, ensure_ascii=False)
@@ -762,7 +816,7 @@ def default_verifier(spec):
             value = json.loads(match.group(0))
         except (TypeError, ValueError) as nested:
             raise ValueError("verification agent returned malformed JSON") from nested
-    if not isinstance(value, dict) or not all(isinstance(value.get(key), bool) for key in ("acceptance", "merge", "main_sync")):
+    if not isinstance(value, dict) or not isinstance(value.get("acceptance"), bool):
         raise ValueError("verification agent omitted boolean acceptance verdict")
     if not isinstance(value.get("findings", []), list):
         raise ValueError("verification agent findings must be a list")
@@ -899,7 +953,7 @@ def main(argv=None):
     sh = sub.add_parser("show"); sh.add_argument("--db", default=argparse.SUPPRESS); sh.add_argument("job_id"); sh.add_argument("--json", action="store_true")
     run = sub.add_parser("run"); run.add_argument("--db", default=argparse.SUPPRESS); run.add_argument("--poll", type=float, default=30)
     once = sub.add_parser("run-once"); once.add_argument("--db", default=argparse.SUPPRESS); once.add_argument("--json", action="store_true")
-    ver = sub.add_parser("verify"); ver.add_argument("--db", default=argparse.SUPPRESS); ver.add_argument("job_id"); ver.add_argument("--evidence", required=True); ver.add_argument("--json", action="store_true")
+    ver = sub.add_parser("verify"); ver.add_argument("--db", default=argparse.SUPPRESS); ver.add_argument("job_id"); ver.add_argument("--evidence", required=True, help="path to structured acceptance review JSON"); ver.add_argument("--json", action="store_true")
     ld = sub.add_parser("launchd"); ld.add_argument("--db", default=argparse.SUPPRESS); ld.add_argument("action", choices=["generate", "install", "start", "status"]); ld.add_argument("--label", default="com.agents.service"); ld.add_argument("--path"); ld.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     root_hint = Path(os.environ.get("AGENTS_ROOT", Path(__file__).resolve().parents[1])).resolve()
@@ -913,7 +967,7 @@ def main(argv=None):
             value = store.enroll(args.task, args.workspace, prompt, args.context, model=args.model, effort=args.effort, timeout=args.timeout)
         elif args.command == "list": value = store.list_jobs(args.state)
         elif args.command == "show": value = store.get_job(args.job_id)
-        elif args.command == "verify": value = store.verify(args.job_id, args.evidence)
+        elif args.command == "verify": value = store.verify(args.job_id, json.loads(Path(args.evidence).read_text()))
         elif args.command == "run-once": value = Scheduler(store, verification_executor=default_verifier).run_once()
         elif args.command == "run": value = Scheduler(store, poll_interval=args.poll, verification_executor=default_verifier).run_forever()
         else:

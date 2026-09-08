@@ -226,7 +226,7 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(other_workspace.acquire(blocking=False))
         other_resource.release()
 
-    def test_verifier_agent_can_advance_success_to_verified(self):
+    def test_boolean_verdict_without_observations_cannot_complete_job(self):
         task = self.tasks.create_task(purpose="verify me", acceptance_evidence=["accepted"])
         self.tasks.add_acceptance_evidence(task["id"], "accepted", verified=True)
         job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
@@ -234,8 +234,8 @@ class ServiceTests(unittest.TestCase):
             "acceptance": True, "merge": True, "main_sync": True, "evidence": "vault://verified"
         })
         result = scheduler.run_once(executor=lambda _: {"status": "completed", "text": "provider success"})
-        self.assertEqual(result["status"], "verified")
-        self.assertEqual(self.service.get_job(job["id"])["state"], "completed")
+        self.assertEqual(result["status"], "needs_verification")
+        self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
 
     def test_verifier_findings_are_recorded_and_return_to_repair(self):
         task = self.tasks.create_task(purpose="verify findings", acceptance_evidence=["accepted"])
@@ -285,8 +285,58 @@ class ServiceTests(unittest.TestCase):
         job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
         with self.assertRaises(ValueError):
             self.service.verify(job["id"], "vault://accepted-only")
-        completed = self.service.verify(job["id"], "vault://merge;main-sync")
-        self.assertEqual(completed["state"], "completed")
+        with self.assertRaises(ValueError):
+            self.service.verify(job["id"], "vault://merge;main-sync")
+
+    def test_verifier_requires_every_exact_acceptance_criterion(self):
+        task = self.tasks.create_task(purpose="verify exact", repository="Saber5656/Agents",
+                                      acceptance_evidence=["test passes", "installed and exercised"])
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        verdict = {"acceptance": True, "findings": [], "evidence": "observed",
+                   "criteria": [{"criterion": "test passes", "verified": True, "evidence": "test log"}],
+                   "publication": {"commit": "a" * 40, "mode": "direct_main"}}
+        with mock.patch("harness.service.observe_publication", return_value={"commit": "a" * 40}):
+            outcome = Scheduler(self.service, verification_executor=lambda _: verdict).run_once(
+                executor=lambda _: {"status": "completed"})
+        self.assertEqual(outcome["status"], "needs_verification")
+        self.assertFalse(any(row["verified"] for row in self.tasks.get_task(task["id"])["acceptance_records"]))
+
+    def test_verified_criteria_and_actual_publication_complete_job(self):
+        task = self.tasks.create_task(purpose="verify exact", repository="Saber5656/Agents",
+                                      acceptance_evidence=["test passes"])
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        verdict = {"acceptance": True, "findings": [], "evidence": "observed",
+                   "criteria": [{"criterion": "test passes", "verified": True, "evidence": "test log"}],
+                   "publication": {"commit": "a" * 40, "mode": "direct_main"}}
+        with mock.patch("harness.service.observe_publication", return_value={"commit": "a" * 40}) as observe:
+            outcome = Scheduler(self.service, verification_executor=lambda _: verdict).run_once(
+                executor=lambda _: {"status": "completed"})
+        self.assertEqual(outcome["status"], "verified")
+        self.assertTrue(self.tasks.get_task(task["id"])["acceptance_records"][0]["verified"])
+        observe.assert_called_once()
+
+    def test_publication_observes_real_git_and_github_main(self):
+        from harness.service import observe_publication
+        def git(*args):
+            return subprocess.check_output(["git", *args], cwd=self.workspace, text=True).strip()
+        git("init", "-b", "main")
+        git("-c", "user.name=Acceptance", "-c", "user.email=acceptance@example.invalid",
+            "commit", "--allow-empty", "-m", "fixture")
+        git("remote", "add", "origin", "git@github.com:Saber5656/Agents.git")
+        sha = git("rev-parse", "HEAD")
+        proof = {"commit": sha, "mode": "direct_main"}
+        with mock.patch("harness.delivery.GitHub.api", return_value={"sha": sha}):
+            result = observe_publication({"workspace": str(self.workspace)},
+                                         {"repository": "Saber5656/Agents"}, proof)
+        self.assertEqual(result["main"], sha)
+        with mock.patch("harness.delivery.GitHub.api", side_effect=[{"sha": sha}, {"sha": "b" * 40}]):
+            with self.assertRaisesRegex(ValueError, "moved"):
+                observe_publication({"workspace": str(self.workspace)},
+                                    {"repository": "Saber5656/Agents"}, proof)
+        (self.workspace / "uncommitted").write_text("preserve")
+        with self.assertRaisesRegex(ValueError, "uncommitted"):
+            observe_publication({"workspace": str(self.workspace)},
+                                {"repository": "Saber5656/Agents"}, proof)
 
     def test_verifier_error_keeps_successful_implementation_needing_verification(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
