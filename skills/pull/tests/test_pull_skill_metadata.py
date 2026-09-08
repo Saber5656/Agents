@@ -11,12 +11,20 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 class PullSkillMetadataTest(unittest.TestCase):
     def test_skill_description_triggers_pull_phrases(self) -> None:
         text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-        for phrase in ["プルして", "pullして", "全リポジトリをプルして", "fetch and merge"]:
+        for phrase in [
+            "Fetch and safely synchronize",
+            "currently requested local repository",
+            "do not broaden a short pull request",
+        ]:
             self.assertIn(phrase, text)
 
     def test_skill_documents_safety_boundaries(self) -> None:
         text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-        for phrase in ["push | forbidden", "`git reset --hard` | forbidden", "conflict auto-resolution | forbidden"]:
+        for phrase in [
+            "Do not automatically commit, stash, reset or delete local work",
+            "This skill does not push",
+            "preserve the state and record the concrete reconciliation needed",
+        ]:
             self.assertIn(phrase, text)
 
     def test_evals_cover_positive_and_negative_cases(self) -> None:

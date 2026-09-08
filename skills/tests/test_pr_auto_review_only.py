@@ -20,19 +20,16 @@ class PrAutomaticReviewOnlyTests(unittest.TestCase):
             self.assertNotIn(forbidden, public_contract)
 
     def test_repository_automation_owns_normal_review_trigger(self) -> None:
-        normalized_skill = " ".join(SKILL_TEXT.split())
-        self.assertIn("Repository configuration owns the normal review trigger", normalized_skill)
-        self.assertIn("never posts a comment-based fallback", normalized_skill)
-        self.assertIn(
-            "No PR comment was used to trigger Codex review",
-            normalized_skill,
-        )
+        normalized_contract = " ".join(f"{SKILL_TEXT}\n{README_TEXT}".split())
+        self.assertIn("Do not manually trigger additional review bots by default", normalized_contract)
+        self.assertIn("repository policy remain gates", normalized_contract)
+        self.assertIn("does not block a normal-risk PR", normalized_contract)
 
     def test_missing_review_is_resumable_without_comment_retrigger(self) -> None:
-        self.assertIn("review_pending", SKILL_TEXT)
-        self.assertIn("review_timeout", SKILL_TEXT)
-        self.assertIn("without posting a trigger comment", SKILL_TEXT)
-        self.assertIn("do not post a trigger comment", SKILL_TEXT)
+        normalized_contract = " ".join(f"{SKILL_TEXT}\n{README_TEXT}".split())
+        self.assertIn("If a conditional review is delayed or unavailable, it reports the typed state", normalized_contract)
+        self.assertIn("optional review does not block a normal-risk PR", normalized_contract)
+        self.assertIn("removed comment fallback", normalized_contract)
 
     def test_explicit_fallback_request_is_refused_by_eval(self) -> None:
         fallback_eval = next(item for item in EVALS["evals"] if item["id"] == 16)
@@ -56,7 +53,7 @@ class PrAutomaticReviewOnlyTests(unittest.TestCase):
             self.assertIn(marker, contract)
 
     def test_direct_reviewer_request_compatibility_is_preserved(self) -> None:
-        self.assertIn("Direct reviewer requests remain optional compatibility behavior", SKILL_TEXT)
+        self.assertIn("Existing optional direct reviewer-request compatibility remains separate", README_TEXT)
         reviewer_eval = next(item for item in EVALS["evals"] if item["id"] == 7)
         self.assertIn("reviewer-request failure", reviewer_eval["expected_output"])
         self.assertIn(

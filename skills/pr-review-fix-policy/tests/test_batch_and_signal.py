@@ -327,9 +327,10 @@ class WorkflowSafetyTests(unittest.TestCase):
         skill = (ROOT / "SKILL.md").read_text()
         readme = (ROOT / "README.md").read_text()
         for phrase in [
-            "commit-status方式はruntime v1では廃止済み",
+            "commit-status方式",
             "review-intake/signal",
-            "github_observe:review_threads",
+            "statusを書かないでください",
+            "review到着・clean・merge-ready",
         ]:
             self.assertIn(phrase, skill + "\n" + readme)
 

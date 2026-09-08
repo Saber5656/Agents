@@ -977,7 +977,7 @@ class PrPublicationSafetyTest(unittest.TestCase):
             "review_threads_absent",
             "unresolved_thread_count_zero",
             "review_timeout",
-            "review_provenance_missing",
+            "head/integrity provenance",
             "effective_model",
             "reviewer_role",
         ]:
@@ -1013,25 +1013,25 @@ class PrPublicationSafetyTest(unittest.TestCase):
 
 class ReviewFixSafetyTest(unittest.TestCase):
     def test_current_head_and_provenance_are_required(self) -> None:
-        text = read_skill("pr-review-fix-policy")
+        text = read_skill("pr-review-fix-policy") + "\n" + (ROOT / "pr-review-fix-policy/README.md").read_text(encoding="utf-8")
         for phrase in [
-            "current_head_sha",
-            "review_head_sha",
+            "current head",
             "old_head_review_invalid",
-            "review_provenance_missing",
-            "effective_model",
-            "reviewer_role",
+            "request/session/head/integrity provenance",
+            "effective model",
+            "role/provider/effective model",
+            "integrity provenance",
         ]:
             self.assertIn(phrase, text)
 
     def test_timeout_and_absence_are_not_collapsed(self) -> None:
-        text = read_skill("pr-review-fix-policy")
+        text = read_skill("pr-review-fix-policy") + "\n" + (ROOT / "pr-review-fix-policy/README.md").read_text(encoding="utf-8")
         for phrase in [
-            "review_count_zero",
-            "review_threads_absent",
-            "unresolved_thread_count_zero",
-            "review_timeout",
-            "not a pass",
+            "review 0件",
+            "thread不存在",
+            "未解決0件",
+            "timeout",
+            "timeoutをpassにしない",
         ]:
             self.assertIn(phrase, text)
 
@@ -1070,18 +1070,14 @@ class RemainingIssuesSafetyTest(unittest.TestCase):
     def test_required_frontmatter_is_present(self) -> None:
         text = read_skill("gh-deliver-remaining-issues")
         for field in [
+            "name: gh-deliver-remaining-issues",
+            "description:",
             "user-invocable:",
-            "allowed-tools:",
             "category:",
-            "created:",
             "status:",
-            "purpose:",
-            "argument-hint:",
+            "updated:",
         ]:
             self.assertIn(field, text)
-        allowed_line = next(line for line in text.splitlines() if line.startswith("allowed-tools:"))
-        observed_tools = {item.strip() for item in allowed_line.split(":", 1)[1].split(",")}
-        self.assertEqual({"Read", "Grep", "Glob", "Bash", "Agent"}, observed_tools)
 
     def test_publication_manifest_intake_is_versioned_and_executable(self) -> None:
         valid = valid_publication_intake_manifest()

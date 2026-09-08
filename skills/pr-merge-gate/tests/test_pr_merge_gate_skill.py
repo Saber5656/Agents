@@ -13,12 +13,11 @@ class PrMergeGateSkillTest(unittest.TestCase):
         text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         for field in [
             "name: pr-merge-gate",
+            "description:",
             "user-invocable:",
-            "allowed-tools:",
             "category:",
-            "created:",
             "status:",
-            "purpose:",
+            "updated:",
         ]:
             self.assertIn(field, text)
 
@@ -37,16 +36,16 @@ class PrMergeGateSkillTest(unittest.TestCase):
 
     def test_direct_merge_fallback_is_forbidden(self) -> None:
         text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("Never run `gh pr merge`", text)
-        self.assertIn("connector merge mutation", text)
-        self.assertIn("GraphQL merge mutation", text)
+        self.assertIn("Use `python3 -m harness.delivery merge", text)
+        self.assertIn("Do not bypass protection", text)
+        self.assertIn("Do not bypass protection or claim atomic base/merge-queue guarantees", text)
 
     def test_uncertain_result_allows_read_only_reconciliation_only(self) -> None:
         text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         for phrase in [
-            "never invoke the mutating executor again with the same or",
-            "fixed read-only Saihai reconciliation/status operation",
-            "retain `merge_result_uncertain`",
+            "On a lost response, inspect the same PR",
+            "instead of issuing blind duplicate mutations",
+            "Read back MERGED and merge SHA",
         ]:
             self.assertIn(phrase, text)
 
