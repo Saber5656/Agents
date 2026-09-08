@@ -4,7 +4,9 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
-from harness.delivery import public_text, prepare_worktree, sync_main, merge_ready, DeliveryError, issue_body, GitHub
+from harness.delivery import (public_text, public_git_changes, prepare_worktree,
+                              sync_main, merge_ready, DeliveryError, issue_body,
+                              GitHub)
 
 
 def git(cwd,*args):
@@ -187,10 +189,132 @@ class DeliveryTests(unittest.TestCase):
             with self.assertRaises(DeliveryError):client.merge(1,'a'*40,'b'*40)
             sent.assert_not_called()
 
+    def test_current_check_or_policy_discovery_failure_never_mutates(self):
+        client = GitHub('fixture/repository'); state = self.state()
+        with patch.object(client, 'pr', return_value=state), \
+             patch.object(client, 'required_checks', side_effect=DeliveryError('discovery unavailable')), \
+             patch('harness.delivery.command') as sent:
+            with self.assertRaisesRegex(DeliveryError, 'discovery unavailable'):
+                client.merge(1, 'a' * 40, 'b' * 40)
+            sent.assert_not_called()
+
+        failed = state | {'statusCheckRollup': [{'name': 'test', 'conclusion': 'FAILURE'}]}
+        with patch.object(client, 'pr', return_value=failed), \
+             patch.object(client, 'required_checks', return_value=['test']), \
+             patch.object(client, 'threads', return_value=[]), \
+             patch('harness.delivery.command') as sent:
+            with self.assertRaises(DeliveryError): client.merge(1, 'a' * 40, 'b' * 40)
+            sent.assert_not_called()
+
     def test_issue_marker_is_stable_and_english(self):
         body=issue_body('task-1','Expected result',['Run the fixture'])
         self.assertIn('<!-- agents-local-task:task-1 -->',body)
         with self.assertRaises(DeliveryError):issue_body('task-1','日本語',['Run'])
+
+    def test_public_git_changes_checks_unpublished_commit_and_diff(self):
+        branch = self.root / 'task'
+        git(self.root, 'clone', str(self.repo), str(branch))
+        git(branch, 'config', 'user.name', 'Fixture')
+        git(branch, 'config', 'user.email', 'fixture@example.invalid')
+        (branch / 'public').write_text('relative fixture')
+        git(branch, 'add', 'public'); git(branch, 'commit', '-m', 'Document the fixture')
+        head = git(branch, 'rev-parse', 'HEAD')
+        self.assertIn('relative fixture', public_git_changes(branch, self.base, head))
+        (branch / 'leak').write_text('/home/alice')
+        git(branch, 'add', 'leak'); git(branch, 'commit', '-m', 'Add private path')
+        leaked = git(branch, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(DeliveryError, 'home path'):
+            public_git_changes(branch, self.base, leaked)
+        (branch / 'clean').write_text('relative')
+        git(branch, 'add', 'clean'); git(branch, 'commit', '-m', 'Token ghp_' + 'x' * 30)
+        history_leak = git(branch, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(DeliveryError, 'Secret'):
+            public_git_changes(branch, self.base, history_leak)
+
+    def test_push_branch_uses_exact_oid_and_rejects_default_branch(self):
+        remote = self.root / 'remote.git'; git(self.root, 'init', '--bare', str(remote))
+        git(self.repo, 'remote', 'add', 'origin', str(remote))
+        branch = self.root / 'task'; git(self.repo, 'switch', '-c', 'task/publish')
+        (self.repo / 'published').write_text('ready')
+        git(self.repo, 'add', 'published'); git(self.repo, 'commit', '-m', 'Publish fixture')
+        head = git(self.repo, 'rev-parse', 'HEAD')
+        result = GitHub('fixture/repository').push_branch(self.repo, 'task/publish', head)
+        self.assertEqual(head, result['remote_head'])
+        self.assertEqual(head, git(self.repo, 'ls-remote', '--heads', 'origin', 'task/publish').split()[0])
+        with self.assertRaisesRegex(DeliveryError, 'task branch'):
+            GitHub('fixture/repository').push_branch(self.repo, 'main', self.base)
+
+    def test_push_branch_preserves_unrelated_dirty_files(self):
+        remote = self.root / 'remote.git'; git(self.root, 'init', '--bare', str(remote))
+        git(self.repo, 'remote', 'add', 'origin', str(remote)); git(self.repo, 'switch', '-c', 'task/dirty')
+        (self.repo / 'published').write_text('ready')
+        git(self.repo, 'add', 'published'); git(self.repo, 'commit', '-m', 'Publish fixture')
+        (self.repo / 'other-task').write_text('keep')
+        head = git(self.repo, 'rev-parse', 'HEAD')
+        result = GitHub('fixture/repository').push_branch(self.repo, 'task/dirty', head)
+        self.assertEqual(['?? other-task'], result['unrelated_dirty'])
+        self.assertEqual('keep', (self.repo / 'other-task').read_text())
+
+    def test_push_branch_rejects_committed_out_of_scope_path(self):
+        remote = self.root / 'remote.git'; git(self.root, 'init', '--bare', str(remote))
+        git(self.repo, 'remote', 'add', 'origin', str(remote)); git(self.repo, 'switch', '-c', 'task/scope')
+        (self.repo / 'unexpected').write_text('outside')
+        git(self.repo, 'add', 'unexpected'); git(self.repo, 'commit', '-m', 'Outside selected scope')
+        head = git(self.repo, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(DeliveryError, 'out-of-scope'):
+            GitHub('fixture/repository').push_branch(self.repo, 'task/scope', head,
+                                                     base=self.base, allowed_paths=['harness'])
+
+    def test_push_branch_rejects_changed_remote_before_mutation(self):
+        remote = self.root / 'remote.git'; other = self.root / 'other.git'
+        git(self.root, 'init', '--bare', str(remote)); git(self.root, 'init', '--bare', str(other))
+        git(self.repo, 'remote', 'add', 'origin', str(remote)); git(self.repo, 'switch', '-c', 'task/remote')
+        (self.repo / 'published').write_text('ready')
+        git(self.repo, 'add', 'published'); git(self.repo, 'commit', '-m', 'Publish fixture')
+        head = git(self.repo, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(DeliveryError, 'destination changed'):
+            GitHub('fixture/repository').push_branch(self.repo, 'task/remote', head,
+                                                     expected_remote=str(other))
+        self.assertEqual('', git(self.repo, 'ls-remote', '--heads', 'origin', 'task/remote'))
+
+    def test_create_or_reuse_pr_reconciles_lost_create_without_duplicate(self):
+        client = GitHub('fixture/repository')
+        pr = {'number': 9, 'url': 'https://example.invalid/pr/9', 'state': 'OPEN',
+              'baseRefName': 'main', 'headRefName': 'task/publish',
+              'headRefOid': 'a' * 40, 'title': 'English title', 'body': 'English body'}
+        calls = []
+        def fake(argv, cwd=None):
+            calls.append(argv)
+            if argv[:3] == ['gh', 'pr', 'list']:
+                return '[]' if len([x for x in calls if x[:3] == ['gh', 'pr', 'list']]) == 1 else json.dumps([pr])
+            if argv[:3] == ['gh', 'pr', 'create']:
+                raise DeliveryError('transport response lost')
+            raise AssertionError(argv)
+        with patch('harness.delivery.command', side_effect=fake):
+            result = client.create_or_reuse_pr('task/publish', 'main', 'English title', 'English body')
+        self.assertEqual(pr, result)
+        self.assertEqual(1, len([x for x in calls if x[:3] == ['gh', 'pr', 'create']]))
+
+    def test_stale_empty_listing_after_create_is_uncertain_and_never_retried(self):
+        client = GitHub('fixture/repository'); calls = []
+        def fake(argv, cwd=None):
+            calls.append(argv)
+            if argv[:3] == ['gh', 'pr', 'list']: return '[]'
+            if argv[:3] == ['gh', 'pr', 'create']: return 'https://example.invalid/pr/10'
+            raise AssertionError(argv)
+        with patch('harness.delivery.command', side_effect=fake), \
+             self.assertRaisesRegex(DeliveryError, 'outcome unknown'):
+            client.create_or_reuse_pr('task/publish', 'main', 'English title', 'English body')
+        self.assertEqual(1, len([x for x in calls if x[:3] == ['gh', 'pr', 'create']]))
+
+    def test_merge_lost_response_reads_back_merged_pr(self):
+        client = GitHub('fixture/repository'); state = self.state()
+        merged = state | {'state': 'MERGED', 'mergeCommit': {'oid': 'd' * 40}}
+        with patch.object(client, 'pr', side_effect=[state, state, merged]), \
+             patch.object(client, 'required_checks', return_value=[]), \
+             patch.object(client, 'threads', side_effect=[[], []]), \
+             patch('harness.delivery.command', side_effect=[DeliveryError('response lost')]):
+            self.assertEqual(merged, client.merge(1, 'a' * 40, 'b' * 40))
 
 
 if __name__=='__main__':unittest.main()
