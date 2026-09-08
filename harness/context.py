@@ -264,6 +264,12 @@ class VaultContext:
             return visible
         if isinstance(value, list):
             return [item for item in (VaultContext._visible(item) for item in value) if item is not None]
+        if isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+            try:
+                decoded = json.loads(value)
+            except ValueError:
+                return value
+            return json.dumps(VaultContext._visible(decoded), ensure_ascii=False)
         return value
 
     def _index_path(self):
@@ -299,21 +305,24 @@ class VaultContext:
                     })["records"].append(item)
             generation = uuid.uuid4().hex
             stream_records = list(streams.get(stream, {}).get("records", []))
+            records_index = list(old.get("records", []))
             for offset in range(0, len(text) or 1, self.chunk_size):
                 part = text[offset:offset + self.chunk_size]
                 number = offset // self.chunk_size
                 path = self.run_dir / f"{stream}-{generation}-{number:04d}.jsonl"
                 _atomic_write(path, part)
-                stream_records.append({"stream": stream, "path": path.name,
-                                       "size": len(part.encode()),
-                                       "availability": "complete" if complete else "available"})
+                entry = {"stream": stream, "path": path.name,
+                         "size": len(part.encode()),
+                         "availability": "complete" if complete else "available",
+                         "truncation": truncation or "none"}
+                stream_records.append(entry)
+                records_index.append(entry)
             streams[stream] = {"records": stream_records, "complete": bool(complete),
                                "truncation": truncation or "none"}
-            records_index = [item for status in streams.values() for item in status.get("records", [])]
             complete_all = bool(streams) and all(status.get("complete") is True for status in streams.values())
             truncations = {name: status.get("truncation", "none") for name, status in streams.items()
                            if status.get("truncation", "none") != "none"}
-            value = {"streams": streams, "records": sorted(records_index, key=lambda item: item["path"]),
+            value = {"streams": streams, "records": records_index,
                      "complete": complete_all,
                      "truncation": (next(iter(truncations.values())) if len(truncations) == 1 else truncations or "none")}
             _atomic_write(self._index_path(), json.dumps(value, ensure_ascii=False, indent=2) + "\n")

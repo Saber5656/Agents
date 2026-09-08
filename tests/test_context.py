@@ -101,6 +101,32 @@ def test_context_keeps_append_only_generations_and_stream_completion(tmp_path):
     assert "first" in contents and "second" in contents
 
 
+def test_serialized_tool_result_excludes_nested_reasoning(tmp_path):
+    context = VaultContext(tmp_path, "run")
+    payload = json.dumps({"events": [
+        {"type": "reasoning", "text": "private nested rationale"},
+        {"channel": "analysis", "text": "private analysis payload"},
+        {"type": "message", "text": "visible observation"},
+    ]})
+    result = context.save_records("tools", [{"output": payload}], complete=True)
+    raw = "".join((context.run_dir / r["path"]).read_text() for r in result["records"])
+    assert "private nested rationale" not in raw
+    assert "private analysis payload" not in raw
+    assert "visible observation" in raw
+
+
+def test_stream_generations_retain_observed_order(tmp_path, monkeypatch):
+    import harness.context as module
+    from types import SimpleNamespace
+    ids = iter(["z" * 32, "a" * 32])
+    monkeypatch.setattr(module.uuid, "uuid4", lambda: SimpleNamespace(hex=next(ids)))
+    context = VaultContext(tmp_path, "run")
+    context.save_records("stdout", [{"text": "first observation"}])
+    result = context.save_records("stdout", [{"text": "second observation"}])
+    raw = "".join((context.run_dir / r["path"]).read_text() for r in result["records"])
+    assert raw.index("first observation") < raw.index("second observation")
+
+
 def test_context_serializes_concurrent_stream_index_updates(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()
