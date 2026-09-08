@@ -62,6 +62,7 @@ def test_visible_context_chunks_redacts_and_excludes_reasoning(tmp_path, monkeyp
         [
             {"type": "message", "channel": "commentary", "text": "fixture-secret-value"},
             {"type": "reasoning", "text": "private thought"},
+            {"type": "event", "payload": {"type": "reasoning", "text": "nested private thought"}},
             {"type": "message", "channel": "commentary", "text": "long output " + "x" * 80},
         ],
         complete=False,
@@ -73,6 +74,7 @@ def test_visible_context_chunks_redacts_and_excludes_reasoning(tmp_path, monkeyp
     assert len(index["records"]) > 1
     raw = "".join(Path(vault / "run-1" / row["path"]).read_text() for row in index["records"])
     assert "private thought" not in raw
+    assert "nested private thought" not in raw
     assert "fixture-secret-value" not in raw
     assert "[REDACTED]" in raw
     for stream in ("stderr", "diff"):

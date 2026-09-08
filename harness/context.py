@@ -223,8 +223,14 @@ class VaultContext:
         if isinstance(value, dict):
             if value.get("type") == "reasoning" or value.get("channel") == "analysis":
                 return None
-            return {key: VaultContext._visible(item) for key, item in value.items()
-                    if key != "encrypted_content"}
+            visible = {}
+            for key, item in value.items():
+                if key == "encrypted_content":
+                    continue
+                cleaned = VaultContext._visible(item)
+                if cleaned is not None:
+                    visible[key] = cleaned
+            return visible
         if isinstance(value, list):
             return [item for item in (VaultContext._visible(item) for item in value) if item is not None]
         return value
