@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import difflib
 import os
 import subprocess
 import sys
@@ -189,6 +190,60 @@ class StageApprovedPatchTest(unittest.TestCase):
             self.assertNotIn("line 21 task", reverted_content)
             self.assertIn("line 2\n", reverted_content)
             self.assertEqual(0, run(["git", "worktree", "remove", str(reverted)], cwd=repo).returncode)
+
+    def test_two_purposes_are_independently_reversible_with_mixed_primary_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); repo = self.init_repo(root)
+            path = repo / "logic.py"
+            original = ("# initial header\n" + "\n" * 8
+                        + "def first():\n    return 0  # first\n" + "\n" * 12
+                        + "def second():\n    return 0  # second\n" + "\n" * 8
+                        + "# initial footer\n")
+            path.write_text(original)
+            self.assertEqual(0, run(["git", "add", "logic.py"], cwd=repo).returncode)
+            self.assertEqual(0, run(["git", "commit", "-m", "fixture baseline"], cwd=repo).returncode)
+            path.write_text(original.replace("initial header", "unrelated staged header"))
+            self.assertEqual(0, run(["git", "add", "logic.py"], cwd=repo).returncode)
+            primary_index = (repo / ".git/index").read_bytes()
+            working = (path.read_text().replace("initial footer", "unrelated unstaged footer")
+                       .replace("return 0  # first", "return 1  # first")
+                       .replace("return 0  # second", "return 2  # second"))
+            path.write_text(working)
+            commits = []
+            for function, value, expected in (("first", 1, (1, 0)), ("second", 2, (1, 2))):
+                before = run(["git", "show", "HEAD:logic.py"], cwd=repo).stdout
+                after = before.replace(f"return 0  # {function}", f"return {value}  # {function}")
+                patch = root / (function + ".patch")
+                patch.write_text("".join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
+                                                           fromfile="a/logic.py", tofile="b/logic.py")))
+                alternate = root / (function + ".index")
+                env = dict(os.environ, GIT_INDEX_FILE=str(alternate))
+                prepared = subprocess.run(["git", "read-tree", "HEAD"], cwd=repo, env=env, capture_output=True)
+                self.assertEqual(0, prepared.returncode)
+                staged = run([sys.executable, str(SCRIPT), "--repo", str(repo), "--patch", str(patch),
+                              "--owned-path", "logic.py", "--index-file", str(alternate)])
+                self.assertEqual(0, staged.returncode, staged.stderr)
+                preview = subprocess.check_output(["git", "show", ":logic.py"], cwd=repo, env=env, text=True)
+                self.assertEqual(after, preview)
+                namespace = {}; exec(compile(preview, "reviewed-fixture", "exec"), namespace)
+                self.assertEqual(expected, (namespace["first"](), namespace["second"]()))
+                # These exact-scope and functional checks are the recorded
+                # pre-commit review for each disposable fixture purpose.
+                (root / (function + "-review.json")).write_text(json.dumps({
+                    "scope_matches": True, "expected_behavior": expected, "reviewed_before_commit": True}))
+                committed = subprocess.run(["git", "commit", "-m", "fix fixture " + function],
+                                           cwd=repo, env=env, capture_output=True)
+                self.assertEqual(0, committed.returncode, committed.stderr)
+                commits.append(run(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip())
+                self.assertEqual(primary_index, (repo / ".git/index").read_bytes())
+                self.assertEqual(working.encode(), path.read_bytes())
+            for index, expected in ((0, (0, 2)), (1, (1, 0))):
+                reverted = root / ("revert-" + str(index))
+                self.assertEqual(0, run(["git", "worktree", "add", "--detach", str(reverted), "HEAD"], cwd=repo).returncode)
+                self.assertEqual(0, run(["git", "revert", "--no-edit", commits[index]], cwd=reverted).returncode)
+                namespace = {}; exec(compile((reverted / "logic.py").read_text(), "reverted-fixture", "exec"), namespace)
+                self.assertEqual(expected, (namespace["first"](), namespace["second"]()))
+                self.assertEqual(0, run(["git", "worktree", "remove", str(reverted)], cwd=repo).returncode)
 
     def test_empty_patch_and_conflict_are_blocked_without_index_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
