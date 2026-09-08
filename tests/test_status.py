@@ -1,4 +1,5 @@
 import json
+import ast
 import os
 from pathlib import Path
 import sqlite3
@@ -68,14 +69,14 @@ class StatusTests(unittest.TestCase):
         self.assertEqual({task["purpose"]: task["lifecycle"] for task in result["tasks"]}, {
             "running": "running", "auth": "auth_failed", "quality": "quality_failed",
             "awaiting": "awaiting_user", "merged unsynced": "merged_unsynced",
-            "complete": "complete", "provider exit zero": "awaiting_verification",
-            "verified": "verified",
+            "complete": "awaiting_verification", "provider exit zero": "awaiting_verification",
+            "verified": "awaiting_verification",
             "expired issue claim": "planned",
         })
         complete_view = next(task for task in result["tasks"] if task["purpose"] == "complete")
         self.assertEqual(complete_view["issueization"]["state"], "issued")
         self.assertEqual(complete_view["stages"]["acceptance"], "verified")
-        self.assertEqual(complete_view["stages"]["publication"], "issued")
+        self.assertEqual(complete_view["stages"]["publication"], "unknown")
         self.assertEqual(complete_view["work_units"], ["wu-1"])
         self.assertEqual(complete_view["prs"][0]["url"], "https://github.com/org/repo/pull/12")
         stranded_view = next(task for task in result["tasks"] if task["purpose"] == "expired issue claim")
@@ -83,6 +84,121 @@ class StatusTests(unittest.TestCase):
         self.assertFalse(result["complete"])
         self.assertEqual(result["diagnostics"]["drift"]["state"], "unknown")
         self.assertTrue(any("acceptance" in item["action"] for item in result["next_actions"]))
+
+    def test_issueization_does_not_imply_publication_or_preempt_planned_work(self):
+        with self.store() as store:
+            task = store.create_task(purpose="still needs implementation", repository="org/repo")
+            claim = store.claim_issueization(task["id"], "batch")
+            store.link_issue(task["id"], "org/repo", 21,
+                             "https://github.com/org/repo/issues/21",
+                             claim_token=claim["claim_token"], verified=True,
+                             readback={"repository": "org/repo", "number": 21,
+                                       "url": "https://github.com/org/repo/issues/21"})
+
+        task_view = build_status(db_path=self.db, service_db_path=None)["tasks"][0]
+        self.assertEqual(task_view["issueization"]["state"], "issued")
+        self.assertEqual(task_view["stages"]["issueization"], "issued")
+        self.assertEqual(task_view["stages"]["publication"], "unknown")
+        self.assertEqual(task_view["next_action"], "start or resume the planned task before issueization")
+
+    def test_malformed_or_naive_claim_expiry_is_unknown(self):
+        with self.store() as store:
+            malformed = store.create_task(purpose="malformed claim")
+            naive = store.create_task(purpose="naive claim")
+            store.claim_issueization(malformed["id"], "batch")
+            store.claim_issueization(naive["id"], "batch")
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("UPDATE tasks SET claim_expires_at=? WHERE purpose=?",
+                         ("not-a-time", "malformed claim"))
+            conn.execute("UPDATE tasks SET claim_expires_at=? WHERE purpose=?",
+                         ("2026-01-01T00:00:00", "naive claim"))
+            conn.commit()
+
+        result = build_status(db_path=self.db, service_db_path=None)
+        views = {task["purpose"]: task for task in result["tasks"]}
+        for purpose in ("malformed claim", "naive claim"):
+            self.assertEqual(views[purpose]["issueization"]["state"], "unknown")
+            self.assertEqual(views[purpose]["issueization"]["timestamp_state"], "unknown")
+            self.assertIn("inspect", views[purpose]["next_action"])
+
+    def test_explicit_publication_receipt_drives_publication_stage(self):
+        receipt = self.root / "vault" / "publication-receipt.json"
+        commit = "a" * 40
+        receipt.write_text(json.dumps({
+            "review": {"acceptance": True, "criteria": [{"evidence": "acceptance"}]},
+            "publication_readback": {
+                "repository": "org/repo", "commit": commit, "main": commit,
+                "commit_is_ancestor": True, "merge_base": commit,
+            },
+        }))
+        with self.store() as store:
+            task = store.create_task(
+                purpose="published with receipt", repository="org/repo",
+                execution_status="completed", acceptance_evidence=["acceptance"],
+                completion_evidence=[str(receipt)])
+            store.add_acceptance_evidence(task["id"], "acceptance", verified=True)
+            claim = store.claim_issueization(task["id"], "batch")
+            store.link_issue(task["id"], "org/repo", 22,
+                             "https://github.com/org/repo/issues/22",
+                             claim_token=claim["claim_token"], verified=True,
+                             readback={"repository": "org/repo", "number": 22,
+                                       "url": "https://github.com/org/repo/issues/22"})
+
+        task_view = build_status(db_path=self.db, service_db_path=None)["tasks"][0]
+        self.assertEqual(task_view["stages"]["issueization"], "issued")
+        self.assertEqual(task_view["stages"]["publication"], "main_synced")
+        self.assertEqual(task_view["publication_evidence"]["receipt"], str(receipt))
+
+    def test_publication_receipt_states_distinguish_merged_and_pushed(self):
+        merged_receipt = self.root / "vault" / "merged-receipt.json"
+        commit = "b" * 40
+        merged_receipt.write_text(json.dumps({
+            "publication_readback": {
+                "repository": "org/repo", "commit": commit, "main": "c" * 40,
+                "commit_is_ancestor": True, "merge_base": commit,
+            },
+        }))
+        pushed_receipt = self.root / "vault" / "pushed-receipt.json"
+        pushed_receipt.write_text(json.dumps({
+            "stage": "pushed", "status": "published", "published_sha": "d" * 40,
+        }))
+        with self.store() as store:
+            merged = store.create_task(
+                purpose="merged with receipt", repository="org/repo", execution_status="completed",
+                acceptance_evidence=["acceptance"], completion_evidence=[str(merged_receipt)])
+            pushed = store.create_task(
+                purpose="pushed with receipt", repository="org/repo", execution_status="completed",
+                acceptance_evidence=["acceptance"], completion_evidence=[str(pushed_receipt)])
+            for task in (merged, pushed):
+                store.add_acceptance_evidence(task["id"], "acceptance", verified=True)
+
+        views = {task["purpose"]: task for task in build_status(
+            db_path=self.db, service_db_path=None)["tasks"]}
+        self.assertEqual(views["merged with receipt"]["stages"]["publication"], "merged")
+        self.assertEqual(views["pushed with receipt"]["stages"]["publication"], "published")
+
+    def test_reads_current_service_schema_read_only(self):
+        service_source = Path(__file__).parents[2] / "agents-service" / "harness" / "service.py"
+        tree = ast.parse(service_source.read_text())
+        schema_node = next(node.value for node in tree.body
+                           if isinstance(node, ast.Assign)
+                           and any(isinstance(target, ast.Name) and target.id == "SCHEMA"
+                                   for target in node.targets))
+        schema = ast.literal_eval(schema_node)
+        service_db = self.root / ".local" / "service-current.sqlite3"
+        service_db.parent.mkdir()
+        with sqlite3.connect(service_db) as conn:
+            conn.executescript(schema)
+            conn.execute("INSERT INTO service_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         ("job-current", "task-x", str(self.root / "work"), str(self.root / "run"),
+                          "default", "prompt", "context", "gpt-5.6-luna", "low", 10, 1, 60,
+                          "pending", 0, None, None, "2026-01-01", "2026-01-01"))
+            conn.commit()
+        before = service_db.read_bytes()
+        report = build_status(db_path=None, service_db_path=service_db)
+        self.assertEqual(report["service"]["state"], "available")
+        self.assertEqual(report["service"]["jobs"][0]["id"], "job-current")
+        self.assertEqual(service_db.read_bytes(), before)
 
     def test_service_jobs_show_retry_hold_usage_and_errors_without_writes(self):
         service_db = self.root / ".local" / "service.sqlite3"

@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import sqlite3
 from urllib.parse import quote
 
@@ -13,11 +14,14 @@ def _now():
 
 
 def _parse_time(value):
-    if not value:
+    if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed
+    except (AttributeError, TypeError, ValueError, OverflowError):
         return None
 
 
@@ -62,7 +66,19 @@ def _row_values(connection, query, args=()):
 
 def _issueization(task, now):
     state = task.get("issueization_state") or "unknown"
-    expires = _parse_time(task.get("claim_expires_at"))
+    raw_expires = task.get("claim_expires_at")
+    expires = _parse_time(raw_expires)
+    if state == "claimed" and (not raw_expires or expires is None):
+        return {
+            "state": "unknown",
+            "raw_state": state,
+            "claim_owner": task.get("claim_owner"),
+            "claim_expires_at": raw_expires,
+            "attempts": task.get("issueization_attempts", 0),
+            "error": task.get("issueization_error"),
+            "last_batch_result": "claim_expiry_unknown",
+            "timestamp_state": "unknown",
+        }
     if state == "claimed" and expires and expires <= now:
         return {
             "state": "reconcile_needed",
@@ -72,6 +88,7 @@ def _issueization(task, now):
             "attempts": task.get("issueization_attempts", 0),
             "error": task.get("issueization_error"),
             "last_batch_result": task.get("issueization_error") or "claim_expired",
+            "timestamp_state": "valid",
         }
     return {
         "state": state,
@@ -81,10 +98,92 @@ def _issueization(task, now):
         "attempts": task.get("issueization_attempts", 0),
         "error": task.get("issueization_error"),
         "last_batch_result": task.get("issueization_error") or ("issued" if state == "issued" else None),
+        "timestamp_state": "valid" if raw_expires else None,
     }
 
 
-def _lifecycle(task, acceptance, completion):
+def _publication_evidence(task, completion):
+    """Classify publication only from a readable, explicit receipt."""
+    repository = task.get("repository")
+    candidates = []
+    for value in completion:
+        if not isinstance(value, str):
+            continue
+        path = Path(value)
+        if not path.is_file():
+            continue
+        try:
+            receipt = json.loads(path.read_text())
+        except (OSError, UnicodeError, TypeError, ValueError):
+            continue
+        if not isinstance(receipt, dict):
+            continue
+        readback = receipt.get("publication_readback")
+        if not isinstance(readback, dict):
+            continue
+        candidates.append((path, readback))
+
+    for path, readback in candidates:
+        commit = readback.get("commit")
+        if (not repository
+                or (readback.get("repository") is not None
+                    and readback.get("repository") != repository)
+                or not isinstance(commit, str)
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", commit)):
+            continue
+        main = readback.get("main")
+        if main == commit:
+            state = "main_synced"
+        elif (readback.get("commit_is_ancestor") is True
+              and readback.get("merge_base") == commit):
+            state = "merged"
+        else:
+            continue
+        return {
+            "state": state,
+            "receipt": str(path),
+            "publication_readback": readback,
+            "reason": "explicit publication receipt readback",
+        }
+
+    # The scoped publisher records its own durable receipt rather than the
+    # service acceptance wrapper.  Bind it to the task's repository and only
+    # accept stages that contain a full commit identity.
+    for value in completion:
+        if not isinstance(value, str):
+            continue
+        path = Path(value)
+        if not path.is_file():
+            continue
+        try:
+            receipt = json.loads(path.read_text())
+        except (OSError, UnicodeError, TypeError, ValueError):
+            continue
+        if not isinstance(receipt, dict) or not repository:
+            continue
+        published = receipt.get("published_sha")
+        main_sha = receipt.get("main_sha")
+        stage = receipt.get("stage")
+        status = receipt.get("status")
+        if stage == "main_synced" and isinstance(main_sha, str) and re.fullmatch(r"[0-9a-fA-F]{40}", main_sha):
+            return {"state": "main_synced", "receipt": str(path),
+                    "publication_readback": receipt,
+                    "reason": "explicit publication receipt main sync"}
+        if (stage == "pushed" and status in {"published", "success"}
+                and isinstance(published, str)
+                and re.fullmatch(r"[0-9a-fA-F]{40}", published)):
+            return {"state": "published", "receipt": str(path),
+                    "publication_readback": receipt,
+                    "reason": "explicit publication receipt remote readback"}
+    return {
+        "state": "unknown",
+        "receipt": None,
+        "publication_readback": None,
+        "reason": "no valid publication receipt readback was found",
+    }
+
+
+def _lifecycle(task, acceptance, completion, publication_state="unknown"):
     raw = (task.get("execution_status") or "unknown").lower()
     if raw in {"running", "collecting", "reviewing", "publishing"}:
         return "running"
@@ -98,7 +197,7 @@ def _lifecycle(task, acceptance, completion):
         return "merged_unsynced"
     if raw in {"published", "merged", "usable", "verified", "completed", "complete"}:
         verified = bool(acceptance) and all(item["verified"] for item in acceptance)
-        if verified and completion:
+        if verified and completion and publication_state != "unknown":
             return "usable" if raw == "usable" else raw if raw in {"verified", "published", "merged"} else "complete"
         return "awaiting_verification"
     if raw in {"planned", "assigned", "queued", "pending"}:
@@ -109,6 +208,8 @@ def _lifecycle(task, acceptance, completion):
 def _next_action(lifecycle, issueization):
     if issueization["state"] == "reconcile_needed":
         return "reconcile the remote Issue outcome before retrying issueization"
+    if issueization["state"] == "unknown" and issueization.get("raw_state") == "claimed":
+        return "inspect the claimed Issue outcome and expiry before resuming issueization"
     if lifecycle == "running":
         return "wait for the worker update or inspect the persisted attempt"
     if lifecycle == "auth_failed":
@@ -121,6 +222,8 @@ def _next_action(lifecycle, issueization):
         return "sync main and verify the merged result"
     if lifecycle == "awaiting_verification":
         return "record verified acceptance and completion evidence"
+    if lifecycle == "planned":
+        return "start or resume the planned task before issueization"
     if issueization["state"] in {"unissued", "retry"}:
         return "issueization batch may claim this task"
     if lifecycle in {"complete", "published", "merged", "usable"}:
@@ -177,12 +280,12 @@ def _task_views(connection):
         acceptance_records = related.get("acceptance", [])
         completion_records = related.get("completion", [])
         issueization = _issueization(task, now)
-        lifecycle = _lifecycle(task, acceptance_records, completion_records)
+        publication = _publication_evidence(task, completion_records)
+        lifecycle = _lifecycle(task, acceptance_records, completion_records, publication["state"])
         acceptance_state = (
             "verified" if acceptance_records and all(item["verified"] for item in acceptance_records)
             else "unverified" if acceptance_records else "missing"
         )
-        publication_state = "issued" if related.get("issues") else issueization["state"]
         view = {
             "task_id": task["id"], "purpose": task["purpose"], "source": task.get("source"),
             "repository": task.get("repository"), "assignee": task.get("assignee"),
@@ -191,12 +294,14 @@ def _task_views(connection):
             "stages": {
                 "execution": task.get("execution_status"),
                 "acceptance": acceptance_state,
-                "publication": publication_state,
+                "issueization": issueization["state"],
+                "publication": publication["state"],
                 "usable": lifecycle == "usable",
             },
             "work_units": related.get("work_units", []), "issues": related.get("issues", []),
             "prs": related.get("prs", []), "evidence_links": related.get("evidence_links", []),
             "acceptance": acceptance_records, "completion_evidence": completion_records,
+            "publication_evidence": publication,
             "attempts": task.get("issueization_attempts", 0),
             "last_error": task.get("issueization_error"), "next_action": _next_action(lifecycle, issueization),
             "version": task.get("version"), "updated_at": task.get("updated_at"),
