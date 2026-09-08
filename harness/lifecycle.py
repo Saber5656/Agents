@@ -255,9 +255,10 @@ class LifecycleStore:
 class ChatLifecycle:
     """Reconcile injected App backend operations against a local work unit."""
 
-    def __init__(self, store: LifecycleStore, *, writer_guard=None):
+    def __init__(self, store: LifecycleStore, *, writer_guard=None, lock_root=None):
         self.store = store
         self.writer_guard = writer_guard
+        self.lock_root = Path(lock_root).resolve() if lock_root is not None else None
 
     @staticmethod
     def _payload(unit, prompt):
@@ -298,9 +299,9 @@ class ChatLifecycle:
             raise LifecycleError("remote thread is archived")
         if require_ready:
             status = str(thread.get("status", "")).lower()
-            if status in ("running", "in_progress", "active", "failed", "incomplete", "needs_verification", "pending"):
+            if status in ("failed", "incomplete", "needs_verification", "pending"):
                 raise LifecycleError("remote thread is not ready")
-            if status not in ("ready", "completed", "succeeded", "success", "archived") and not thread.get("archived"):
+            if status not in ("ready", "completed", "succeeded", "success", "running", "in_progress", "active", "archived") and not thread.get("archived"):
                 raise LifecycleError("remote thread readiness is unverified")
         return thread
 
@@ -590,10 +591,10 @@ class ChatLifecycle:
             raise LifecycleError("unarchive requires remote readback") from exc
         return self._save_chat(unit_id, state="ready", unarchive_receipt={"state": "ready", "thread_id": str(thread_id), "at": _now()})
 
-    def cleanup(self, unit_id, git):
+    def cleanup(self, unit_id, git, *, lock_root=None):
         unit = self._unit(unit_id)
         try:
-            lock = self._open_worktree_lock(unit["worktree"])
+            lock = self._open_worktree_lock(unit["worktree"], lock_root=lock_root)
         except OSError as exc:
             raise CleanupError("active writer owns the worktree") from exc
         try:
@@ -602,8 +603,11 @@ class ChatLifecycle:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()
 
-    def _open_worktree_lock(self, worktree):
-        root = self.store.vault_root / "01-Projects" / "task-lifecycle" / "locks"
+    def _open_worktree_lock(self, worktree, *, lock_root=None):
+        root = Path(lock_root).resolve() if lock_root is not None else self.lock_root
+        if root is None:
+            root = self.store.vault_root / "01-Projects" / "task-lifecycle" / "locks"
+        root = root / "workspace"
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         key = hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest()
         path = root / f"{key}.lock"
@@ -740,11 +744,12 @@ class ChatLifecycle:
             self._write_cleanup_receipt(unit_id, receipt)
             self.store.update(unit_id, lambda row: row["cleanup"].update({"state": "worktree_removed", "receipt": receipt}))
         try:
-            if receipt and receipt.get("state") == "worktree_removed":
+            branch_exists = getattr(git, "branch_exists", lambda *_: True)(repository, branch)
+            if branch_exists and receipt and receipt.get("state") == "worktree_removed":
                 branch_head = getattr(git, "branch_head", None)
                 if branch_head is None or _full_oid(branch_head(repository, branch)) != _full_oid(receipt["head_oid"]):
                     raise CleanupError("branch HEAD identity changed after worktree removal")
-            if getattr(git, "branch_exists", lambda *_: True)(repository, branch):
+            if branch_exists:
                 git.delete_branch(repository, branch)
         except Exception as exc:
             raise CleanupError("worktree removed; branch cleanup remains pending") from exc

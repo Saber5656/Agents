@@ -56,6 +56,9 @@ running, it forks with the latest requirements and the existing task, Issue,
 repository, base, and worktree scope. Otherwise it sends the update to the
 ready thread. New ready IDs are read back before replacing the stored ID;
 client-only or uncertain handoffs remain pending/ambiguous for reconciliation.
+An existing ready thread ID remains usable while its current turn is running;
+running describes the current turn, while the ID identifies the ready App
+thread. Archive still rejects a running current turn.
 
 ## Archive and restore
 
@@ -94,8 +97,15 @@ successful removal is accepted as an idempotent completed state. Dirty files,
 active locks, local-only commits, dependent use, or an unknown Git state stop
 cleanup while preserving data.
 
-The lifecycle lock is derived from the canonical worktree path and lives under
-the Vault's task-lifecycle lock directory. Writers that participate in cleanup
-must hold the same lock for their process lifetime. Real user worktrees and
-live chats are not removed by the tests; isolated fake backend and Git
-fixtures cover the reversible and negative paths.
+The lifecycle lock is derived from the resolved worktree path and lives at
+`<lock_root>/workspace/<sha256(resolved_worktree)>.lock`. By default
+`lock_root` is the Vault's task-lifecycle lock directory; a service caller can
+pass its explicit service `lock_root` to `ChatLifecycle` or `cleanup()` so the
+cleanup process and worker use the same process-lifetime lock. Writers that
+participate in cleanup must hold this exact lock for their process lifetime;
+one inactive probe without the lock does not establish safety. A missing branch
+after a recorded worktree removal is treated as the completed branch step only
+when the receipt identity matches; a recreated branch is checked for its exact
+recorded HEAD and remains protected if it differs. The real Git fixture uses a
+private bare remote and three worktrees, and verifies dirty/unpushed peer data
+survives cleanup and restart recovery.

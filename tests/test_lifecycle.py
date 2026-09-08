@@ -1,7 +1,9 @@
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -110,6 +112,8 @@ class FakeGit:
         return self.head_oid
 
     def branch_head(self, repository, branch):
+        if self.deleted:
+            raise CleanupError("missing branch")
         return self.head_oid
 
     def branch_ahead(self, repository, branch):
@@ -418,6 +422,21 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(result["state"], "branch_removed")
         self.assertTrue(git.deleted)
 
+    def test_cleanup_recovers_when_branch_delete_succeeded_before_receipt_persist(self):
+        context = self.vault / "context.json"; context.write_text("saved context")
+        self.registry.set_delivery("wu-1", merged=True, main_synced=True,
+                                    context_saved=True, context_path=context)
+        git = FakeGit(self.repo, self.worktree)
+        receipt = {"state": "worktree_removed", "unit_id": "wu-1",
+                   "repository": str(self.repo.resolve()), "worktree": str(self.worktree.resolve()),
+                   "branch": "feat/task", "head_oid": "b" * 40}
+        self.chat._write_cleanup_receipt("wu-1", receipt)
+        git.removed = True
+        git.deleted = True
+        result = self.chat.cleanup("wu-1", git)
+        self.assertEqual(result["state"], "branch_removed")
+        self.assertEqual(self.registry.get("wu-1")["cleanup"]["state"], "branch_removed")
+
     def test_cleanup_prepared_receipt_recovers_when_worktree_already_removed(self):
         context = self.vault / "context.json"; context.write_text("saved context")
         self.registry.set_delivery("wu-1", merged=True, main_synced=True,
@@ -488,6 +507,41 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(CleanupError):
             chat.cleanup("wu-1", FakeGit(self.repo, self.worktree))
 
+    def test_cleanup_lock_can_share_explicit_service_lock_root_and_blocks_other_process(self):
+        lock_root = self.root / "service-locks"
+        chat = ChatLifecycle(self.registry, lock_root=lock_root,
+                             writer_guard=lambda _worktree, _git: "inactive")
+        held = chat._open_worktree_lock(self.worktree)
+        try:
+            lock_path = lock_root / "workspace" / (
+                hashlib.sha256(str(self.worktree.resolve()).encode()).hexdigest() + ".lock"
+            )
+            self.assertTrue(lock_path.is_file())
+            child = subprocess.run(
+                [sys.executable, "-c", "import fcntl, os, sys; fd=os.open(sys.argv[1], os.O_RDWR); "
+                 "\ntry: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                 "except OSError: raise SystemExit(1)\n"
+                 "else: raise SystemExit(0)", str(lock_path)],
+                check=False,
+            )
+            self.assertNotEqual(child.returncode, 0)
+        finally:
+            import fcntl
+            fcntl.flock(held.fileno(), fcntl.LOCK_UN); held.close()
+        child = subprocess.run(
+            [sys.executable, "-c", "import fcntl, os, sys; fd=os.open(sys.argv[1], os.O_RDWR); "
+             "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", str(lock_path)],
+            check=False,
+        )
+        self.assertEqual(child.returncode, 0)
+
+    def test_ready_thread_id_remains_ready_while_current_turn_runs(self):
+        self.chat.create("wu-1", "initial", self.backend)
+        self.backend.threads[0]["status"] = "running"
+        result = self.chat.create("wu-1", "retry create", self.backend)
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(result["ready_thread_id"], "thread-1")
+
     def test_cleanup_actual_isolated_git_fixture_requires_clean_merged_branch(self):
         remote = self.root / "remote.git"
         subprocess.run(["git", "init", "--bare", str(remote)], check=True,
@@ -522,6 +576,65 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(result["state"], "branch_removed")
         self.assertFalse(worktree.exists())
         self.assertEqual(git(canonical, "branch", "--list", "feat/fixture"), "")
+
+    def test_cleanup_real_git_three_worktrees_preserves_unpushed_dirty_peer_and_resumes_missing_branch(self):
+        remote = self.root / "three-worktree-remote.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True,
+                       capture_output=True, text=True)
+        canonical = self.root / "three-canonical"
+        subprocess.run(["git", "init", "-b", "main", str(canonical)], check=True,
+                       capture_output=True, text=True)
+
+        def git(path, *args):
+            return subprocess.run(["git", *args], cwd=path, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        git(canonical, "config", "user.email", "fixture@example.invalid")
+        git(canonical, "config", "user.name", "Fixture")
+        (canonical / "README").write_text("base\n")
+        git(canonical, "add", "README"); git(canonical, "commit", "-m", "base")
+        git(canonical, "remote", "add", "origin", str(remote)); git(canonical, "push", "-u", "origin", "main")
+        target = self.root / "three-target"
+        peer = self.root / "three-peer"
+        git(canonical, "worktree", "add", "-b", "feat/kill-resume", str(target), "main")
+        git(canonical, "worktree", "add", "-b", "feat/peer", str(peer), "main")
+        git(target, "config", "user.email", "fixture@example.invalid")
+        git(target, "config", "user.name", "Fixture")
+        git(peer, "config", "user.email", "fixture@example.invalid")
+        git(peer, "config", "user.name", "Fixture")
+        (target / "merged").write_text("merged\n")
+        git(target, "add", "merged"); git(target, "commit", "-m", "merged feature")
+        target_head = git(target, "rev-parse", "HEAD")
+        git(canonical, "merge", "--no-ff", "feat/kill-resume", "-m", "merge feature")
+        git(canonical, "push", "origin", "main")
+        (peer / "peer-local").write_text("unpublished\n")
+        git(peer, "add", "peer-local"); git(peer, "commit", "-m", "unpublished peer")
+        (peer / "peer-dirty").write_text("must remain\n")
+
+        context = self.vault / "three-context.json"; context.write_text("saved context")
+        unit = self.registry.register(
+            "wu-three", purpose="three-worktree recovery", repository="org/repo",
+            project_id="p", host_id="h", base_oid=self.base,
+            worktree=target, repository_path=canonical, branch="feat/kill-resume",
+            context_path=context)
+        self.registry.set_delivery("wu-three", merged=True, main_synced=True,
+                                   context_saved=True, context_path=context)
+        git(canonical, "worktree", "remove", "--force", str(target))
+        git(canonical, "branch", "-d", "feat/kill-resume")
+        receipt = {"state": "worktree_removed", "unit_id": unit["id"],
+                   "repository": str(canonical.resolve()), "worktree": str(target.resolve()),
+                   "branch": "feat/kill-resume", "head_oid": target_head}
+        lock_root = self.root / "three-service-locks"
+        chat = ChatLifecycle(self.registry, lock_root=lock_root,
+                             writer_guard=lambda _worktree, _git: "inactive")
+        chat._write_cleanup_receipt("wu-three", receipt)
+        self.assertFalse(target.exists())
+        self.assertTrue(peer.exists())
+        result = chat.cleanup("wu-three", GitWorktree(canonical))
+        self.assertEqual(result["state"], "branch_removed")
+        self.assertFalse(git(canonical, "branch", "--list", "feat/kill-resume"))
+        self.assertIn("peer-dirty", git(peer, "status", "--porcelain"))
+        self.assertNotEqual(git(peer, "rev-parse", "HEAD"), git(canonical, "rev-parse", "main"))
 
     def test_cleanup_rejects_other_worktree_use_and_dependent_registry_unit(self):
         context = self.vault / "context.json"; context.write_text("saved context")
