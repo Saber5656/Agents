@@ -843,16 +843,21 @@ class ServiceTests(unittest.TestCase):
         def coordinator(spec, review):
             return decide_review(spec, review, runner=runner)
 
-        with mock.patch("harness.service.decide_findings", side_effect=coordinator), \
-             mock.patch.object(self.service, "record_update"):
+        with mock.patch("harness.service.decide_findings", side_effect=coordinator):
             first = self.service.verify_with_agent(job["id"], lambda _: review_result)
             self.assertEqual(first["status"], "needs_verification")
             self.assertTrue(self.service._start_verification(job["id"]))
             second = self.service.verify_with_agent(job["id"], lambda _: (_ for _ in ()).throw(
                 AssertionError("unchanged verifier result must be reused")))
+            self.service.record_update(job["id"], "new external evidence", ["vault://new"])
+            self.assertTrue(self.service._start_verification(job["id"]))
+            third = self.service.verify_with_agent(job["id"], lambda _: review_result)
 
         self.assertEqual(second["status"], "needs_verification")
-        self.assertEqual(provider_calls, [1])
+        self.assertIn("verification", second)
+        self.assertEqual(second["verification"]["findings"], [])
+        self.assertEqual(third["status"], "needs_verification")
+        self.assertEqual(provider_calls, [1, 1])
 
     def test_malformed_finding_disposition_does_not_adopt(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")

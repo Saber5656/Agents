@@ -1523,6 +1523,7 @@ class ServiceStore:
             self._reset_verification(job_id, str(exc))
             return {"status": "needs_verification", "job_id": job_id, "verification_error": str(exc)}
         findings = result.get("findings", []) if isinstance(result, dict) else []
+        cache_after_disposition = False
         if findings:
             links = tuple(item for item in (result.get("evidence_links", []) if isinstance(result, dict) else []) if isinstance(item, str))
             review_spec = {"task": self.tasks.get_task(job["task_id"]),
@@ -1577,6 +1578,7 @@ class ServiceStore:
             accepted_result["findings"] = []
             accepted_result["review_disposition"] = disposition
             result = accepted_result
+            cache_after_disposition = not adopted
         if resumed_proof is not None:
             result = dict(result) if isinstance(result, dict) else {}
             result["publication"] = resumed_proof
@@ -1635,6 +1637,23 @@ class ServiceStore:
                 self._reset_verification(job_id, "publication readback remains incomplete: " + str(exc))
                 return {"status": "needs_verification", "job_id": job_id,
                         "verification": result, "verification_error": str(exc)}
+        if cache_after_disposition:
+            # Recording a disposition is an internal consequence of this
+            # review. Preserve the processed result under the post-update
+            # identity so the same verdict is not reviewed again. A later
+            # external evidence update still produces a different digest.
+            refreshed_job = self.get_job(job_id)
+            refreshed_task = self.tasks.get_task(refreshed_job["task_id"])
+            post_digest = _verification_input_digest(
+                refreshed_job, refreshed_task,
+                publication_snapshot=verifier_spec.get("publication_snapshot"),
+                publication_readback=verifier_spec.get("publication_readback"),
+            )
+            post_record = self._verification_record(refreshed_job, post_digest)
+            _save_verification_json(post_record / "input-digest.json", {"digest": post_digest})
+            _save_verification_json(post_record / "service-result.json", {
+                "digest": post_digest, "result": result,
+            })
         if not isinstance(result, dict) or result.get("acceptance") is not True:
             self._reset_verification(job_id, "verification criteria remain incomplete")
             return {"status": "needs_verification", "job_id": job_id, "verification": result or {}}
