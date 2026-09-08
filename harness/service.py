@@ -517,12 +517,18 @@ class ServiceStore:
             conn.execute("UPDATE service_jobs SET state='retry',next_attempt_at=NULL,last_error=?,updated_at=? WHERE id=? AND state='verifying'", (diagnostic, now(), job_id))
             conn.execute("UPDATE service_attempts SET status='repair_required',error=? WHERE job_id=? AND status='verifying'", (diagnostic, job_id))
         job = self.get_job(job_id)
+        next_generation = max(1, int(job.get("attempts_count") or 0) + 1) if job else 1
+        receipt_name = "publication.json" if next_generation == 1 else f"publication-{next_generation}.json"
+        diagnostic = (f"{diagnostic}; rebase the task branch onto current canonical main, recompute "
+                      f"immutable_base and selected digests, and use new receipt generation {receipt_name}; "
+                      "do not reuse the failed publication receipt")
         task = self.tasks.get_task(job["task_id"]) if job else None
         if task is not None:
             try:
                 self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="running")
             except ConflictError:
                 pass
+        self.record_update(job_id, diagnostic, ["vault://publication-repair"])
 
     @staticmethod
     def _publication_conflict(error):
@@ -531,6 +537,12 @@ class ServiceStore:
             "canonical main moved", "not an ancestor", "remote readback",
             "main advanced", "receipt commit is not",
         ))
+
+    @staticmethod
+    def _publication_receipt_path(job):
+        run_dir = Path(job["run_dir"])
+        generation = max(1, int(job.get("attempts_count") or 1))
+        return run_dir / ("publication.json" if generation == 1 else f"publication-{generation}.json")
 
     def _job(self, row):
         if row is None:
@@ -827,6 +839,14 @@ class ServiceStore:
                 return {"status": "needs_verification", "job_id": job_id,
                         "verification_error": str(exc)}
             if resumed is not None:
+                if resumed.get("status") in {"failed", "incomplete"}:
+                    sha = resumed.get("published_sha", "unknown")
+                    diagnostic = (f"publication receipt {resumed.get('status')} for published SHA {sha}; "
+                                  f"receipt generation {self._publication_receipt_path(job).name} requires repair")
+                    self._schedule_publication_repair(job_id, diagnostic)
+                    return {"status": "retry", "job_id": job_id,
+                            "repair_required": True, "publication": resumed,
+                            "verification_error": diagnostic}
                 if resumed.get("status") != "published":
                     self._reset_verification(job_id, "publication CI or remote readback remains incomplete")
                     return {"status": "needs_verification", "job_id": job_id,
@@ -1000,11 +1020,11 @@ class ServiceStore:
     def _resume_pending_publication(self, job, task, proposal):
         """Reconcile a host receipt without spending another verifier turn."""
         from .publication import _read_json, publish_scoped
-        receipt = Path(job["run_dir"]) / "publication.json"
+        receipt = self._publication_receipt_path(job)
         if receipt.is_symlink() or not receipt.is_file():
             return None
         state = _read_json(receipt)
-        if state.get("status") not in {"pending", "incomplete", "published", "success"} or not state.get("published_sha"):
+        if state.get("status") not in {"pending", "failed", "incomplete", "published", "success"} or not state.get("published_sha"):
             return None
         files = state.get("files") or proposal.get("files")
         base = state.get("base") or proposal.get("immutable_base")
@@ -1090,7 +1110,7 @@ class ServiceStore:
             run_dir.relative_to(Path(self.tasks.vault_root).resolve())
         except ValueError as exc:
             raise ValueError("job Vault run directory is outside the configured Vault") from exc
-        receipt = run_dir / "publication.json"
+        receipt = self._publication_receipt_path(job)
         spec = dict(proposal)
         spec.update({"repository": task.get("repository"), "canonical_repo": str(canonical),
                      "task_worktree": str(worktree), "preimage_digest": actual_preimage,

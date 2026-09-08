@@ -166,3 +166,43 @@ def test_published_receipt_requests_only_final_acceptance_review(publication_job
     assert result["status"] == "needs_verification"
     verifier.assert_called_once()
     publish.assert_not_called()
+
+
+def test_ci_failure_handoff_records_rebase_and_new_receipt_instruction(publication_job):
+    service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
+    proposal = _proposal(workspace, canonical, "git@github.com:Saber5656/Agents.git", base, vault)
+    review = _review(workspace, base, proposal["files"])
+    service.run_once(executor=lambda _: {"status": "completed",
+                                         "publication_proposal": proposal})
+    assert service._start_verification(job["id"])
+    receipt = Path(job["run_dir"])
+    receipt.mkdir(parents=True, exist_ok=True)
+    (receipt / "publication.json").write_text(json.dumps({
+        "status": "failed", "published_sha": "a" * 40,
+        "files": proposal["files"], "base": base,
+        "preimage_digest": proposal["preimage_digest"],
+        "diff_digest": proposal["diff_digest"], "review": review,
+    }))
+    verifier = mock.Mock()
+    with mock.patch("harness.publication.publish_scoped",
+                    return_value={"status": "failed", "published_sha": "a" * 40}):
+        result = service.verify_with_agent(job["id"], verifier)
+    assert result["status"] == "retry"
+    verifier.assert_not_called()
+    detail = service.get_job(job["id"])
+    assert detail["state"] == "retry"
+    assert "rebase" in detail["updates"][-1]["message"]
+    assert "publication-2.json" in detail["updates"][-1]["message"]
+
+
+def test_repair_instruction_is_passed_to_next_executor(publication_job):
+    service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
+    # Move a claimed work item into the repair state as the host would after a
+    # concrete publication conflict.
+    service.run_once(executor=lambda _: {"status": "completed"})
+    assert service._start_verification(job["id"])
+    service._schedule_publication_repair(job["id"], "publication CI failed for SHA " + "a" * 40)
+    seen = []
+    service.run_once(executor=lambda spec: (seen.append(spec) or {"status": "failed"}))
+    assert seen and "rebase" in seen[0]["updates"][-1]["message"]
+    assert "immutable_base" in seen[0]["updates"][-1]["message"]
