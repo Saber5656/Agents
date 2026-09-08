@@ -1862,8 +1862,16 @@ def _acceptance_catalog(task):
 
 
 def _bind_acceptance_ids(task, verdict):
-    """Resolve exact identities only; never fuzzy-match a changed requirement."""
-    catalog = {row["id"]: row["criterion"] for row in _acceptance_catalog(task)}
+    """Resolve exact identities without fuzzy-matching changed requirements.
+
+    A provider can mistype a long hexadecimal id while still returning the
+    exact catalog text it reviewed.  In that one recoverable case, recompute
+    the id from the exact text.  An unknown id without an exact current
+    criterion remains invalid and cannot certify acceptance.
+    """
+    entries = _acceptance_catalog(task)
+    catalog = {row["id"]: row["criterion"] for row in entries}
+    criteria_to_id = {row["criterion"]: row["id"] for row in entries}
     result = dict(verdict)
     criteria = result.get("criteria")
     if not isinstance(criteria, list):
@@ -1875,7 +1883,12 @@ def _bind_acceptance_ids(task, verdict):
             continue
         identifier = item["criterion_id"]
         if not isinstance(identifier, str) or identifier not in catalog:
-            raise ValueError("unknown or stale acceptance criterion identity")
+            exact_text = item.get("criterion")
+            repaired = criteria_to_id.get(exact_text) if isinstance(exact_text, str) else None
+            if repaired is None:
+                raise ValueError("unknown or stale acceptance criterion identity")
+            bound.append({**item, "criterion_id": repaired, "criterion": exact_text})
+            continue
         criterion = catalog[identifier]
         if "criterion" in item and item["criterion"] != criterion:
             raise ValueError("acceptance criterion identity and text disagree")
@@ -1905,6 +1918,11 @@ def default_verifier(spec):
         "do not repeat network requests from the read-only sandbox or treat its network unavailability "
         "as a product defect. Missing host readback remains unverified."
     )
+    if "unknown or stale acceptance criterion identity" in str(spec["job"].get("last_error") or ""):
+        phase_instructions += (
+            " The previous review output contained an invalid criterion_id. Re-read the current "
+            "acceptance_catalog and emit its ids exactly; do not copy an id from the previous output."
+        )
     prompt = json.dumps({
         "phase": phase,
         "acceptance_catalog": _acceptance_catalog(task),
@@ -1923,8 +1941,8 @@ def default_verifier(spec):
             "selected paths and immutable base); copy those values exactly. The host will recompute both and does "
             "not treat this schema as evidence. "
             "Do not edit files, run write commands, or infer completion from words alone. Return JSON only: "
-            "{acceptance:boolean, publication_readiness:boolean, findings:[objects], evidence:string, criteria:[{criterion_id:string, verified:boolean, evidence:string}], publication:{commit:string, mode:direct_main|pull_request, pr_number:integer}, publication_review:{status:complete, reviewed:true, reviewed_head:string, reviewed_diff_digest:string, findings:[objects], findings_complete:true, decisions:[{finding_id:string, decision:adopt|reject|separate, reason:string, evidence:[string], applied:boolean, applied_evidence:[string]}]}, "
-            "evidence_links:[strings]}. Return every acceptance_catalog id exactly once as criterion_id and cite observed evidence for each. Do not retype or paraphrase the criterion text; the host binds each id to its exact requirement. Saber5656/Agents uses direct main publication; other repositories require their PR delivery policy. "
+            "{acceptance:boolean, publication_readiness:boolean, findings:[objects], evidence:string, criteria:[{criterion_id:string, criterion:string, verified:boolean, evidence:string}], publication:{commit:string, mode:direct_main|pull_request, pr_number:integer}, publication_review:{status:complete, reviewed:true, reviewed_head:string, reviewed_diff_digest:string, findings:[objects], findings_complete:true, decisions:[{finding_id:string, decision:adopt|reject|separate, reason:string, evidence:[string], applied:boolean, applied_evidence:[string]}]}, "
+            "evidence_links:[strings]}. Return every acceptance_catalog id exactly once as criterion_id and cite observed evidence for each. Copy the paired criterion text exactly when returning it; do not paraphrase it. If a prior verification error mentions an unknown or stale criterion identity, regenerate the id from the current acceptance_catalog and correct the prior output. The host binds each id to its exact requirement. Saber5656/Agents uses direct main publication; other repositories require their PR delivery policy. "
             "Use findings for any missing or incorrect implementation and explain the repair required. "
             "When no findings exist, return findings:[] and publication_review.findings:[] with decisions:[]; "
             "when findings exist, return exactly one explicit adopt/reject/separate decision for every finding."

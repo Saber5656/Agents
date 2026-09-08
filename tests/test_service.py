@@ -844,8 +844,10 @@ class ServiceTests(unittest.TestCase):
             json.dumps({"type": "turn.completed", "status": "completed", "usage": {"input_tokens": 3}}),
         ])
         from harness.runner import ProcessResult
+        job_spec = self.service.get_job(job["id"])
+        job_spec["last_error"] = "unknown or stale acceptance criterion identity"
         with mock.patch("harness.service.subprocess.run", return_value=mock.Mock(returncode=0, stdout="Logged in using ChatGPT", stderr="")), mock.patch("harness.runner.execute", return_value=ProcessResult(0, events, "")) as run:
-            value = default_verifier({"job": self.service.get_job(job["id"]), "task": self.tasks.get_task(task["id"]),
+            value = default_verifier({"job": job_spec, "task": self.tasks.get_task(task["id"]),
                                       "agents_root": str(self.root), "vault_root": str(self.vault),
                                       "publication_snapshot": {"head": "a" * 40, "diff": "b" * 64}})
         self.assertTrue(value["acceptance"])
@@ -860,6 +862,8 @@ class ServiceTests(unittest.TestCase):
         prompt = json.loads(run.call_args.args[3])
         self.assertEqual(prompt["phase"], "pre_publication")
         self.assertIn("not a source defect", prompt["phase_instructions"])
+        self.assertIn("previous review output contained an invalid criterion_id", prompt["phase_instructions"])
+        self.assertIn("criterion:string", prompt["instructions"])
 
     def test_verifier_criterion_ids_bind_to_exact_current_requirements(self):
         from harness.service import _acceptance_catalog, _bind_acceptance_ids
@@ -880,6 +884,31 @@ class ServiceTests(unittest.TestCase):
         changed = {"acceptance_records": [{"evidence": "Changed criterion."}]}
         with self.assertRaises(ValueError):
             _bind_acceptance_ids(changed, verdict)
+
+    def test_verifier_repairs_stale_id_only_from_exact_criterion_text(self):
+        import hashlib
+        from harness.service import _bind_acceptance_ids
+        task = {"acceptance_records": [{"evidence": "A long exact criterion."}]}
+        result = _bind_acceptance_ids(task, {"criteria": [{
+            "criterion_id": "stale-model-id",
+            "criterion": "A long exact criterion.",
+            "verified": True,
+            "evidence": "observed artifact",
+        }]})
+        self.assertEqual(result["criteria"][0]["criterion"], "A long exact criterion.")
+        self.assertEqual(result["criteria"][0]["criterion_id"], hashlib.sha256(
+            b"A long exact criterion.").hexdigest())
+
+    def test_verifier_does_not_repair_stale_id_from_paraphrase(self):
+        from harness.service import _bind_acceptance_ids
+        task = {"acceptance_records": [{"evidence": "A long exact criterion."}]}
+        with self.assertRaisesRegex(ValueError, "unknown or stale"):
+            _bind_acceptance_ids(task, {"criteria": [{
+                "criterion_id": "stale-model-id",
+                "criterion": "A paraphrase of the criterion.",
+                "verified": True,
+                "evidence": "observed artifact",
+            }]})
 
     def test_verification_without_evidence_is_requeued(self):
         task = self.tasks.create_task(purpose="verify incomplete", acceptance_evidence=["accepted"])
