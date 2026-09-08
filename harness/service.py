@@ -1296,7 +1296,24 @@ class ServiceStore:
         return outcomes
 
     @staticmethod
-    def auth_guard(env, login_check=None):
+    def auth_guard(env, login_check=None, *, charge_source=None, operation=None):
+        """Authorize a subscription route before an external operation.
+
+        Callers that are about to purchase or provision a separately billed
+        resource must provide the concrete charge source and operation.  The
+        host-side adapter is held before it can invoke its transport; this is
+        intentionally a small preflight extension to the existing auth check,
+        not a workflow-wide approval gate.
+        """
+        if charge_source is not None or operation is not None:
+            if (not isinstance(charge_source, str) or not charge_source.strip()
+                    or not isinstance(operation, str) or operation not in {
+                        "purchase", "provision", "pay_per_use_inference"
+                    }):
+                raise ValueError("charge_source and a supported operation are required")
+            raise AuthError(
+                f"Charged operation blocked before execution: source={charge_source}; action={operation}",
+                hold=True, action=operation, source=charge_source)
         blocked = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CODEX_API_KEY")
         configured = next((key for key in blocked if env.get(key)), None)
         if configured:

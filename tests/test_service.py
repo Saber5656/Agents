@@ -12,7 +12,8 @@ import unittest
 from unittest import mock
 
 from harness.tasks import TaskStore
-from harness.publication import PublicationError
+from harness.publication import PublicationError, _within
+from harness.delivery import DeliveryError, GitHub, public_text
 from harness.service import (AuthError, ServiceStore, WorkspaceLock,
                              Scheduler, Launchd, default_verifier, load_agents_env)
 
@@ -195,6 +196,128 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(resumed["status"], "needs_verification")
         self.assertEqual(resumed["job_id"], other_job["id"])
         self.assertEqual(self.service.get_job(job["id"])["state"], "held")
+
+    def test_charge_operation_preflight_blocks_purchase_and_provisioning(self):
+        """Concrete charge source/operation pairs stop before transport."""
+        for source, operation in (("pay-per-use", "purchase"), ("provisioner", "provision")):
+            task = self.tasks.create_task(purpose=f"blocked {operation}")
+            workspace = self.root / operation
+            workspace.mkdir()
+            job = self.service.enroll(task["id"], workspace, "prompt", "context")
+            sent = []
+
+            class ChargeAdapter:
+                def send(self):
+                    sent.append("charged")
+                    return {"status": "completed"}
+
+            adapter = ChargeAdapter()
+
+            def worker(_spec):
+                self.service.auth_guard({}, charge_source=source, operation=operation)
+                return adapter.send()
+
+            result = self.service.run_once(executor=worker)
+            self.assertEqual(result["status"], "held")
+            self.assertEqual(sent, [])
+            detail = self.service.get_job(job["id"])
+            self.assertEqual(detail["state"], "held")
+            self.assertIn(f"source={source}; action={operation}", detail["last_error"])
+            self.assertIn(f"local://cost-security/{source}/{operation}",
+                          self.tasks.get_task(task["id"])["evidence_links"])
+
+    def test_public_text_guard_blocks_secret_transport(self):
+        task = self.tasks.create_task(purpose="public text boundary")
+        workspace = self.root / "public-text"
+        workspace.mkdir()
+        job = self.service.enroll(task["id"], workspace, "prompt", "context")
+        sent = []
+        secret = "fixture-secret-never-sent"
+
+        class Transport:
+            def send(self):
+                sent.append("sent")
+                return {"status": "completed"}
+
+        transport = Transport()
+
+        def worker(_spec):
+            try:
+                public_text(f"payload={secret}", {"API_KEY": secret})
+            except DeliveryError as exc:
+                raise AuthError("public content rejected before transport", hold=True,
+                                source="delivery.public_text", action="secret_exfiltration") from exc
+            return transport.send()
+
+        result = self.service.run_once(executor=worker)
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(sent, [])
+        detail = self.service.get_job(job["id"])
+        self.assertNotIn(secret, detail["last_error"])
+        self.assertIn("local://cost-security/delivery.public_text/secret_exfiltration",
+                      self.tasks.get_task(task["id"])["evidence_links"])
+
+    def test_github_merge_protection_blocks_transport(self):
+        task = self.tasks.create_task(purpose="protected merge boundary")
+        workspace = self.root / "protected-merge"
+        workspace.mkdir()
+        job = self.service.enroll(task["id"], workspace, "prompt", "context")
+        transport_calls = []
+
+        class ProtectedGitHub(GitHub):
+            def pr(self, _number):
+                return {"baseRefName": "main", "state": "OPEN", "isDraft": False,
+                        "mergeable": "CONFLICTING", "reviewDecision": None,
+                        "headRefOid": "a" * 40, "baseRefOid": "b" * 40,
+                        "statusCheckRollup": []}
+
+            def required_checks(self, _branch):
+                return []
+
+            def threads(self, _number):
+                return []
+
+        github = ProtectedGitHub("Saber5656/Agents")
+
+        def worker(_spec):
+            try:
+                with mock.patch("harness.delivery.command",
+                                side_effect=lambda *args, **kwargs: transport_calls.append(args)):
+                    github.merge(7, "a" * 40, "b" * 40)
+            except DeliveryError as exc:
+                raise AuthError("GitHub merge protection rejected operation", hold=True,
+                                source="github.merge", action="bypass_protection") from exc
+            return {"status": "completed"}
+
+        result = self.service.run_once(executor=worker)
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(transport_calls, [])
+        self.assertEqual(self.service.get_job(job["id"])["state"], "held")
+        self.assertIn("local://cost-security/github.merge/bypass_protection",
+                      self.tasks.get_task(task["id"])["evidence_links"])
+
+    def test_repository_path_containment_blocks_out_of_scope_transport(self):
+        task = self.tasks.create_task(purpose="repository path boundary")
+        workspace = self.root / "path-boundary"
+        workspace.mkdir()
+        repo = workspace / "repo"
+        repo.mkdir()
+        job = self.service.enroll(task["id"], workspace, "prompt", "context")
+        transport_calls = []
+
+        def worker(_spec):
+            if not _within(repo, repo / ".." / "outside"):
+                raise AuthError("repository path containment rejected", hold=True,
+                                source="publication.path_containment", action="access_expansion")
+            transport_calls.append("expanded")
+            return {"status": "completed"}
+
+        result = self.service.run_once(executor=worker)
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(transport_calls, [])
+        self.assertEqual(self.service.get_job(job["id"])["state"], "held")
+        self.assertIn("local://cost-security/publication.path_containment/access_expansion",
+                      self.tasks.get_task(task["id"])["evidence_links"])
 
     def test_concrete_unsafe_adapter_actions_are_held_and_recorded(self):
         """Concrete unsafe operation names are retained without execution."""
