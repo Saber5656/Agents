@@ -19,8 +19,8 @@ product configuration.
 
 | Product | macOS | Linux | Windows |
 | --- | --- | --- | --- |
-| VS Code | `~/Library/Application Support/Code/User/settings.json` | `~/.config/Code/User/settings.json` | `%APPDATA%\\Code\\User\\settings.json` |
-| Cursor | `~/Library/Application Support/Cursor/User/settings.json` | `~/.config/Cursor/User/settings.json` | `%APPDATA%\\Cursor\\User\\settings.json` |
+| VS Code | `~/Library/Application Support/Code/User/settings.json` | `~/.config/Code/User/settings.json` | `%APPDATA%\Code\User\settings.json` |
+| Cursor | `~/Library/Application Support/Cursor/User/settings.json` | `~/.config/Cursor/User/settings.json` | `%APPDATA%\Cursor\User\settings.json` |
 
 Codex CLI requests belong to `update-cli-config` and use
 `$CODEX_HOME/config.toml`. Codex App requests require the supported App/UI

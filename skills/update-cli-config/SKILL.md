@@ -46,11 +46,12 @@ per-process override and must not be described as a persistent edit.
 Some Codex subcommands tolerate unknown top-level TOML keys when loading the
 file. A successful `codex features list` therefore does not prove that an
 arbitrary key is supported. Compare a requested persistent key with the
-current CLI's documented schema or a known local key before invoking a writer;
+current CLI's documented schema before invoking a writer;
 otherwise reject it as unsupported and leave the file unchanged.
 
 For another persistent key, first confirm that the current CLI accepts the key
-and value from its own help/schema or an existing local configuration. If no
+and value from its own help/schema. Presence in an existing local file is not
+evidence of support: the loader may silently ignore that key. If no
 supported write surface preserves the TOML structure, stop with an actionable
 unsupported-setting report. Do not invent a JSON adapter or rewrite the whole
 file. Never edit `model`, auth, cached state, or provider credentials as a
