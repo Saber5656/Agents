@@ -653,7 +653,7 @@ class ServiceTests(unittest.TestCase):
                     "vault_receipt": str(self.vault / "publication.json")}
         self.service.run_once(executor=lambda _: {"status": "completed", "publication_proposal": proposal})
         self.assertTrue(self.service._start_verification(job["id"]))
-        review = {"acceptance": True, "findings": [], "criteria": [
+        review = {"acceptance": True, "publication_readiness": True, "findings": [], "criteria": [
             {"criterion": "publication is read back", "verified": True, "evidence": "host readback"}],
             "publication_review": {"status": "complete", "decisions": [],
                                    "findings_complete": True}}
@@ -686,7 +686,7 @@ class ServiceTests(unittest.TestCase):
                     "vault_receipt": str(self.vault / "publication.json"),
                     "diff_digest": "0" * 64}
         review = {"status": "complete", "decisions": [], "findings_complete": True}
-        with self.assertRaisesRegex(ValueError, "diff changed"):
+        with self.assertRaisesRegex(ValueError, "checkouts do not match"):
             self.service._publish_proposal(job, task, proposal, review)
 
     def test_publication_proposal_is_not_published_when_verdict_is_incomplete(self):
@@ -707,6 +707,27 @@ class ServiceTests(unittest.TestCase):
             result = self.service.verify_with_agent(job["id"], lambda _: review)
         self.assertEqual(result["status"], "needs_verification")
         publish.assert_not_called()
+
+    def test_publication_can_precede_final_acceptance_readback(self):
+        task = self.tasks.create_task(purpose="publication readiness", repository="Saber5656/Agents",
+                                      acceptance_evidence=["CI is green"])
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        proposal = {"canonical_repo": "/tmp/canonical", "task_worktree": "/tmp/task",
+                    "files": ["src/change.py"], "immutable_base": "a" * 40,
+                    "commit_message": "Publish change", "remote": "/tmp/origin.git"}
+        self.service.run_once(executor=lambda _: {"status": "completed", "publication_proposal": proposal})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        verdict = {"acceptance": False, "publication_readiness": True, "findings": [],
+                   "criteria": [], "publication_review": {"status": "complete",
+                   "reviewed": True, "reviewed_head": "a" * 40,
+                   "reviewed_diff_digest": "b" * 64, "findings_complete": True,
+                   "decisions": [{"finding_id": "none", "decision": "reject",
+                                  "reason": "no finding", "evidence": ["vault://review" ]}]}}
+        with mock.patch.object(self.service, "_publish_proposal", return_value={"commit": "a" * 40, "mode": "direct_main"}) as publish, \
+             mock.patch("harness.service.observe_publication", return_value={"commit": "a" * 40}):
+            result = self.service.verify_with_agent(job["id"], lambda _: verdict)
+        self.assertEqual(result["status"], "needs_verification")
+        publish.assert_called_once()
 
     def test_publication_review_must_account_for_all_findings(self):
         task = self.tasks.create_task(purpose="incomplete publication review", repository="Saber5656/Agents",

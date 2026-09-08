@@ -791,8 +791,21 @@ class ServiceStore:
 
     def verify_with_agent(self, job_id, verifier):
         job = self.get_job(job_id)
+        task = self.tasks.get_task(job["task_id"])
+        proposal_snapshot = None
+        proposal = self._latest_publication_proposal(job)
+        if proposal is not None:
+            try:
+                proposal_snapshot = self._publication_snapshot(job, proposal)
+            except Exception as exc:
+                proposal_snapshot = {"error": str(exc)}
         try:
-            result = verifier({"job": job, "task": self.tasks.get_task(job["task_id"]), "agents_root": str(self.tasks.agents_root), "vault_root": str(self.tasks.vault_root)})
+            verifier_spec = {"job": job, "task": task,
+                            "agents_root": str(self.tasks.agents_root),
+                            "vault_root": str(self.tasks.vault_root)}
+            if proposal is not None:
+                verifier_spec["publication_snapshot"] = proposal_snapshot
+            result = verifier(verifier_spec)
         except Exception as exc:
             self._reset_verification(job_id, str(exc))
             return {"status": "needs_verification", "job_id": job_id, "verification_error": str(exc)}
@@ -850,11 +863,16 @@ class ServiceStore:
             accepted_result["findings"] = []
             accepted_result["review_disposition"] = disposition
             result = accepted_result
-        if not isinstance(result, dict) or result.get("acceptance") is not True:
-            self._reset_verification(job_id, "verification criteria remain incomplete")
-            return {"status": "needs_verification", "job_id": job_id, "verification": result or {}}
-        proposal = self._latest_publication_proposal(job)
         if proposal is not None:
+            # Publication readiness covers the code/test evidence needed to
+            # safely publish.  Final acceptance may still depend on the
+            # post-publication remote and CI readback, so it is evaluated only
+            # after the host has published and observed that state.
+            if not isinstance(result, dict) or result.get("publication_readiness") is not True:
+                self._reset_verification(job_id, "publication readiness remains incomplete")
+                return {"status": "needs_verification", "job_id": job_id,
+                        "verification": result or {},
+                        "verification_error": "publication readiness is incomplete"}
             review = result.get("publication_review") if isinstance(result, dict) else None
             if not isinstance(review, dict):
                 self._reset_verification(job_id, "publication proposal requires structured publication review")
@@ -866,13 +884,24 @@ class ServiceStore:
                 return {"status": "needs_verification", "job_id": job_id,
                         "verification": result, "verification_error": "publication review is incomplete"}
             try:
-                proof = self._publish_proposal(job, self.tasks.get_task(job["task_id"]), proposal, review)
+                proof = self._publish_proposal(job, task, proposal, review,
+                                               snapshot=proposal_snapshot)
             except Exception as exc:
                 self._reset_verification(job_id, "publication proposal was not published: " + str(exc))
                 return {"status": "needs_verification", "job_id": job_id,
                         "verification": result or {}, "verification_error": str(exc)}
             result = dict(result)
             result["publication"] = proof
+            try:
+                result["publication_readback"] = observe_publication(
+                    job, self.tasks.get_task(job["task_id"]), proof)
+            except Exception as exc:
+                self._reset_verification(job_id, "publication readback remains incomplete: " + str(exc))
+                return {"status": "needs_verification", "job_id": job_id,
+                        "verification": result, "verification_error": str(exc)}
+        if not isinstance(result, dict) or result.get("acceptance") is not True:
+            self._reset_verification(job_id, "verification criteria remain incomplete")
+            return {"status": "needs_verification", "job_id": job_id, "verification": result or {}}
         try:
             verified = self.verify(job_id, result)
         except Exception as exc:
@@ -892,23 +921,43 @@ class ServiceStore:
         proposal = result.get("publication_proposal")
         return proposal
 
-    def _publish_proposal(self, job, task, proposal, review):
+    def _publication_snapshot(self, job, proposal):
+        """Capture the host's pre-review publication inputs for later binding."""
+        from .delivery import git
+        from .publication import selected_diff_digest, selected_tree_digest
+        canonical = Path(self.tasks.agents_root).resolve()
+        worktree = Path(job["workspace"]).resolve()
+        if (Path(proposal.get("canonical_repo", "")).resolve() != canonical
+                or Path(proposal.get("task_worktree", "")).resolve() != worktree):
+            raise ValueError("publication proposal checkouts do not match the host job")
+        files = proposal.get("files")
+        base = proposal.get("immutable_base")
+        if not isinstance(files, list) or not files or not isinstance(base, str):
+            raise ValueError("publication proposal snapshot inputs are invalid")
+        return {"head": git(worktree, "rev-parse", "HEAD"),
+                "preimage": selected_tree_digest(canonical, files),
+                "diff": selected_diff_digest(worktree, base, files)}
+
+    def _publish_proposal(self, job, task, proposal, review, *, snapshot=None):
         """Publish a worker proposal only after host-side CAS and review checks."""
         if not isinstance(proposal, dict) or not isinstance(task, dict):
             raise ValueError("publication proposal is malformed")
-        from .delivery import GitHub, git
+        from .delivery import git
         from .publication import publish_scoped, selected_diff_digest, selected_tree_digest
         required = ("canonical_repo", "task_worktree", "files", "immutable_base",
-                    "commit_message", "remote", "vault_receipt")
+                    "commit_message", "remote")
         if any(key not in proposal for key in required):
             raise ValueError("publication proposal is incomplete")
         if proposal.get("repository", task.get("repository")) != task.get("repository"):
             raise ValueError("publication proposal repository does not match the task")
-        canonical = Path(proposal["canonical_repo"])
-        worktree = Path(proposal["task_worktree"])
-        if not canonical.is_absolute() or not worktree.is_absolute():
-            raise ValueError("publication proposal paths must be absolute")
-        canonical = canonical.resolve(); worktree = worktree.resolve()
+        canonical = Path(self.tasks.agents_root).resolve()
+        worktree = Path(job["workspace"]).resolve()
+        proposed_canonical = Path(proposal["canonical_repo"])
+        proposed_worktree = Path(proposal["task_worktree"])
+        if (not proposed_canonical.is_absolute() or not proposed_worktree.is_absolute()
+                or proposed_canonical.resolve() != canonical
+                or proposed_worktree.resolve() != worktree):
+            raise ValueError("publication proposal checkouts do not match the host job")
         if not canonical.is_dir() or not worktree.is_dir() or canonical == worktree:
             raise ValueError("publication proposal checkouts are unavailable")
         files = proposal["files"]
@@ -917,6 +966,13 @@ class ServiceStore:
         actual_head = git(worktree, "rev-parse", "HEAD")
         actual_preimage = selected_tree_digest(canonical, files)
         actual_diff = selected_diff_digest(worktree, proposal["immutable_base"], files)
+        if snapshot is not None and (not isinstance(snapshot, dict) or snapshot.get("error")):
+            raise ValueError("publication review host snapshot is unavailable")
+        if snapshot is not None and {
+                "head": actual_head, "preimage": actual_preimage, "diff": actual_diff
+        } != {"head": snapshot.get("head"), "preimage": snapshot.get("preimage"),
+              "diff": snapshot.get("diff")}:
+            raise ValueError("publication proposal changed after host review snapshot")
         if proposal.get("reviewed_head") not in (None, actual_head):
             raise ValueError("publication proposal head changed before host review")
         if proposal.get("preimage_digest") not in (None, actual_preimage):
@@ -924,31 +980,33 @@ class ServiceStore:
         if proposal.get("diff_digest") not in (None, actual_diff):
             raise ValueError("publication proposal diff changed before host review")
         host_review = json.loads(json.dumps(review))
-        if host_review.get("reviewed_head") not in (None, actual_head):
+        expected_head = snapshot.get("head") if snapshot is not None else actual_head
+        expected_diff = snapshot.get("diff") if snapshot is not None else actual_diff
+        if host_review.get("reviewed_head") != expected_head:
             raise ValueError("publication review head does not match host observation")
-        if host_review.get("reviewed_diff_digest") not in (None, actual_diff):
+        if host_review.get("reviewed_diff_digest") != expected_diff:
             raise ValueError("publication review diff does not match host observation")
-        host_review["reviewed_head"] = actual_head
-        host_review["reviewed_diff_digest"] = actual_diff
+        # The worker cannot choose where the durable publication receipt lives.
+        # Bind it to this job's Vault run directory before calling the publisher.
+        raw_run_dir = Path(job["run_dir"])
+        if not raw_run_dir.is_absolute() or raw_run_dir.is_symlink():
+            raise ValueError("job Vault run directory is unavailable")
+        run_dir = raw_run_dir.resolve()
+        try:
+            run_dir.relative_to(Path(self.tasks.vault_root).resolve())
+        except ValueError as exc:
+            raise ValueError("job Vault run directory is outside the configured Vault") from exc
+        receipt = run_dir / "publication.json"
         spec = dict(proposal)
         spec.update({"repository": task.get("repository"), "canonical_repo": str(canonical),
                      "task_worktree": str(worktree), "preimage_digest": actual_preimage,
-                     "diff_digest": actual_diff, "review": host_review})
-        if proposal.get("ci") is not None:
-            # A worker may request CI observation, but its reported state is
-            # metadata. The host asks GitHub for the published SHA's checks.
-            def observe_ci(sha):
-                try:
-                    runs = GitHub(task["repository"]).check_runs(sha)
-                except Exception:
-                    return {"sha": sha, "status": "pending"}
-                if not isinstance(runs, list) or not runs:
-                    return {"sha": sha, "status": "pending"}
-                states = {str(row.get("conclusion", row.get("status", ""))).upper()
-                          for row in runs if isinstance(row, dict)}
-                success = {"SUCCESS", "NEUTRAL", "SKIPPED"}
-                return {"sha": sha, "status": "success" if states and states <= success else "failed"}
-            spec["ci_observer"] = observe_ci
+                     "diff_digest": actual_diff, "review": host_review,
+                     "vault_receipt": str(receipt)})
+        # CI is a host observation.  Discard worker supplied metadata and
+        # adapters so production publication always selects the repository's
+        # required-check observer.
+        spec.pop("ci", None)
+        spec.pop("ci_observer", None)
         outcome = publish_scoped(spec)
         if not isinstance(outcome, dict) or outcome.get("status") != "published":
             raise ValueError("host publication did not reach a published state")
@@ -1001,9 +1059,11 @@ def default_executor(spec):
     prompt += (
         "\n\nIf the task produces a reviewed, selected-file change that needs host delivery, "
         "return a structured JSON object containing publication_proposal with canonical_repo, "
-        "task_worktree, files, immutable_base, commit_message, remote, vault_receipt, and any "
-        "reviewed digests. Do not claim publication or completion; the host independently checks "
-        "the diff, review, remote, and CI."
+        "task_worktree, files, immutable_base, commit_message, remote, and any reviewed digests. "
+        "The host binds canonical_repo to AGENTS_ROOT, task_worktree to this job workspace, and "
+        "the receipt to the job Vault run directory; worker paths, receipt locations, and CI metadata "
+        "cannot authorize publication. Do not claim publication or completion; the host independently "
+        "checks the diff, review, remote, and required CI checks."
     )
     job_args = dict(workspace=Path(spec["workspace"]), vault=vault, prompt=prompt,
                     mode="run", provider="codex", codex_model=spec["model"], effort=spec["effort"],
@@ -1128,11 +1188,17 @@ def default_verifier(spec):
     prompt = json.dumps({
         "task": task,
         "job": spec["job"],
+        "publication_snapshot": spec.get("publication_snapshot"),
         "instructions": (
             "Act as an independent read-only verifier. Inspect the workspace, saved execution result and artifacts, "
             "the task acceptance criteria, current git status/log, and the public commit/merge/main synchronization. "
+            "For a publication proposal, separately verify the code/test change and return publication_readiness=true "
+            "only when those pre-publication checks are complete. Bind publication_review to the observed worktree "
+            "head and selected diff digest supplied in publication_snapshot (the host computed these from the "
+            "selected paths and immutable base); copy those values exactly. The host will recompute both and does "
+            "not treat this schema as evidence. "
             "Do not edit files, run write commands, or infer completion from words alone. Return JSON only: "
-            "{acceptance:boolean, findings:[objects], evidence:string, criteria:[{criterion:string, verified:boolean, evidence:string}], publication:{commit:string, mode:direct_main|pull_request, pr_number:integer}, publication_review:{status:complete, reviewed_head:string, reviewed_diff_digest:string, findings_complete:true, decisions:[{finding_id:string, decision:adopt|reject|separate, reason:string, evidence:[string], applied:boolean, applied_evidence:[string]}]}, "
+            "{acceptance:boolean, publication_readiness:boolean, findings:[objects], evidence:string, criteria:[{criterion:string, verified:boolean, evidence:string}], publication:{commit:string, mode:direct_main|pull_request, pr_number:integer}, publication_review:{status:complete, reviewed:true, reviewed_head:string, reviewed_diff_digest:string, findings_complete:true, decisions:[{finding_id:string, decision:adopt|reject|separate, reason:string, evidence:[string], applied:boolean, applied_evidence:[string]}]}, "
             "evidence_links:[strings]}. Copy every task acceptance criterion exactly and cite observed evidence for each. Saber5656/Agents uses direct main publication; other repositories require their PR delivery policy. "
             "Use findings for any missing or incorrect implementation and explain the repair required."
         ),
