@@ -1,9 +1,9 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -u
 
 PROCESS_STATUS="${1:-64}"
 RESULT_FILE="${2:-}"
-SCRIPT_DIR="${0:A:h}"
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 2>/dev/null || true)}"
 CANONICAL_VALIDATOR="${CANONICAL_VALIDATOR:-$SCRIPT_DIR/validate-canonical-result.py}"
 AUTOMATION_RESULT_SCHEMA="${AUTOMATION_RESULT_SCHEMA:-$SCRIPT_DIR/automation-result.schema.json}"
