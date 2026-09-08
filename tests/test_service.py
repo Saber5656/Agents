@@ -607,6 +607,24 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(recovered, [])
         self.assertEqual(self.service.get_job(job["id"])["state"], "running")
 
+    def test_recovery_reclaims_dead_worker_thread_in_live_service(self):
+        """A live daemon PID must not keep a vanished worker attempt occupied."""
+        from concurrent.futures import ThreadPoolExecutor
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="agents-worker") as pool:
+            claimed = pool.submit(self.service._claim_next).result()
+        claimed["_lock"].release()
+        run_dir = Path(claimed["attempt_run_dir"]); run_dir.mkdir(parents=True)
+        (run_dir / "0-codex-state.json").write_text(json.dumps({
+            "status": "running", "pid": 99999999,
+            "identity": {"pid": 99999999}}))
+        # The service process is still alive, but its recorded worker thread
+        # has disappeared. This is the state seen after a worker/future dies
+        # while launchd keeps the scheduler process running.
+        recovered = self.service.recover_stale_jobs(
+            lambda *_: {"safe_to_resume": True, "reason": "receipt is resumable"})
+        self.assertEqual(recovered, [{"job_id": job["id"], "state": "retry"}])
+
     def test_malformed_process_record_is_unknown_and_does_not_stop_other_recovery(self):
         other = self.tasks.create_task(purpose="other stale")
         other_workspace = self.root / "other-workspace"; other_workspace.mkdir()

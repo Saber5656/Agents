@@ -407,9 +407,55 @@ class ServiceStore:
                 return "dead"
             return "unknown"
 
+    @staticmethod
+    def _worker_thread_state(recorded_identity):
+        """Inspect a worker thread only when its owner is this process."""
+        try:
+            recorded = (json.loads(recorded_identity)
+                        if isinstance(recorded_identity, str)
+                        else recorded_identity)
+        except (TypeError, ValueError):
+            return "unknown"
+        if not isinstance(recorded, dict) or recorded.get("pid") != os.getpid():
+            return None
+        # Old attempts contain only process identity. Reclaiming those based
+        # on an unavailable thread identity would be unsafe.
+        if "thread_id" not in recorded:
+            return None
+        try:
+            thread_id = int(recorded["thread_id"])
+        except (TypeError, ValueError):
+            return "unknown"
+        for thread in threading.enumerate():
+            if thread.ident != thread_id:
+                continue
+            if (recorded.get("thread_name") is not None
+                    and recorded["thread_name"] != thread.name):
+                return "unknown"
+            native_id = getattr(thread, "native_id", None)
+            if (recorded.get("native_id") is not None and native_id is not None
+                    and int(recorded["native_id"]) != int(native_id)):
+                return "unknown"
+            return "alive"
+        return "dead"
+
+    @classmethod
+    def _worker_identity(cls):
+        identity = cls._process_identity(os.getpid())
+        thread = threading.current_thread()
+        identity.update({"thread_id": thread.ident, "thread_name": thread.name})
+        native_id = getattr(thread, "native_id", None)
+        if native_id is not None:
+            identity["native_id"] = native_id
+        return identity
+
     def _attempt_state(self, row):
         """Include a surviving runner/provider before reclaiming a service attempt."""
         worker_state = self._pid_state(row["pid"], row["identity"])
+        if worker_state == "alive":
+            thread_state = self._worker_thread_state(row["identity"])
+            if thread_state in ("dead", "unknown"):
+                worker_state = thread_state
         if worker_state != "dead":
             return worker_state
         run_dir = row["attempt_run_dir"] or str(Path(row["run_dir"]) / f"attempt-{row['attempt_number']}")
@@ -1058,16 +1104,18 @@ class ServiceStore:
             if resume:
                 aid = previous["id"]
                 attempt_run_dir = previous["run_dir"] or str(Path(row["run_dir"]) / f"attempt-{attempt}")
+                owner_identity = self._worker_identity()
                 conn.execute("""UPDATE service_attempts
                     SET pid=?,identity=?,status='running',started_at=?,ended_at=NULL,error=NULL
-                    WHERE id=?""", (os.getpid(), json.dumps(self._process_identity(os.getpid())), stamp, aid))
+                    WHERE id=?""", (os.getpid(), json.dumps(owner_identity), stamp, aid))
             else:
                 aid = f"attempt_{hashlib.sha256(f'{job_id}:{attempt}'.encode()).hexdigest()[:24]}"
                 attempt_run_dir = str(Path(row["run_dir"]) / f"attempt-{attempt}")
+                owner_identity = self._worker_identity()
                 conn.execute("""INSERT INTO service_attempts
                     (id,job_id,attempt_number,pid,identity,run_dir,status,started_at,ended_at,result_json,error)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (aid, job_id, attempt, os.getpid(),
-                    json.dumps(self._process_identity(os.getpid())), attempt_run_dir, "running", stamp,
+                    json.dumps(owner_identity), attempt_run_dir, "running", stamp,
                     None, None, None))
             claimed = dict(conn.execute("SELECT * FROM service_jobs WHERE id=?", (job_id,)).fetchone())
             claimed["attempt_id"] = aid
