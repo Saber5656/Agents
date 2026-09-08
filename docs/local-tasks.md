@@ -121,6 +121,13 @@ tasks. Requirements are also durable records: use
 to preserve all original requirements and later scope corrections through a
 partial completion or coordinator restart.
 
+For coordinator handoffs, `harness.context.RequirementLedger` wraps these
+TaskStore calls. Its explicit sidecar retains requirement dependencies, the
+latest scope correction, the selected unit, and local-only follow-ups. A
+handoff always returns all requirements, so selecting one child cannot discard
+the remaining work. Follow-ups contain no Issue mutation path and are left for
+the separate issueization batch.
+
 The store keeps the SQLite file and sidecars private. An explicit database
 parent may be mode `0755`, but group- or world-writable parent directories are
 rejected because SQLite must not follow a pathname that another local user can

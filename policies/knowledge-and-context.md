@@ -9,3 +9,9 @@
 - 再開時に目的・現状・判断・未解決事項・次の行動を復元できるようにする。
 - 環境の正本、設定、参照関係、ツールとモデル、確認したバージョン、実行・検証・配布・復旧方法、依存と既知の問題を更新する。
 - 情報は確認済み・推測・未確認を区別し、出典と確認時点を結び付ける。取得不能や省略された記録の範囲も残す。
+
+取得可能なvisible recordは `harness.context.VaultContext` でVault内のprivate chunkへ保存し、
+`context-index.json` から全chunkを辿れるようにする。providerのreasoning、analysis channel、
+暗号化payloadは公開用記録から除外し、既知の秘密値はredactする。上流でcompactionや欠落が
+起きた場合は `truncation` に観測した状態を記録し、完全な会話を推測しない。Vaultが欠落・
+書込み不能な場合は別の保存先を作らず、保存失敗として扱う。

@@ -13,3 +13,8 @@
 - 新しい別課題は担当者がローカル登録し、別バッチのエージェントがIssue化する。元作業の不具合・採用済みレビュー指摘は担当範囲で自動修正する。
 - 通常の開発はマージ・正本main同期・対応チャット整理まで進める。利用者が明示的に狭めた範囲を優先し、別課題のIssue化待ちで止めない。
 - 会話/Appを閉じても保存した状態から継続・復旧する。処理単位のタイムアウトや利用枠待ちをタスク全体の放棄へ変換しない。
+
+`harness.context.RequirementLedger` は、TaskStore の要件・revision・acceptance
+記録を正本として、要件間の依存、選択中の要件、最新のscope correction、別課題の
+local-only follow-upを明示的な sidecar に保存する。部分的に一つの要件だけを選択しても
+全要件と依存を handoff に含め、follow-up をIssue作成や実装範囲へ自動変換しない。
