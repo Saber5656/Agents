@@ -105,6 +105,20 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _private_text(path: Path, text: str) -> None:
+    """Write a receipt sidecar with a private mode regardless of umask."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = None
+            stream.write(text)
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _receipt_context(receipt_dir: str | Path | None, request_id: str, request: Mapping[str, Any]):
     if receipt_dir is None:
         return None
@@ -151,8 +165,8 @@ def _save_receipt(context, payload: Mapping[str, Any], stdout: str = "", stderr:
     root = context["root"]
     stdout_path = root / "stdout.txt"
     stderr_path = root / "stderr.txt"
-    stdout_path.write_text(stdout, encoding="utf-8")
-    stderr_path.write_text(stderr, encoding="utf-8")
+    _private_text(stdout_path, stdout)
+    _private_text(stderr_path, stderr)
     artifacts = {
         "request": str(context["request"]),
         "state": str(context["state"]),

@@ -264,6 +264,26 @@ def test_receipt_redacts_prompt_and_provider_output(tmp_path):
     assert "[REDACTED]" in Path(payload["artifacts"]["stdout"]).read_text()
 
 
+def test_receipt_sidecars_are_private_under_permissive_umask(tmp_path):
+    fake = tmp_path / "hermes"
+    fake.write_text("#!/bin/sh\nprintf 'stdout'\nprintf 'stderr' >&2\n", encoding="utf-8")
+    fake.chmod(0o755)
+    previous = os.umask(0)
+    try:
+        result = _run_cli(
+            tmp_path, "oneshot", "--prompt", "private", "--timeout", "1",
+            "--receipt-dir", str(tmp_path / "receipts"),
+        )
+    finally:
+        os.umask(previous)
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    receipt_root = Path(payload["receipt_path"]).parent
+    for name in ("request.json", "state.json", "result.json", "stdout.txt", "stderr.txt"):
+        assert (receipt_root / name).stat().st_mode & 0o777 == 0o600
+
+
 def test_request_id_path_traversal_is_rejected(tmp_path):
     fake = tmp_path / "hermes"
     fake.write_text("#!/bin/sh\nprintf done\n", encoding="utf-8")
