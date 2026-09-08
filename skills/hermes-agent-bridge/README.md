@@ -31,7 +31,8 @@ python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/herme
 - `oneshot --timeout SECONDS` で呼び出しをboundedにし、timeout・実行ファイル欠落を構造化結果で返す
 - `oneshot`、`send`、`list-targets` は既定30秒で終了し、`--timeout`で調整できる
 - `--receipt-dir DIR` を指定すると、request/state/result/stdout/stderrをprivate receiptへ保存する
-- 明示routeはChatGPT OAuthの`openai-codex`だけを許可し、APIキー環境変数・fallback・他providerは実行前に拒否する
+- 実行時はHermes configのprimary/fallbackを読み取り検証し、実コマンドへ`--provider openai-codex`を束縛する。未確認configは停止する
+- receiptのprompt・stdout・stderrはredactし、同じ`--request-id`の再実行も既存attemptを保持する
 
 ## Triggers
 

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -59,31 +60,87 @@ def _decode_output(value: Any) -> str:
     return str(value)
 
 
+def _redact_text(text: str, env: Mapping[str, str]) -> str:
+    result = text
+    for key, value in sorted(env.items(), key=lambda pair: -len(pair[1])):
+        if value and len(value) >= 4 and re.search(r"TOKEN|SECRET|PASSWORD|API_KEY|AUTH|PRIVATE_KEY", key, re.I):
+            result = result.replace(value, "[REDACTED]")
+    result = re.sub(
+        r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
+        "[REDACTED PRIVATE KEY]",
+        result,
+        flags=re.S,
+    )
+    result = re.sub(
+        r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)[^\s\"\\]+",
+        r"\1[REDACTED]",
+        result,
+    )
+    return re.sub(
+        r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-(?:ant-)?[A-Za-z0-9_-]{20,})",
+        "[REDACTED]",
+        result,
+    )
+
+
+def _redact_value(value: Any, env: Mapping[str, str]) -> Any:
+    if isinstance(value, str):
+        return _redact_text(value, env)
+    if isinstance(value, list):
+        return [_redact_value(item, env) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_value(item, env) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_value(item, env) for key, item in value.items()}
+    return value
+
+
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
+    if path.is_symlink():
+        raise ValueError(f"receipt path must not be a symlink: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.chmod(0o600)
     os.replace(temporary, path)
 
 
 def _receipt_context(receipt_dir: str | Path | None, request_id: str, request: Mapping[str, Any]):
     if receipt_dir is None:
         return None
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", request_id):
+    if request_id in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]+", request_id):
         raise ValueError("request_id must be a single filesystem-safe name")
-    root = Path(receipt_dir).expanduser().resolve() / request_id
-    root.mkdir(parents=True, exist_ok=True)
+    parent = Path(receipt_dir).expanduser()
+    if parent.exists() and parent.is_symlink():
+        raise ValueError("receipt directory must not be a symlink")
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        parent.chmod(0o700)
+    except OSError:
+        pass
+    base_root = parent.resolve() / request_id
+    if base_root.exists() and base_root.is_symlink():
+        raise ValueError("receipt request directory must not be a symlink")
+    base_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        base_root.chmod(0o700)
+    except OSError:
+        pass
+    root = base_root / f"attempt-{secrets.token_hex(8)}"
+    root.mkdir(mode=0o700)
     try:
         root.chmod(0o700)
     except OSError:
         pass
+    request_payload = dict(request)
+    request_payload["attempt_id"] = root.name
     context = {
         "root": root,
         "request": root / "request.json",
         "state": root / "state.json",
         "result": root / "result.json",
     }
-    _atomic_json(context["request"], dict(request))
+    _atomic_json(context["request"], request_payload)
     _atomic_json(context["state"], {"status": "pending", "request_id": request_id})
     return context
 
@@ -113,7 +170,10 @@ def _save_receipt(context, payload: Mapping[str, Any], stdout: str = "", stderr:
 
 def read_receipt(path: str | Path) -> dict[str, Any]:
     """Read a completed bridge receipt without retrying its external command."""
-    return json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    receipt = Path(path).expanduser()
+    if receipt.is_symlink():
+        raise ValueError("receipt path must not be a symlink")
+    return json.loads(receipt.read_text(encoding="utf-8"))
 
 
 def validate_subscription_route(
@@ -128,8 +188,9 @@ def validate_subscription_route(
     if paid:
         raise RoutePolicyError("paid API route is configured: " + ", ".join(paid))
 
-    configured_provider = environment.get("HERMES_INFERENCE_PROVIDER")
-    configured_model = environment.get("HERMES_INFERENCE_MODEL")
+    config = _read_hermes_config(environment)
+    configured_provider = environment.get("HERMES_INFERENCE_PROVIDER") or config["provider"]
+    configured_model = environment.get("HERMES_INFERENCE_MODEL") or config["model"]
     effective_provider = provider if provider is not None else configured_provider
     effective_model = model if model is not None else configured_model
     fallback = sorted(
@@ -138,6 +199,11 @@ def validate_subscription_route(
     )
     if fallback:
         raise RoutePolicyError("fallback route is not allowed: " + ", ".join(fallback))
+    configured_fallbacks = config["fallbacks"]
+    if any(item not in SUBSCRIPTION_PROVIDERS for item in configured_fallbacks):
+        raise RoutePolicyError("Hermes config contains a non-subscription fallback route")
+    if provider is None and configured_provider not in SUBSCRIPTION_PROVIDERS:
+        raise RoutePolicyError("Hermes config is not bound to the openai-codex subscription route")
     if effective_provider is not None and effective_provider not in SUBSCRIPTION_PROVIDERS:
         raise RoutePolicyError(
             f"provider is outside the ChatGPT subscription route: {effective_provider}"
@@ -145,11 +211,57 @@ def validate_subscription_route(
     if effective_model is not None and effective_provider is None:
         raise RoutePolicyError("model override requires an explicit openai-codex provider")
     return {
-        "provider": effective_provider,
+        "provider": "openai-codex",
         "model": effective_model,
-        "source": "explicit override" if provider is not None else "Hermes configured route",
-        "subscription_route": effective_provider in SUBSCRIPTION_PROVIDERS,
+        "source": "explicit override" if provider is not None else "Hermes config verified",
+        "subscription_route": True,
+        "config_path": config["path"],
     }
+
+
+def _read_hermes_config(env: Mapping[str, str]) -> dict[str, Any]:
+    configured = env.get("HERMES_CONFIG")
+    if configured:
+        path = Path(configured).expanduser()
+    else:
+        home = Path(
+            env.get("HERMES_HOME", str(Path(env.get("HOME", str(Path.home()))) / ".hermes"))
+        )
+        path = home / "config.yaml"
+    if not path.is_file() or path.is_symlink():
+        raise RoutePolicyError("Hermes config is unavailable for route verification")
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RoutePolicyError("PyYAML is required to verify Hermes config") from exc
+    try:
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RoutePolicyError("Hermes config could not be parsed") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("model"), dict):
+        raise RoutePolicyError("Hermes config has no verifiable model route")
+    model = value["model"]
+    provider = model.get("provider")
+    default_model = model.get("default")
+    if provider is not None and not isinstance(provider, str):
+        raise RoutePolicyError("Hermes config provider is malformed")
+    if default_model is not None and not isinstance(default_model, str):
+        raise RoutePolicyError("Hermes config model is malformed")
+    fallbacks: list[str] = []
+    configured_fallbacks = value.get("fallback_providers", [])
+    if configured_fallbacks is None:
+        configured_fallbacks = []
+    if not isinstance(configured_fallbacks, list) or not all(isinstance(item, str) for item in configured_fallbacks):
+        raise RoutePolicyError("Hermes config fallback providers are malformed")
+    fallbacks.extend(configured_fallbacks)
+    fallback_model = value.get("fallback_model")
+    if isinstance(fallback_model, dict) and fallback_model.get("provider"):
+        if not isinstance(fallback_model["provider"], str):
+            raise RoutePolicyError("Hermes config fallback model is malformed")
+        fallbacks.append(fallback_model["provider"])
+    elif fallback_model not in (None, {}):
+        raise RoutePolicyError("Hermes config fallback model is malformed")
+    return {"path": str(path), "provider": provider, "model": default_model, "fallbacks": fallbacks}
 
 
 def _process_identity(pid: int) -> dict[str, Any]:
@@ -159,7 +271,59 @@ def _process_identity(pid: int) -> dict[str, Any]:
             identity["process_group"] = os.getpgid(pid)
         except OSError:
             identity["process_group"] = None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        identity["alive"] = False
+        return identity
+    identity["alive"] = True
+    stat_path = Path(f"/proc/{pid}/stat")
+    try:
+        fields = stat_path.read_text(encoding="utf-8").split()
+        if len(fields) > 21:
+            identity["start_ticks"] = fields[21]
+    except (OSError, ValueError):
+        pass
+    try:
+        identity["command"] = (
+            Path(f"/proc/{pid}/cmdline")
+            .read_bytes()
+            .replace(b"\0", b" ")
+            .decode(errors="replace")
+            .strip()
+        )
+    except OSError:
+        pass
     return identity
+
+
+def _group_members(process_group: int | None) -> list[dict[str, Any]] | None:
+    ps = shutil.which("ps") or next(
+        (candidate for candidate in ("/bin/ps", "/usr/bin/ps") if Path(candidate).exists()),
+        None,
+    )
+    if not process_group or ps is None:
+        return None
+    try:
+        result = subprocess.run(
+            [ps, "-eo", "pid=,pgid=,stat="], capture_output=True, text=True, timeout=1
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    members = []
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        try:
+            pid, pgid = int(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        if pgid == process_group and not fields[2].startswith("Z"):
+            members.append({"pid": pid, "process_group": pgid, "state": fields[2]})
+    return members
 
 
 def _terminate_process_group(proc: subprocess.Popen[bytes]) -> dict[str, Any]:
@@ -201,11 +365,28 @@ def _terminate_process_group(proc: subprocess.Popen[bytes]) -> dict[str, Any]:
             proc.wait(timeout=0.5)
         except subprocess.TimeoutExpired:
             pass
+    remaining = _group_members(identity.get("process_group"))
+    if remaining:
+        if os.name == "posix" and identity.get("process_group"):
+            try:
+                os.killpg(identity["process_group"], signal.SIGKILL)
+                signal_sent = "SIGKILL"
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+        remaining = _group_members(identity.get("process_group"))
+    verified = remaining == []
+    terminated = proc.poll() is not None and verified
     return {
         "requested": True,
         "terminated": terminated,
         "signal": signal_sent,
         "process_identity": identity,
+        "remaining_members": remaining,
+        "verified": verified,
     }
 
 
@@ -272,20 +453,40 @@ def run_command(
 ) -> int:
     if timeout is None or timeout <= 0:
         raise ValueError("timeout must be positive")
+    environment = dict(os.environ)
     request_id = request_id or secrets.token_hex(16)
+    safe_args = _redact_value(args, environment)
     request = {
         "schema": "hermes-bridge-request/v1",
         "request_id": request_id,
-        "command": args,
-        "cwd": cwd,
+        "command": safe_args,
+        "cwd": _redact_text(cwd or "", environment) or None,
         "requested_route": {"provider": provider, "model": model},
         "timeout_seconds": timeout,
         "started_at": _now(),
     }
-    context = _receipt_context(receipt_dir, request_id, request)
-    base: dict[str, Any] = {"command": args, "cwd": cwd, "request_id": request_id}
+    base: dict[str, Any] = {
+        "command": safe_args,
+        "cwd": _redact_text(cwd or "", environment) or None,
+        "request_id": request_id,
+    }
     try:
-        route = validate_subscription_route(provider, model)
+        context = _receipt_context(receipt_dir, request_id, request)
+    except ValueError as exc:
+        payload = {
+            **base,
+            "status": "blocked",
+            "error": "receipt_policy",
+            "reason": str(exc),
+            "action": "rejected_before_process",
+            "returncode": 126,
+            "reconciliation_required": False,
+            "resumable": False,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 126
+    try:
+        route = validate_subscription_route(provider, model, env=environment)
     except RoutePolicyError as exc:
         payload = {
             **base,
@@ -353,14 +554,16 @@ def run_command(
 
     elapsed = max(0.0, time.monotonic() - started)
     usage, usage_source = _usage_from_output(stdout)
-    kind = _outcome_kind(returncode, stdout, stderr, timed_out)
+    safe_stdout = _redact_text(stdout, environment)
+    safe_stderr = _redact_text(stderr, environment)
+    kind = _outcome_kind(returncode, safe_stdout, safe_stderr, timed_out)
     payload = {
         **base,
         "status": "timeout" if timed_out else ("completed" if returncode == 0 else "failed"),
         "route": route,
         "returncode": 124 if timed_out else returncode,
-        "stdout": stdout,
-        "stderr": stderr,
+        "stdout": safe_stdout,
+        "stderr": safe_stderr,
         "elapsed_seconds": elapsed,
         "usage": usage,
         "usage_source": usage_source,
@@ -377,7 +580,7 @@ def run_command(
         payload["error"] = "executable_not_found"
     elif returncode != 0:
         payload["error"] = "execution_error"
-    artifacts = _save_receipt(context, payload, stdout, stderr)
+    artifacts = _save_receipt(context, payload, safe_stdout, safe_stderr)
     if artifacts:
         payload["artifacts"] = artifacts
         payload["receipt_path"] = str(context["result"])
@@ -437,8 +640,7 @@ def main() -> int:
         cmd = ["hermes", "-z", ns.prompt]
         if ns.model:
             cmd.extend(["--model", ns.model])
-        if ns.provider:
-            cmd.extend(["--provider", ns.provider])
+        cmd.extend(["--provider", ns.provider or "openai-codex"])
         if ns.toolsets:
             cmd.extend(["--toolsets", ns.toolsets])
         if ns.skills:

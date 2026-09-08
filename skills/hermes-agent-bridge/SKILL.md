@@ -115,7 +115,8 @@ Rules:
 - Keep prompts bounded and include expected output format.
 - Set `--timeout` for a bounded call. Timeout returns structured JSON with `error: "timeout"` and exit code 124; a missing `hermes` executable returns `error: "executable_not_found"` and exit code 127. No alternate provider or model is selected by this wrapper.
 - `send` and `list-targets` are bounded too (30 seconds by default). Pass `--receipt-dir` to persist private request/state/result/stdout/stderr artifacts and `--request-id` when a caller needs a stable receipt identity. `resume --receipt PATH` only reads a receipt; it never reruns Hermes.
-- Explicit inference routing is limited to the Hermes `openai-codex` OAuth subscription provider. API-key route variables, fallback route variables, and other providers are rejected before process creation; there is no paid-route fallback. An omitted route uses the Hermes configured route and is recorded as such.
+- Before process creation, the wrapper resolves and verifies the Hermes config primary/fallback route, then binds the actual command to the `openai-codex` OAuth subscription provider. API-key route variables, fallback route variables, other providers, and unavailable or malformed config are rejected; there is no paid-route fallback. An omitted route is allowed only when the resolved config primary is `openai-codex`.
+- Receipt prompt/command and stdout/stderr are redacted before persistence. Request IDs are filesystem-safe, receipt files are private and atomic, and repeated IDs create a new attempt while retaining earlier records.
 - Do not use `--yolo`.
 - If the command needs network or privileged local access and the current runtime blocks it, ask for approval through the current host environment.
 
