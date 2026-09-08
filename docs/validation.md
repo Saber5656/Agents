@@ -9,7 +9,7 @@ python -m pip install -r requirements-dev.txt
 python scripts/validate.py
 ```
 
-`requirements-dev.txt` pins `pytest==8.4.2`. The CI workflow uses the same
+`requirements-dev.txt` pins `pytest==9.0.3`. The CI workflow uses the same
 entrypoint and checks that the checkout is exactly `$GITHUB_SHA` before running
 it. Official GitHub Actions are pinned to full commit SHAs.
 
