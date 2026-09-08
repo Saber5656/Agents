@@ -9,6 +9,7 @@ user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 category: Dev
 created: 2026-03-15
+updated: 2026-09-08
 status: active
 purpose: Eyelash Corne ZMK キーマップの安全な編集・ビルド・書き込みワークフローを提供する
 argument-hint: "[変更内容の説明]"
@@ -42,13 +43,17 @@ ${ZMK_WORKSPACE_ROOT}/
 ```bash
 cd "${ZMK_WORKSPACE_ROOT}"
 
-# キーマップ変更後のビルド（左側 / 右側）
+# 通常のキーマップ変更は中央側（左側）だけビルドする
 nix develop --command just build eyelash_corne_left
-nix develop --command just build eyelash_corne_right
 
-# 書き込み（デバイスをブートローダーモードにしてから実行）
+# 右側専用のoverlay/configを変更した場合だけ右側もビルドする
+# nix develop --command just build eyelash_corne_right
+
+# 通常のキーマップ変更の書き込み（左側Nice!Nanoをブートローダーにする）
 nix develop --command just flash eyelash_corne_left
-nix develop --command just flash eyelash_corne_right
+
+# 右側専用の設定・firmwareを変更した場合だけ右側へ書き込む
+# nix develop --command just flash eyelash_corne_right
 
 # settings_reset（ペアリングリセット時）
 nix develop --command just flash settings_reset
@@ -146,8 +151,12 @@ nix develop --command just flash settings_reset
    ```bash
    nix develop --command just flash eyelash_corne_left
    ```
-5. 必要に応じて右側も同様に書き込み（右側専用の設定変更がある場合のみ。キーマップ変更は左側のみでOK）
+5. 右側は書き込まない（通常のキーマップ変更は左側への書き込みだけで反映される）。右側専用のoverlay/configやハードウェア用firmwareを変更した場合に限り、右側も別途ビルド・書き込みする。
 6. 動作確認後、dotfiles にコミット
+
+### 左右分割の書き込み方針（重要）
+
+このEyelash Corne構成では、`keymap` のbindings・layers・behaviorなど通常のキーマップ変更は中央側の左Nice!Nanoへ書き込めばよい。右側UF2を続けて書き込む必要はなく、右側を待機対象にも追加しない。右側専用overlay/config、基板固有のfirmware修正などを変更した場合だけ右側を対象にする。この判断は、過去の実機更新で左側のみの書き込みを完了し、右側更新なしで運用できた結果を反映している。
 
 ## キーマップの行列レイアウト（参考）
 
