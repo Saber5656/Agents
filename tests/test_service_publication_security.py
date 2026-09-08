@@ -140,3 +140,29 @@ def test_pending_receipt_is_reconciled_without_restarting_verifier(publication_j
         result = service.verify_with_agent(job["id"], verifier)
     assert result["status"] == "needs_verification"
     verifier.assert_not_called()
+
+
+def test_published_receipt_requests_only_final_acceptance_review(publication_job):
+    service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
+    proposal = _proposal(workspace, canonical, "git@github.com:Saber5656/Agents.git", base, vault)
+    review = _review(workspace, base, proposal["files"])
+    service.run_once(executor=lambda _: {"status": "completed",
+                                         "publication_proposal": proposal})
+    assert service._start_verification(job["id"])
+    receipt = Path(job["run_dir"])
+    receipt.mkdir(parents=True, exist_ok=True)
+    (receipt / "publication.json").write_text(json.dumps({
+        "status": "published", "published_sha": "a" * 40,
+        "files": proposal["files"], "base": base,
+        "preimage_digest": proposal["preimage_digest"],
+        "diff_digest": proposal["diff_digest"], "review": review,
+    }))
+    verifier = mock.Mock(return_value={"acceptance": False, "findings": []})
+    with mock.patch("harness.publication.publish_scoped",
+                    return_value={"status": "published", "published_sha": "a" * 40}), \
+         mock.patch("harness.service.observe_publication", return_value={"commit": "a" * 40}), \
+         mock.patch.object(service, "_publish_proposal") as publish:
+        result = service.verify_with_agent(job["id"], verifier)
+    assert result["status"] == "needs_verification"
+    verifier.assert_called_once()
+    publish.assert_not_called()

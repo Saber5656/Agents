@@ -1004,7 +1004,7 @@ class ServiceStore:
         if receipt.is_symlink() or not receipt.is_file():
             return None
         state = _read_json(receipt)
-        if state.get("status") not in {"pending", "incomplete"} or not state.get("published_sha"):
+        if state.get("status") not in {"pending", "incomplete", "published", "success"} or not state.get("published_sha"):
             return None
         files = state.get("files") or proposal.get("files")
         base = state.get("base") or proposal.get("immutable_base")
