@@ -140,16 +140,23 @@ class ServiceTests(unittest.TestCase):
         with mock.patch.object(self.service, "auth_guard", side_effect=blocked):
             self.assertEqual(self.service.run_once()["status"], "held")
         before = self.service.get_job(job["id"])
+        bound = lambda safe, reason: {"job_id": job["id"], "hold_reason": before["last_error"],
+                                      "safe": safe, "reason": reason}
 
         denied = self.service.resume_held(job["id"],
-                                          lambda _: {"safe": False, "reason": "paid route remains configured"})
+                                          lambda _: bound(False, "paid route remains configured"))
         self.assertEqual(denied["status"], "held")
         self.assertEqual(self.service.get_job(job["id"])["state"], "held")
         self.assertEqual(len(self.service.list_attempts(job["id"])), 1)
         self.assertGreater(len(self.service.get_job(job["id"])["updates"]), len(before["updates"]))
 
+        generic = self.service.resume_held(job["id"], lambda _: {"safe": True})
+        self.assertEqual(generic["status"], "held")
+        self.assertIn("not bound", generic["reason"])
+        self.assertEqual(self.service.get_job(job["id"])["state"], "held")
+
         resumed = self.service.resume_held(job["id"],
-                                           lambda _: {"safe": True, "reason": "subscription route verified"})
+                                           lambda _: bound(True, "subscription route verified"))
         self.assertEqual(resumed["status"], "retry")
         self.assertEqual(self.service.get_job(job["id"])["state"], "retry")
         self.assertEqual(self.service.get_job(job["id"])["attempts"][0]["status"], "held")
@@ -165,6 +172,44 @@ class ServiceTests(unittest.TestCase):
         detail = self.service.get_job(job["id"])
         self.assertEqual(detail["state"], "held")
         self.assertIn("recheck unavailable", " ".join(update["message"] for update in detail["updates"]))
+
+    def test_inference_hold_rechecks_subscription_auth_before_resume(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        blocked = AuthError("API route blocked", hold=True, action="inference_api_route", source="OPENAI_API_KEY")
+        with mock.patch.object(self.service, "auth_guard", side_effect=blocked):
+            self.assertEqual(self.service.run_once()["status"], "held")
+        held = self.service.get_job(job["id"])
+        evidence = {"job_id": job["id"], "hold_reason": held["last_error"],
+                    "safe": True, "reason": "subscription login was rechecked"}
+        with mock.patch.object(self.service, "auth_guard", side_effect=blocked) as auth:
+            result = self.service.resume_held(job["id"], lambda _: evidence)
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(self.service.get_job(job["id"])["state"], "held")
+        auth.assert_called_once()
+        with mock.patch.object(self.service, "auth_guard", return_value=True) as auth:
+            with mock.patch("harness.service.load_agents_env", return_value={}) as load_env:
+                result = self.service.resume_held(job["id"], lambda _: evidence)
+        self.assertEqual(result["status"], "retry")
+        auth.assert_called_once()
+        load_env.assert_called_once_with(self.root / ".env")
+
+    def test_held_resume_updates_task_while_job_is_still_held(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        blocked = AuthError("extra billing blocked", hold=True, action="purchase", source="paid-api")
+        with mock.patch.object(self.service, "auth_guard", side_effect=blocked):
+            self.assertEqual(self.service.run_once()["status"], "held")
+        held = self.service.get_job(job["id"])
+        evidence = {"job_id": job["id"], "hold_reason": held["last_error"], "safe": True,
+                    "reason": "fixture operation removed"}
+        states = []
+        original = self.tasks.update_task
+        def observe(task_id, **kwargs):
+            states.append(self.service.get_job(job["id"])["state"])
+            return original(task_id, **kwargs)
+        with mock.patch.object(self.tasks, "update_task", side_effect=observe):
+            result = self.service.resume_held(job["id"], lambda _: evidence)
+        self.assertEqual(result["status"], "retry")
+        self.assertEqual(states, ["held"])
 
     def test_worker_timeout_is_recorded_and_rescheduled_without_model_promotion(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)

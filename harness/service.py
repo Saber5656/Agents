@@ -614,9 +614,10 @@ class ServiceStore:
     def recheck_held(self, job_id, checker):
         """Run an explicit, read-only safety check for a held job.
 
-        A hold is durable by design.  The checker must return ``{"safe":
-        True}`` before a caller may resume it; a missing, false, or failed
-        check leaves the job held and appends the diagnostic to its history.
+        A hold is durable by design.  The checker must return ``{"job_id":
+        job_id, "hold_reason": current_last_error, "safe": True}`` before a
+        caller may resume it; a missing, false, or failed check leaves the job
+        held and appends the diagnostic to its history.
         No provider or worker is started here.
         """
         if not callable(checker):
@@ -632,11 +633,24 @@ class ServiceStore:
             diagnostic = f"held recheck failed: {type(exc).__name__}: {exc}"
             self.record_update(job_id, diagnostic, ["local://cost-security/recheck-failed"])
             return {"status": "held", "safe": False, "reason": diagnostic}
-        if not isinstance(result, dict) or result.get("safe") is not True:
+        if not isinstance(result, dict) or result.get("job_id") != job_id or result.get("hold_reason") != job.get("last_error"):
+            diagnostic = "held recheck was not bound to this job and current hold reason"
+            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-unbound"])
+            return {"status": "held", "safe": False, "reason": diagnostic}
+        if result.get("safe") is not True:
             reason = result.get("reason", "explicit safety recheck did not pass") if isinstance(result, dict) else "explicit safety recheck was malformed"
             diagnostic = f"held recheck blocked resume: {reason}"
             self.record_update(job_id, diagnostic, ["local://cost-security/recheck-blocked"])
             return {"status": "held", "safe": False, "reason": diagnostic}
+        attempts = job.get("attempts", [])
+        latest = attempts[-1].get("result", {}) if attempts else {}
+        if isinstance(latest, dict) and latest.get("action") == "inference_api_route":
+            try:
+                self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"))
+            except Exception as exc:
+                diagnostic = f"held inference route remains blocked: {type(exc).__name__}: {exc}"
+                self.record_update(job_id, diagnostic, ["local://cost-security/recheck-auth-failed"])
+                return {"status": "held", "safe": False, "reason": diagnostic}
         return {"status": "ready", "safe": True,
                 "reason": result.get("reason", "explicit safety recheck passed"),
                 "evidence": list(result.get("evidence", [])) if isinstance(result.get("evidence", []), list) else []}
@@ -658,22 +672,19 @@ class ServiceStore:
             return {"status": "held", "safe": False, "reason": diagnostic}
         self.record_update(job_id, "Held job explicitly cleared for resume after safety recheck: " + str(result.get("reason", "passed")),
                            result.get("evidence", []) or ["local://cost-security/recheck-passed"])
+        try:
+            current = self.tasks.get_task(job["task_id"])
+            self.tasks.update_task(job["task_id"], expected_version=current["version"], execution_status="planned")
+        except Exception as exc:
+            diagnostic = f"held resume task update failed: {type(exc).__name__}: {exc}"
+            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-task-update-failed"])
+            return {"status": "held", "safe": False, "reason": diagnostic}
         with self.tx() as conn:
             changed = conn.execute(
                 "UPDATE service_jobs SET state='retry',next_attempt_at=NULL,last_error=NULL,updated_at=? WHERE id=? AND state='held'",
                 (now(), job_id)).rowcount
         if not changed:
             return {"status": "held", "safe": False, "reason": "held job changed during resume"}
-        try:
-            current = self.tasks.get_task(job["task_id"])
-            self.tasks.update_task(job["task_id"], expected_version=current["version"], execution_status="planned")
-        except Exception as exc:
-            diagnostic = f"held resume task update failed: {type(exc).__name__}: {exc}"
-            with self.tx() as conn:
-                conn.execute("UPDATE service_jobs SET state='held',last_error=?,updated_at=? WHERE id=? AND state='retry'",
-                             (diagnostic, now(), job_id))
-            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-task-update-failed"])
-            return {"status": "held", "safe": False, "reason": diagnostic}
         return {"status": "retry", "safe": True, "job_id": job_id}
 
     def _dependencies_ready(self, task):
