@@ -138,6 +138,35 @@ def test_terminal_invalid_json_is_reused_for_unchanged_input(roots):
     assert calls == [1]
 
 
+def test_saved_valid_response_retries_local_registration_without_provider(roots, monkeypatch):
+    agents, vault = roots
+    findings = [finding()]
+    with TaskStore(agents_root=agents, vault_root=vault) as store:
+        root = store.create_task(purpose="root task")
+        calls = []
+
+        def runner(_):
+            calls.append(1)
+            return {"status": "completed", "text": response_for(findings, "separate")}
+
+        attempts = iter([OSError("local registration temporarily unavailable"), []])
+        def register(*args):
+            result = next(attempts)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        monkeypatch.setattr("harness.service_review._register_separate", register)
+        request = spec(agents, vault, root["id"])
+        first = decide_findings(request, review(findings), runner=runner)
+        second = decide_findings(request, review(findings), runner=runner)
+
+    assert first["status"] == "incomplete"
+    assert first["retryable"] is True
+    assert second["status"] == "complete"
+    assert calls == [1]
+
+
 def test_changed_review_evidence_requests_a_new_provider_turn(roots):
     agents, vault = roots
     findings = [finding()]

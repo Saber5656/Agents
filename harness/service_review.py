@@ -380,7 +380,7 @@ def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner
         return {**recovered, "input_digest": digest}
     attempt_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=directory))
     env = dict(os.environ)
-    provider_completed = False
+    schema_invalid = False
     try:
         normalized_spec, normalized_review, findings, evidence_links = _validate(spec, review)
         prompt = _prompt(normalized_spec, findings, evidence_links)
@@ -388,8 +388,18 @@ def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner
         paid = sorted(key for key in PAID_ROUTE_KEYS if env.get(key))
         if paid:
             raise ReviewInputError("paid API route is configured: " + ", ".join(paid))
+        saved_provider = None
+        if cached and cached.get("status") == "incomplete" and cached.get("retryable") is True:
+            saved = _load_json(directory / "provider-output.json")
+            if isinstance(saved, dict) and "output" in saved:
+                candidate = saved["output"]
+                _, saved_meta = _result_text(candidate)
+                if saved_meta.get("status") in (None, "completed", "complete", "success"):
+                    saved_provider = candidate
         if recovered is not None:
             provider_result = recovered
+        elif saved_provider is not None:
+            provider_result = saved_provider
         elif runner is None:
             provider_result = _run_codex_review(normalized_spec, prompt, attempt_dir)
         else:
@@ -404,8 +414,11 @@ def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner
         text, provider_meta = _result_text(provider_result)
         if provider_meta.get("status") not in (None, "completed", "complete", "success"):
             raise ReviewInputError(_redact(str(provider_meta.get("reason", "review provider did not complete")), env))
-        provider_completed = True
-        decisions = _parse_decisions(text, findings)
+        try:
+            decisions = _parse_decisions(text, findings)
+        except ReviewInputError:
+            schema_invalid = True
+            raise
         separate_task_ids = _register_separate(normalized_spec, normalized_review, decisions, digest)
         result = {"status": "complete", "input_digest": digest, "decisions": decisions,
                   "adopted_findings": [item for item in decisions if item["decision"] == "adopt"],
@@ -417,7 +430,7 @@ def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner
     except (ReviewInputError, OSError, ValueError) as exc:
         result = {"status": "incomplete", "input_digest": digest,
                   "reason": str(exc) or type(exc).__name__,
-                  "retryable": not provider_completed}
+                  "retryable": not schema_invalid}
     result = _redact_value(result, env)
     _save_json(directory / "result.json", result, env)
     if recovered and recovered.get("recovered_from"):

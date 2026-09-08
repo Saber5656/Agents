@@ -820,6 +820,40 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
         self.assertFalse(any("adopted" in update["message"] for update in self.service.get_job(job["id"])["updates"]))
 
+    def test_same_verifier_finding_reuses_disposition_after_reconciliation(self):
+        from harness.service_review import decide_findings as decide_review, stable_finding_id
+
+        task = self.tasks.create_task(purpose="stable review input", acceptance_evidence=["accepted"])
+        self.tasks.add_acceptance_evidence(task["id"], "accepted", verified=True)
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context", retry_base=0)
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        finding = {"issue": "out of scope", "severity": "low"}
+        review_result = {"acceptance": False, "findings": [finding],
+                         "evidence_links": ["vault://review"]}
+        provider_calls = []
+
+        def runner(_):
+            provider_calls.append(1)
+            return {"status": "completed", "text": json.dumps({"decisions": [{
+                "finding_id": stable_finding_id(finding), "decision": "reject",
+                "reason": "outside task scope", "evidence": ["vault://review"],
+            }]})}
+
+        def coordinator(spec, review):
+            return decide_review(spec, review, runner=runner)
+
+        with mock.patch("harness.service.decide_findings", side_effect=coordinator), \
+             mock.patch.object(self.service, "record_update"):
+            first = self.service.verify_with_agent(job["id"], lambda _: review_result)
+            self.assertEqual(first["status"], "needs_verification")
+            self.assertTrue(self.service._start_verification(job["id"]))
+            second = self.service.verify_with_agent(job["id"], lambda _: (_ for _ in ()).throw(
+                AssertionError("unchanged verifier result must be reused")))
+
+        self.assertEqual(second["status"], "needs_verification")
+        self.assertEqual(provider_calls, [1])
+
     def test_malformed_finding_disposition_does_not_adopt(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
         finding = {"issue": "malformed disposition", "severity": "high"}
@@ -970,6 +1004,21 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(second["status"], "needs_verification")
         self.assertEqual(second["verification"], verdict)
         self.assertEqual(calls, [1])
+
+    def test_verifier_cache_redacts_environment_secrets(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        secret = "fixture-verifier-cache-secret"
+        with mock.patch.dict(os.environ, {"FIXTURE_API_TOKEN": secret}):
+            self.service.verify_with_agent(job["id"], lambda _: {
+                "acceptance": False, "findings": [], "evidence": secret,
+            })
+        records = list(Path(job["run_dir"]).glob("verification-*/service-result.json"))
+        self.assertEqual(len(records), 1)
+        saved = records[0].read_text()
+        self.assertNotIn(secret, saved)
+        self.assertIn("[REDACTED]", saved)
 
     def test_verifier_rechecks_after_relevant_evidence_changes(self):
         task = self.tasks.create_task(purpose="review evidence", acceptance_evidence=["accepted"])

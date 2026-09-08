@@ -136,6 +136,25 @@ def _atomic_write_bytes(path, content):
             pass
 
 
+def _stable_review_job(job):
+    job_keys = (
+        "id", "task_id", "workspace", "run_dir", "resource", "prompt", "context",
+        "model", "effort", "timeout", "attempts_count", "updates", "requirement_id",
+        "work_unit_id", "repository", "canonical_repo", "branch", "immutable_base",
+        "vault_reference", "criteria", "selection_context",
+    )
+
+    stable_job = {key: job[key] for key in job_keys if key in job}
+    attempts = []
+    for attempt in job.get("attempts", []):
+        if not isinstance(attempt, dict):
+            continue
+        attempts.append({key: attempt[key] for key in
+                         ("attempt_number", "result") if key in attempt})
+    stable_job["attempts"] = attempts
+    return stable_job
+
+
 def _verification_input_digest(job, task, *, publication_snapshot=None,
                                 publication_readback=None):
     """Identify the evidence reviewed by one acceptance-verifier turn.
@@ -151,27 +170,13 @@ def _verification_input_digest(job, task, *, publication_snapshot=None,
         "evidence_links", "acceptance_records", "completion_evidence",
         "dependencies", "work_units", "github_issues", "expected_result_history",
     )
-    job_keys = (
-        "id", "task_id", "workspace", "run_dir", "resource", "prompt", "context",
-        "model", "effort", "timeout", "attempts_count", "updates", "requirement_id",
-        "work_unit_id", "repository", "canonical_repo", "branch", "immutable_base",
-        "vault_reference", "criteria", "selection_context",
-    )
 
     def pick(value, keys):
         return {key: value[key] for key in keys if key in value}
 
-    stable_job = pick(job, job_keys)
-    attempts = []
-    for attempt in job.get("attempts", []):
-        if not isinstance(attempt, dict):
-            continue
-        attempts.append({key: attempt[key] for key in
-                         ("attempt_number", "result") if key in attempt})
-    stable_job["attempts"] = attempts
     payload = {
         "task": pick(task, task_keys),
-        "job": stable_job,
+        "job": _stable_review_job(job),
         "publication_snapshot": publication_snapshot,
         "publication_readback": publication_readback,
     }
@@ -182,8 +187,10 @@ def _verification_input_digest(job, task, *, publication_snapshot=None,
 def _save_verification_json(path, value):
     path = Path(path)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _atomic_write_bytes(path, (json.dumps(value, sort_keys=True, ensure_ascii=False,
-                                           separators=(",", ":"), default=str) + "\n").encode())
+    from .runner import redact
+    text = json.dumps(value, sort_keys=True, ensure_ascii=False,
+                      separators=(",", ":"), default=str) + "\n"
+    _atomic_write_bytes(path, redact(text, os.environ).encode())
 
 
 def _load_verification_json(path):
@@ -1518,7 +1525,8 @@ class ServiceStore:
         findings = result.get("findings", []) if isinstance(result, dict) else []
         if findings:
             links = tuple(item for item in (result.get("evidence_links", []) if isinstance(result, dict) else []) if isinstance(item, str))
-            review_spec = {"task": self.tasks.get_task(job["task_id"]), "job": job,
+            review_spec = {"task": self.tasks.get_task(job["task_id"]),
+                           "job": _stable_review_job(job),
                            "agents_root": str(self.tasks.agents_root),
                            "vault_root": str(self.tasks.vault_root)}
             try:
