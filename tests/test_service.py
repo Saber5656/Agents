@@ -859,6 +859,28 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(third["status"], "needs_verification")
         self.assertEqual(provider_calls, [1, 1])
 
+    def test_disposition_cache_does_not_cover_concurrent_external_update(self):
+        task = self.tasks.create_task(purpose="concurrent review update", acceptance_evidence=["accepted"])
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context", retry_base=0)
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        finding = {"issue": "unsupported", "severity": "low"}
+        verdict = {"acceptance": False, "findings": [finding], "evidence_links": ["vault://review"]}
+        disposition = {"status": "complete", "decisions": [], "adopted_findings": [],
+                       "rejected_findings": [{"finding": finding, "reason": "unsupported"}]}
+        original = self.service.record_update
+        def interleaved(*args, **kwargs):
+            result = original(*args, **kwargs)
+            original(job["id"], "new external evidence", ["vault://new"])
+            return result
+        with mock.patch("harness.service.decide_findings", return_value=disposition), \
+             mock.patch.object(self.service, "record_update", side_effect=interleaved):
+            self.service.verify_with_agent(job["id"], lambda _: verdict)
+        self.assertTrue(self.service._start_verification(job["id"]))
+        verifier = mock.Mock(return_value={"acceptance": False, "findings": []})
+        self.service.verify_with_agent(job["id"], verifier)
+        self.assertEqual(verifier.call_count, 1)
+
     def test_malformed_finding_disposition_does_not_adopt(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
         finding = {"issue": "malformed disposition", "severity": "high"}
