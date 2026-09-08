@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 from unittest import mock
@@ -206,3 +207,53 @@ def test_repair_instruction_is_passed_to_next_executor(publication_job):
     service.run_once(executor=lambda spec: (seen.append(spec) or {"status": "failed"}))
     assert seen and "rebase" in seen[0]["updates"][-1]["message"]
     assert "immutable_base" in seen[0]["updates"][-1]["message"]
+
+
+def test_repair_state_and_instruction_commit_atomically(publication_job):
+    service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
+    service.run_once(executor=lambda _: {"status": "completed"})
+    assert service._start_verification(job["id"])
+    with service.tx() as conn:
+        conn.execute("""CREATE TRIGGER fail_repair_update BEFORE INSERT ON service_updates
+                        BEGIN SELECT RAISE(ABORT, 'injected repair update failure'); END""")
+    with pytest.raises(sqlite3.IntegrityError, match="injected repair update failure"):
+        service._schedule_publication_repair(job["id"], "publication conflict")
+    detail = service.get_job(job["id"])
+    assert detail["state"] == "verifying"
+    assert detail["attempts"][0]["status"] == "verifying"
+    assert detail["updates"] == []
+    with service.tx() as conn:
+        conn.execute("DROP TRIGGER fail_repair_update")
+    service._schedule_publication_repair(job["id"], "publication conflict")
+    detail = service.get_job(job["id"])
+    assert detail["state"] == "retry"
+    assert "rebase" in detail["updates"][-1]["message"]
+
+
+def test_ancestor_publication_readback_allows_dependent_task(publication_job):
+    service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
+    with service.tx() as conn:
+        conn.execute("UPDATE service_jobs SET state='cancelled' WHERE id=?", (job["id"],))
+    dependency = tasks.create_task(purpose="published ancestor", repository="Saber5656/Agents",
+                                   acceptance_evidence=["check"])
+    tasks.add_acceptance_evidence(dependency["id"], "check", verified=True)
+    receipt = vault / "ancestor-acceptance.json"
+    receipt.write_text(json.dumps({
+        "review": {"acceptance": True, "findings": [],
+                   "criteria": [{"criterion": "check", "verified": True,
+                                  "evidence": "observed"}]},
+        "publication_readback": {"repository": "Saber5656/Agents",
+                                  "commit": "a" * 40, "main": "b" * 40,
+                                  "commit_is_ancestor": True,
+                                  "merge_base": "a" * 40,
+                                  "mode": "direct_main"},
+    }))
+    current = tasks.get_task(dependency["id"])
+    tasks.update_task(dependency["id"], expected_version=current["version"],
+                      execution_status="verified")
+    tasks.add_completion_evidence(dependency["id"], str(receipt))
+    dependent = tasks.create_task(purpose="follows publication", repository="Saber5656/Agents",
+                                  dependencies=[dependency["id"]])
+    dep_job = service.enroll(dependent["id"], workspace, "prompt", "context")
+    result = service.run_once(executor=lambda _: {"status": "completed"})
+    assert result["status"] == "needs_verification"

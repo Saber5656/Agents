@@ -513,22 +513,26 @@ class ServiceStore:
 
     def _schedule_publication_repair(self, job_id, diagnostic):
         """Return a publication race to the original worker for repair."""
-        with self.tx() as conn:
-            conn.execute("UPDATE service_jobs SET state='retry',next_attempt_at=NULL,last_error=?,updated_at=? WHERE id=? AND state='verifying'", (diagnostic, now(), job_id))
-            conn.execute("UPDATE service_attempts SET status='repair_required',error=? WHERE job_id=? AND status='verifying'", (diagnostic, job_id))
         job = self.get_job(job_id)
         next_generation = max(1, int(job.get("attempts_count") or 0) + 1) if job else 1
         receipt_name = "publication.json" if next_generation == 1 else f"publication-{next_generation}.json"
         diagnostic = (f"{diagnostic}; rebase the task branch onto current canonical main, recompute "
                       f"immutable_base and selected digests, and use new receipt generation {receipt_name}; "
                       "do not reuse the failed publication receipt")
+        stamp = now()
+        with self.tx() as conn:
+            changed = conn.execute("UPDATE service_jobs SET state='retry',next_attempt_at=NULL,last_error=?,verification_count=0,updated_at=? WHERE id=? AND state='verifying'", (diagnostic, stamp, job_id)).rowcount
+            if changed != 1:
+                return
+            conn.execute("UPDATE service_attempts SET status='repair_required',error=? WHERE job_id=? AND status='verifying'", (diagnostic, job_id))
+            row = conn.execute("SELECT COALESCE(MAX(sequence),0) FROM service_updates WHERE job_id=?", (job_id,)).fetchone()
+            conn.execute("INSERT INTO service_updates VALUES (?,?,?,?,?)", (job_id, row[0] + 1, diagnostic, json.dumps(["vault://publication-repair"]), stamp))
         task = self.tasks.get_task(job["task_id"]) if job else None
         if task is not None:
             try:
                 self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="running")
             except ConflictError:
                 pass
-        self.record_update(job_id, diagnostic, ["vault://publication-repair"])
 
     @staticmethod
     def _publication_conflict(error):
@@ -634,7 +638,10 @@ class ServiceStore:
                 return False
             if not re.fullmatch(r"[0-9a-fA-F]{40}", str(publication.get("commit", ""))):
                 return False
-            if publication.get("main") != publication.get("commit"):
+            same_main = publication.get("main") == publication.get("commit")
+            ancestor_main = (publication.get("commit_is_ancestor") is True
+                             and publication.get("merge_base") == publication.get("commit"))
+            if not same_main and not ancestor_main:
                 return False
             criteria = review["criteria"]
             expected = {item["evidence"] for item in task.get("acceptance_records", [])}
@@ -1278,6 +1285,7 @@ def observe_publication(job, task, proof):
     if remote.api("commits/main")["sha"] != local or git(canonical, "rev-parse", "HEAD") != local:
         raise ValueError("main moved during publication verification")
     return {"repository": repository, "commit": commit, "main": local,
+            "commit_is_ancestor": True, "merge_base": commit,
             "canonical_workspace": canonical, "mode": proof["mode"],
             **({"files": selected_files} if selected_files is not None else {})}
 
