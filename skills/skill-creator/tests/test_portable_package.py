@@ -44,7 +44,7 @@ def run(script: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_quick_validate_is_portable_without_yaml_package(tmp_path):
+def test_quick_validate_runs_with_declared_yaml_dependency(tmp_path):
     result = run(SCRIPTS / "quick_validate.py", str(make_skill(tmp_path)))
     assert result.returncode == 0, result.stderr + result.stdout
     assert "valid" in result.stdout.lower()
@@ -78,22 +78,22 @@ def test_quick_validate_keeps_declared_boolean_and_list_types(tmp_path):
     assert result.returncode == 0, result.stderr + result.stdout
 
 
-def test_quick_validate_parser_has_stable_types_without_optional_yaml():
+def test_missing_yaml_dependency_is_actionable_instead_of_alternate_parsing(tmp_path, monkeypatch):
     module = load_script("quick_validate")
-    parsed = module.parse_frontmatter(
-        "name: demo\n"
-        "description: >-\n"
-        "  A portable skill\n"
-        "user-invocable: true\n"
-        "fallback_models: [gpt-5.6-luna, gpt-5.4-mini]\n"
-    )
+    monkeypatch.setattr(module, "yaml", None)
+    valid, message = module.validate_skill(make_skill(tmp_path))
+    assert valid is False
+    assert "requirements-quick-validate.txt" in message
 
-    assert parsed == {
-        "name": "demo",
-        "description": "A portable skill",
-        "user-invocable": True,
-        "fallback_models": ["gpt-5.6-luna", "gpt-5.4-mini"],
-    }
+
+def test_valid_yaml_metadata_uses_full_parser(tmp_path):
+    skill = make_skill(tmp_path)
+    skill.joinpath("SKILL.md").write_text(
+        "---\nname: demo\ndescription: A demo # YAML comment\n"
+        "metadata: {owner: team, labels: [a, b]}\n---\n# Demo\n"
+    )
+    result = run(SCRIPTS / "quick_validate.py", str(skill))
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_quick_validate_rejects_duplicate_keys_without_optional_yaml(tmp_path):
@@ -286,3 +286,16 @@ def test_creator_instructions_match_routing_implementation():
     assert "Codex CLIまたはCodex CLI" not in skill_text
     assert "`codex exec` を使わず" not in skill_text
     assert "`run_eval.py` が明示したモデル・reasoning effortで `codex exec`" in skill_text
+
+
+@pytest.mark.parametrize("field", ["name", "description"])
+def test_required_metadata_cannot_be_blank(tmp_path, field):
+    skill = make_skill(tmp_path)
+    values = {"name": "demo", "description": "useful description"}
+    values[field] = "   "
+    skill.joinpath("SKILL.md").write_text(
+        "---\n" + "\n".join(f'{key}: "{value}"' for key, value in values.items()) + "\n---\n# Demo\n"
+    )
+    result = run(SCRIPTS / "quick_validate.py", str(skill))
+    assert result.returncode == 1
+    assert "empty" in result.stdout.lower()

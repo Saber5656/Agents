@@ -5,18 +5,17 @@ Quick validation script for skills - minimal version
 
 import sys
 import datetime as _datetime
-import json
 import re
 from pathlib import Path
 
 try:
     import yaml
-except ModuleNotFoundError:  # Keep simple metadata validation usable in a clean install.
+except ModuleNotFoundError:  # Report setup instructions without an import traceback.
     yaml = None
 
 
 class FrontmatterError(ValueError):
-    """A frontmatter value is outside the validator's deliberately small YAML subset."""
+    """Frontmatter violates the metadata contract."""
 
 
 if yaml is not None:
@@ -43,119 +42,6 @@ def _normalise_yaml(value):
     return value
 
 
-def _split_flow_items(raw: str) -> list[str]:
-    items = []
-    current = []
-    quote = None
-    for char in raw:
-        if quote:
-            current.append(char)
-            if char == quote:
-                quote = None
-        elif char in "'\"":
-            quote = char
-            current.append(char)
-        elif char == ',':
-            items.append(''.join(current).strip())
-            current = []
-        else:
-            current.append(char)
-    if quote:
-        raise FrontmatterError("Unmatched quote in flow sequence")
-    tail = ''.join(current).strip()
-    if tail:
-        items.append(tail)
-    elif items:
-        raise FrontmatterError("Trailing comma in flow sequence")
-    return items
-
-
-def _parse_scalar(raw: str):
-    """Parse only scalar/flow-sequence forms used by Codex skill metadata.
-
-    This is the portable fallback for environments without the declared
-    PyYAML dependency; full nested YAML is handled by PyYAML when available.
-    """
-    if not raw:
-        return None
-    if raw[0] in "'\"":
-        if len(raw) < 2 or raw[-1] != raw[0]:
-            raise FrontmatterError("Unmatched quote")
-        if raw[0] == '"':
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError as exc:
-                raise FrontmatterError(f"Invalid double-quoted scalar: {exc.msg}") from exc
-        inner = raw[1:-1]
-        index = 0
-        while index < len(inner):
-            if inner[index] == "'":
-                if index + 1 >= len(inner) or inner[index + 1] != "'":
-                    raise FrontmatterError("Unescaped single quote")
-                index += 2
-            else:
-                index += 1
-        return inner.replace("''", "'")
-    if raw[0] == '[':
-        if not raw.endswith(']'):
-            raise FrontmatterError("Unterminated flow sequence")
-        return [_parse_scalar(item) for item in _split_flow_items(raw[1:-1])]
-    if raw[0] == '{':
-        raise FrontmatterError("Flow mappings are not supported")
-    if raw in ('true', 'True', 'TRUE'):
-        return True
-    if raw in ('false', 'False', 'FALSE'):
-        return False
-    if raw in ('null', 'Null', 'NULL', '~'):
-        return None
-    if re.fullmatch(r"[+-]?(?:\d[\d_]*|\d[\d_]*\.\d+|\d[\d_]*[eE][+-]?\d+)", raw):
-        raise FrontmatterError("numeric metadata requires a quoted string")
-    if raw in (']', '}'):
-        raise FrontmatterError("Unexpected flow collection terminator")
-    return raw
-
-
-def parse_frontmatter(text):
-    """Parse the strict YAML subset needed for skill metadata."""
-    values = {}
-    lines = text.splitlines()
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if not line.strip() or line.lstrip().startswith('#'):
-            index += 1
-            continue
-        if ':' not in line or line[:1].isspace():
-            raise ValueError(f"Invalid frontmatter line: {line}")
-        key, raw = line.split(':', 1)
-        key = key.strip()
-        raw = raw.strip()
-        if not key:
-            raise ValueError("Frontmatter key cannot be empty")
-        if key in values:
-            raise FrontmatterError(f"duplicate frontmatter key: {key}")
-        if raw in ('>', '|', '>-', '|-'):
-            continuation = []
-            index += 1
-            while index < len(lines) and (lines[index].startswith('  ') or lines[index].startswith('\t')):
-                continuation.append(lines[index].strip())
-                index += 1
-            values[key] = ('\n' if raw.startswith('|') else ' ').join(continuation)
-            continue
-        if not raw and index + 1 < len(lines) and lines[index + 1].startswith('  - '):
-            sequence = []
-            index += 1
-            while index < len(lines) and lines[index].startswith('  - '):
-                sequence.append(_parse_scalar(lines[index][4:].strip()))
-                index += 1
-            values[key] = sequence
-            continue
-        if not raw and index + 1 < len(lines) and (lines[index + 1].startswith('  ') or lines[index + 1].startswith('\t')):
-            raise FrontmatterError("nested mappings require PyYAML; install the declared PyYAML dependency")
-        values[key] = _parse_scalar(raw)
-        index += 1
-    return values
-
 def validate_skill(skill_path):
     """Basic validation of a skill"""
     skill_path = Path(skill_path)
@@ -177,12 +63,13 @@ def validate_skill(skill_path):
 
     frontmatter_text = match.group(1)
 
-    # Parse YAML frontmatter
+    # One parser keeps metadata semantics identical across installations.
+    if yaml is None:
+        return False, ("PyYAML is required: install the declared dependency with "
+                       "python3 -m pip install -r "
+                       "skills/skill-creator/requirements-quick-validate.txt")
     try:
-        if yaml is not None:
-            frontmatter = _normalise_yaml(yaml.load(frontmatter_text, Loader=_UniqueSafeLoader))
-        else:
-            frontmatter = parse_frontmatter(frontmatter_text)
+        frontmatter = _normalise_yaml(yaml.load(frontmatter_text, Loader=_UniqueSafeLoader))
         if not isinstance(frontmatter, dict):
             return False, "Frontmatter must be a YAML dictionary"
     except (FrontmatterError, ValueError, TypeError) as e:
@@ -259,6 +146,8 @@ def validate_skill(skill_path):
     if not isinstance(name, str):
         return False, f"Name must be a string, got {type(name).__name__}"
     name = name.strip()
+    if not name:
+        return False, 'Name cannot be empty'
     if name:
         # Check naming convention (kebab-case: lowercase with hyphens)
         if not re.match(r'^[a-z0-9-]+$', name):
@@ -274,6 +163,8 @@ def validate_skill(skill_path):
     if not isinstance(description, str):
         return False, f"Description must be a string, got {type(description).__name__}"
     description = description.strip()
+    if not description:
+        return False, 'Description cannot be empty'
     if description:
         # Check for angle brackets
         if '<' in description or '>' in description:
