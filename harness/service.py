@@ -825,6 +825,14 @@ class ServiceStore:
     def _finish_attempt(self, job, result=None, error=None):
         status = result.get("status") if isinstance(result, dict) else "failed"
         held = status == "held"
+        if held:
+            from .runner import redact
+            # Guard diagnostics are untrusted adapter text. Redact individual
+            # strings before JSON encoding, including quoted secret values.
+            result = {key: redact(value, os.environ) if isinstance(value, str) else value
+                      for key, value in result.items()}
+            if isinstance(error, str):
+                error = redact(error, os.environ)
         succeeded = status in ("completed", "success")
         terminal = "needs_verification" if succeeded else ("held" if held else "retry")
         attempt_status = "needs_verification" if succeeded else ("held" if held else "retry")
@@ -1311,6 +1319,8 @@ class ServiceStore:
                         "purchase", "provision", "pay_per_use_inference"
                     }):
                 raise ValueError("charge_source and a supported operation are required")
+            from .runner import redact
+            charge_source = redact(charge_source, env)
             raise AuthError(
                 f"Charged operation blocked before execution: source={charge_source}; action={operation}",
                 hold=True, action=operation, source=charge_source)

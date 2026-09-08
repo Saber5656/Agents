@@ -354,6 +354,29 @@ class ServiceTests(unittest.TestCase):
             self.assertIn(f"local://cost-security/fixture-adapter/{action}", evidence)
             self.assertNotIn("fixture-secret-never-recorded", " ".join(evidence))
 
+    def test_held_adapter_diagnostic_never_persists_environment_secrets(self):
+        secret = 'fixture-secret-with-"quotes"'
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        def worker(_spec):
+            raise AuthError("blocked " + secret, hold=True, action="purchase",
+                            source="provider-" + secret)
+        with mock.patch.dict(os.environ, {"FIXTURE_API_TOKEN": secret}):
+            result = self.service.run_once(executor=worker)
+        self.assertEqual(result["status"], "held")
+        detail = self.service.get_job(job["id"])
+        self.assertNotIn(secret, detail["last_error"])
+        self.assertNotIn(secret, detail["attempts"][0]["result"]["source"])
+        self.assertNotIn(secret, " ".join(self.tasks.get_task(self.task["id"])["evidence_links"]))
+        self.assertIn("[REDACTED]", detail["last_error"])
+
+    def test_charge_source_is_redacted_from_guard_environment(self):
+        secret = "fixture-only-charge-token"
+        with self.assertRaises(AuthError) as caught:
+            self.service.auth_guard({"API_KEY": secret}, charge_source="vendor-" + secret,
+                                    operation="purchase")
+        self.assertNotIn(secret, str(caught.exception))
+        self.assertNotIn(secret, caught.exception.source)
+
     def test_subscription_usage_is_retained_without_paid_fallback(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
 
