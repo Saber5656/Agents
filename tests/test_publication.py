@@ -382,3 +382,47 @@ def test_published_receipt_does_not_hide_new_pending_ci(fixture):
     resumed = publish_scoped(spec | {"ci": {"provider": "github"}})
     assert resumed["status"] == "pending"
     assert json.loads((vault / "publication.json").read_text())["status"] == "pending"
+
+
+def test_pending_receipt_reconciles_when_main_has_an_unrelated_advance(fixture):
+    canonical, worktree, remote, vault, base = fixture
+    (worktree / "src" / "selected.txt").write_text("after\n")
+    spec = make_spec(canonical, worktree, remote, vault, base,
+                     ci={"provider": "github"})
+    first = publish_scoped(spec)
+    assert first["status"] == "pending"
+    (canonical / "src" / "unrelated.txt").write_text("parallel\n")
+    git(canonical, "add", "src/unrelated.txt")
+    git(canonical, "commit", "-m", "parallel publication")
+    git(canonical, "push", "origin", "main")
+    resumed = publish_scoped(spec)
+    assert resumed["status"] == "pending"
+    assert resumed["published_sha"] == first["published_sha"]
+    assert git(canonical, "rev-parse", "HEAD") != resumed["published_sha"]
+
+
+def test_ci_resume_allows_refreshed_review_evidence_for_same_binding(fixture):
+    canonical, worktree, remote, vault, base = fixture
+    (worktree / "src" / "selected.txt").write_text("after\n")
+    spec = make_spec(canonical, worktree, remote, vault, base,
+                     ci={"provider": "github"})
+    first = publish_scoped(spec)
+    refreshed = dict(spec)
+    refreshed["review"] = json.loads(json.dumps(spec["review"]))
+    refreshed["review"]["decisions"][0]["reason"] = "same decision, new host observation wording"
+    refreshed["review"]["decisions"][0]["evidence"] = ["vault://review/refreshed"]
+    resumed = publish_scoped(refreshed)
+    assert first["status"] == resumed["status"] == "pending"
+
+
+def test_ci_resume_rejects_changed_review_decision(fixture):
+    canonical, worktree, remote, vault, base = fixture
+    (worktree / "src" / "selected.txt").write_text("after\n")
+    spec = make_spec(canonical, worktree, remote, vault, base,
+                     ci={"provider": "github"})
+    publish_scoped(spec)
+    changed = dict(spec)
+    changed["review"] = json.loads(json.dumps(spec["review"]))
+    changed["review"]["decisions"][0]["decision"] = "reject"
+    with pytest.raises(PublicationError, match="different publication unit"):
+        publish_scoped(changed)

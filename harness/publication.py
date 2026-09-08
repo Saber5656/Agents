@@ -449,10 +449,23 @@ def publish_scoped(spec: dict[str, Any]) -> dict[str, Any]:
     with _unit_lock(canonical_lock), _unit_lock(lock):
         # Preimage/diff and CI are observations that legitimately change while
         # a receipt is resumed.  Identity is the semantic publication unit.
-        identity_review = dict(spec["review"])
+        review = spec["review"]
+        # Evidence prose and provider wording may be refreshed while CI is
+        # pending.  The publication identity is the host-bound review state:
+        # selected diff, review status, and each finding's decision.  A change
+        # to those decisions invalidates the receipt; a re-review with the
+        # same decisions does not.
+        identity_review = {
+            key: review[key] for key in ("status", "reviewed", "reviewed_diff_digest", "findings_complete")
+            if key in review
+        }
+        identity_review["decisions"] = [
+            {key: item[key] for key in ("finding_id", "decision", "applied") if key in item}
+            for item in review["decisions"]
+        ]
         # The reviewed worktree head advances after the executor creates the
-        # task commit.  Keep the finding decisions in the identity while
-        # allowing the same receipt to resume with a freshly observed head.
+        # task commit.  Keep it out of the identity while requiring the host
+        # snapshot at service level before the first publication.
         identity_review.pop("reviewed_head", None)
         request_digest = _json_digest({k: spec[k] for k in ("repository", "canonical_repo", "task_worktree", "files", "commit_message", "immutable_base", "remote")} | {"review": identity_review})
         existing: dict[str, Any] | None = None
@@ -467,9 +480,13 @@ def publish_scoped(spec: dict[str, Any]) -> dict[str, Any]:
                 if (not canonical.is_dir() or _out(canonical, "branch", "--show-current") != "main"
                         or _status_overlaps(_status(canonical), existing.get("files", files))):
                     raise PublicationError("published receipt canonical checkout no longer verifies")
-                if _out(canonical, "rev-parse", "HEAD") != published or not _remote_matches(canonical, spec["remote"]):
+                local_head = _out(canonical, "rev-parse", "HEAD")
+                if (not _remote_matches(canonical, spec["remote"])
+                        or (_run(canonical, "merge-base", "--is-ancestor", published, local_head, check=False).returncode
+                            if local_head != published else 0)):
                     raise PublicationError("published receipt origin or canonical HEAD no longer verifies")
-                if _remote_sha(canonical) != published:
+                remote_head = _remote_sha(canonical)
+                if remote_head != local_head:
                     raise PublicationError("published receipt remote readback no longer verifies")
                 observed_ci = (_ci_status(spec.get("ci"), published, spec.get("ci_observer"))
                                if spec.get("ci") is not None or spec.get("ci_observer") is not None
@@ -485,6 +502,8 @@ def publish_scoped(spec: dict[str, Any]) -> dict[str, Any]:
         state["files"] = files
         state["review"] = (existing or {}).get("review", spec["review"])
         state["base"] = spec["immutable_base"]
+        state["preimage_digest"] = spec["preimage_digest"]
+        state["diff_digest"] = spec["diff_digest"]
         _save(receipt, state)
 
         # A receipt that reached main sync is already past the preimage CAS.
@@ -499,10 +518,17 @@ def publish_scoped(spec: dict[str, Any]) -> dict[str, Any]:
                 raise PublicationError("canonical checkout is unavailable for receipt recovery")
             if not _remote_matches(canonical, spec["remote"]):
                 raise PublicationError("configured origin no longer matches explicit remote")
-            if _out(canonical, "rev-parse", "HEAD") != resume_head:
-                raise PublicationError("receipt commit is not the canonical main head")
+            canonical_head = _out(canonical, "rev-parse", "HEAD")
+            advanced_main = canonical_head != resume_head
+            if advanced_main and _run(canonical, "merge-base", "--is-ancestor", resume_head, canonical_head, check=False).returncode:
+                raise PublicationError("receipt commit is not an ancestor of canonical main")
             remote_sha = _remote_sha(canonical)
-            if remote_sha != resume_head:
+            if advanced_main:
+                if remote_sha != canonical_head:
+                    state.update({"status": "incomplete", "stage": "push_unknown", "published_sha": resume_head, "reason": "canonical main advanced but remote readback is not synchronized"})
+                    _save(receipt, state)
+                    return state
+            elif remote_sha != resume_head:
                 try:
                     _run(canonical, "push", "origin", "main", timeout=120)
                 except PublicationError:
@@ -511,7 +537,8 @@ def publish_scoped(spec: dict[str, Any]) -> dict[str, Any]:
                         state.update({"status": "incomplete", "stage": "push_unknown", "published_sha": resume_head, "reason": "push outcome could not be reconciled"})
                         _save(receipt, state)
                         return state
-            if _remote_sha(canonical) != resume_head:
+            expected_remote = canonical_head if advanced_main else resume_head
+            if _remote_sha(canonical) != expected_remote:
                 state.update({"status": "incomplete", "stage": "push_unknown", "published_sha": resume_head, "reason": "remote did not read back expected commit"})
                 _save(receipt, state)
                 return state
