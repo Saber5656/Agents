@@ -506,6 +506,23 @@ class ServiceTests(unittest.TestCase):
             observe_publication({"workspace": str(self.workspace)},
                                 {"repository": "Saber5656/Agents"}, proof)
 
+    def test_publication_observation_preserves_unrelated_canonical_dirty_file(self):
+        from harness.service import observe_publication
+        def git(*args):
+            return subprocess.check_output(["git", *args], cwd=self.workspace, text=True).strip()
+        git("init", "-b", "main")
+        git("-c", "user.name=Acceptance", "-c", "user.email=acceptance@example.invalid",
+            "commit", "--allow-empty", "-m", "fixture")
+        git("remote", "add", "origin", "git@github.com:Saber5656/Agents.git")
+        sha = git("rev-parse", "HEAD")
+        (self.workspace / "unrelated-policy.md").write_text("preserve")
+        proof = {"commit": sha, "mode": "direct_main", "files": ["src/change.py"]}
+        with mock.patch("harness.delivery.GitHub.api", side_effect=[{"sha": sha}, {"sha": sha}]):
+            result = observe_publication({"workspace": str(self.workspace)},
+                                         {"repository": "Saber5656/Agents"}, proof)
+        self.assertEqual(result["main"], sha)
+        self.assertTrue((self.workspace / "unrelated-policy.md").exists())
+
     def test_incomplete_verification_persists_backoff_and_update_wakes_it(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=60)
         self.service.run_once(executor=lambda _: {"status": "completed"})
@@ -586,7 +603,130 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(job.mode, "run"); self.assertEqual(job.provider, "codex"); self.assertEqual(job.vault, self.vault.resolve()); self.assertEqual(job.run_dir, Path(spec["run_dir"]))
             self.assertIn("COMMON POLICY MARKER", job.prompt)
             self.assertIn("DELIVERY POLICY MARKER", job.prompt)
+            self.assertIn("publication_proposal", job.prompt)
             resume.assert_not_called()
+
+    def test_default_executor_passes_task_identity_when_runner_supports_it(self):
+        from harness.service import default_executor
+        spec = {"workspace": str(self.workspace), "agents_root": str(self.root),
+                "vault_root": str(self.vault), "run_dir": str(self.vault / "run"),
+                "prompt": "prompt", "context": "context", "model": "gpt-5.6-luna",
+                "effort": "low", "timeout": 1, "updates": [], "task_id": self.task["id"]}
+        with mock.patch("harness.runner.run_job", return_value={"status": "completed"}) as run:
+            default_executor(spec)
+        job = run.call_args.args[0]
+        self.assertEqual(getattr(job, "task_id", None), self.task["id"])
+
+    def test_default_executor_preserves_structured_publication_proposal(self):
+        from harness.service import default_executor
+        spec = {"workspace": str(self.workspace), "agents_root": str(self.root),
+                "vault_root": str(self.vault), "run_dir": str(self.vault / "run"),
+                "prompt": "prompt", "context": "context", "model": "gpt-5.6-luna",
+                "effort": "low", "timeout": 1, "updates": []}
+        proposal = {"canonical_repo": "/tmp/canonical", "task_worktree": "/tmp/task",
+                    "files": ["src/change.py"], "immutable_base": "a" * 40,
+                    "commit_message": "Publish change", "remote": "/tmp/origin.git",
+                    "vault_receipt": str(self.vault / "publication.json")}
+        with mock.patch("harness.runner.run_job", return_value={"status": "completed", "publication_proposal": proposal}):
+            result = default_executor(spec)
+        self.assertEqual(result["publication_proposal"], proposal)
+
+    def test_default_executor_rejects_malformed_publication_proposal(self):
+        from harness.service import default_executor
+        spec = {"workspace": str(self.workspace), "agents_root": str(self.root),
+                "vault_root": str(self.vault), "run_dir": str(self.vault / "run"),
+                "prompt": "prompt", "context": "context", "model": "gpt-5.6-luna",
+                "effort": "low", "timeout": 1, "updates": []}
+        with mock.patch("harness.runner.run_job", return_value={"status": "completed", "publication_proposal": "self-approved"}):
+            result = default_executor(spec)
+        self.assertEqual(result["status"], "failed")
+        self.assertNotIn("publication_proposal", result)
+
+    def test_verification_publishes_worker_proposal_before_publication_readback(self):
+        task = self.tasks.create_task(purpose="publish proposal", repository="Saber5656/Agents",
+                                      acceptance_evidence=["publication is read back"])
+        self.tasks.add_acceptance_evidence(task["id"], "publication is read back", verified=True)
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        proposal = {"canonical_repo": "/tmp/canonical", "task_worktree": "/tmp/task",
+                    "files": ["src/change.py"], "immutable_base": "a" * 40,
+                    "commit_message": "Publish change", "remote": "/tmp/origin.git",
+                    "vault_receipt": str(self.vault / "publication.json")}
+        self.service.run_once(executor=lambda _: {"status": "completed", "publication_proposal": proposal})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        review = {"acceptance": True, "findings": [], "criteria": [
+            {"criterion": "publication is read back", "verified": True, "evidence": "host readback"}],
+            "publication_review": {"status": "complete", "decisions": [],
+                                   "findings_complete": True}}
+        with mock.patch.object(self.service, "_publish_proposal", return_value={"commit": "a" * 40, "mode": "direct_main"}) as publish, \
+             mock.patch("harness.service.observe_publication", return_value={"commit": "a" * 40}):
+            result = self.service.verify_with_agent(job["id"], lambda _: review)
+        self.assertEqual(result["status"], "verified")
+        publish.assert_called_once()
+
+    def test_host_rejects_worker_self_reported_publication_digest(self):
+        task = self.tasks.create_task(purpose="host publication CAS", repository="Saber5656/Agents")
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        canonical = self.root / "canonical"; canonical.mkdir()
+        def run(path, *args):
+            result = subprocess.run(["git", *args], cwd=path, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+        run(canonical, "init", "-b", "main")
+        run(canonical, "config", "user.name", "Fixture"); run(canonical, "config", "user.email", "fixture@example.invalid")
+        (canonical / "src").mkdir(); (canonical / "src/change.py").write_text("before\n")
+        run(canonical, "add", "."); run(canonical, "commit", "-m", "base")
+        base = run(canonical, "rev-parse", "HEAD")
+        worktree = self.root / "publication-task"
+        run(canonical, "worktree", "add", "-b", "task/publication", str(worktree), base)
+        (worktree / "src/change.py").write_text("after\n")
+        proposal = {"repository": "Saber5656/Agents", "canonical_repo": str(canonical),
+                    "task_worktree": str(worktree), "files": ["src/change.py"],
+                    "immutable_base": base, "commit_message": "Publish change",
+                    "remote": str(self.root / "origin.git"),
+                    "vault_receipt": str(self.vault / "publication.json"),
+                    "diff_digest": "0" * 64}
+        review = {"status": "complete", "decisions": [], "findings_complete": True}
+        with self.assertRaisesRegex(ValueError, "diff changed"):
+            self.service._publish_proposal(job, task, proposal, review)
+
+    def test_publication_proposal_is_not_published_when_verdict_is_incomplete(self):
+        task = self.tasks.create_task(purpose="incomplete publication", repository="Saber5656/Agents",
+                                      acceptance_evidence=["publication is reviewed"])
+        self.tasks.add_acceptance_evidence(task["id"], "publication is reviewed", verified=True)
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        proposal = {"canonical_repo": "/tmp/canonical", "task_worktree": "/tmp/task",
+                    "files": ["src/change.py"], "immutable_base": "a" * 40,
+                    "commit_message": "Publish change", "remote": "/tmp/origin.git",
+                    "vault_receipt": str(self.vault / "publication.json")}
+        self.service.run_once(executor=lambda _: {"status": "completed", "publication_proposal": proposal})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        review = {"acceptance": False, "findings": [], "criteria": [],
+                  "publication_review": {"status": "complete", "decisions": [],
+                                         "findings_complete": True}}
+        with mock.patch.object(self.service, "_publish_proposal") as publish:
+            result = self.service.verify_with_agent(job["id"], lambda _: review)
+        self.assertEqual(result["status"], "needs_verification")
+        publish.assert_not_called()
+
+    def test_publication_review_must_account_for_all_findings(self):
+        task = self.tasks.create_task(purpose="incomplete publication review", repository="Saber5656/Agents",
+                                      acceptance_evidence=["publication is reviewed"])
+        self.tasks.add_acceptance_evidence(task["id"], "publication is reviewed", verified=True)
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        proposal = {"canonical_repo": "/tmp/canonical", "task_worktree": "/tmp/task",
+                    "files": ["src/change.py"], "immutable_base": "a" * 40,
+                    "commit_message": "Publish change", "remote": "/tmp/origin.git",
+                    "vault_receipt": str(self.vault / "publication.json")}
+        self.service.run_once(executor=lambda _: {"status": "completed", "publication_proposal": proposal})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        review = {"acceptance": True, "findings": [], "criteria": [
+            {"criterion": "publication is reviewed", "verified": True, "evidence": "host readback"}],
+            "publication_review": {"status": "complete", "decisions": [],
+                                   "findings_complete": False}}
+        with mock.patch.object(self.service, "_publish_proposal") as publish:
+            result = self.service.verify_with_agent(job["id"], lambda _: review)
+        self.assertEqual(result["status"], "needs_verification")
+        publish.assert_not_called()
 
     def test_service_subprocess_does_not_duplicate_live_lock(self):
         script = """import sys; from harness.service import WorkspaceLock; l=WorkspaceLock(sys.argv[1],sys.argv[2]); print(l.acquire(blocking=False), flush=True); input()"""

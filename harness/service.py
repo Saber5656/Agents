@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -852,6 +853,26 @@ class ServiceStore:
         if not isinstance(result, dict) or result.get("acceptance") is not True:
             self._reset_verification(job_id, "verification criteria remain incomplete")
             return {"status": "needs_verification", "job_id": job_id, "verification": result or {}}
+        proposal = self._latest_publication_proposal(job)
+        if proposal is not None:
+            review = result.get("publication_review") if isinstance(result, dict) else None
+            if not isinstance(review, dict):
+                self._reset_verification(job_id, "publication proposal requires structured publication review")
+                return {"status": "needs_verification", "job_id": job_id,
+                        "verification": result or {},
+                        "verification_error": "publication review is incomplete"}
+            if review.get("findings_complete") is not True:
+                self._reset_verification(job_id, "publication review findings remain incomplete")
+                return {"status": "needs_verification", "job_id": job_id,
+                        "verification": result, "verification_error": "publication review is incomplete"}
+            try:
+                proof = self._publish_proposal(job, self.tasks.get_task(job["task_id"]), proposal, review)
+            except Exception as exc:
+                self._reset_verification(job_id, "publication proposal was not published: " + str(exc))
+                return {"status": "needs_verification", "job_id": job_id,
+                        "verification": result or {}, "verification_error": str(exc)}
+            result = dict(result)
+            result["publication"] = proof
         try:
             verified = self.verify(job_id, result)
         except Exception as exc:
@@ -859,6 +880,85 @@ class ServiceStore:
             return {"status": "needs_verification", "job_id": job_id, "verification": result,
                     "verification_error": str(exc)}
         return {"status": "verified", "job_id": job_id, "job": verified, "verification": result}
+
+    @staticmethod
+    def _latest_publication_proposal(job):
+        attempts = job.get("attempts", []) if isinstance(job, dict) else []
+        if not attempts:
+            return None
+        result = attempts[-1].get("result") if isinstance(attempts[-1], dict) else None
+        if not isinstance(result, dict):
+            return None
+        proposal = result.get("publication_proposal")
+        return proposal
+
+    def _publish_proposal(self, job, task, proposal, review):
+        """Publish a worker proposal only after host-side CAS and review checks."""
+        if not isinstance(proposal, dict) or not isinstance(task, dict):
+            raise ValueError("publication proposal is malformed")
+        from .delivery import GitHub, git
+        from .publication import publish_scoped, selected_diff_digest, selected_tree_digest
+        required = ("canonical_repo", "task_worktree", "files", "immutable_base",
+                    "commit_message", "remote", "vault_receipt")
+        if any(key not in proposal for key in required):
+            raise ValueError("publication proposal is incomplete")
+        if proposal.get("repository", task.get("repository")) != task.get("repository"):
+            raise ValueError("publication proposal repository does not match the task")
+        canonical = Path(proposal["canonical_repo"])
+        worktree = Path(proposal["task_worktree"])
+        if not canonical.is_absolute() or not worktree.is_absolute():
+            raise ValueError("publication proposal paths must be absolute")
+        canonical = canonical.resolve(); worktree = worktree.resolve()
+        if not canonical.is_dir() or not worktree.is_dir() or canonical == worktree:
+            raise ValueError("publication proposal checkouts are unavailable")
+        files = proposal["files"]
+        if not isinstance(files, list) or not files:
+            raise ValueError("publication proposal files are invalid")
+        actual_head = git(worktree, "rev-parse", "HEAD")
+        actual_preimage = selected_tree_digest(canonical, files)
+        actual_diff = selected_diff_digest(worktree, proposal["immutable_base"], files)
+        if proposal.get("reviewed_head") not in (None, actual_head):
+            raise ValueError("publication proposal head changed before host review")
+        if proposal.get("preimage_digest") not in (None, actual_preimage):
+            raise ValueError("publication proposal preimage changed before host review")
+        if proposal.get("diff_digest") not in (None, actual_diff):
+            raise ValueError("publication proposal diff changed before host review")
+        host_review = json.loads(json.dumps(review))
+        if host_review.get("reviewed_head") not in (None, actual_head):
+            raise ValueError("publication review head does not match host observation")
+        if host_review.get("reviewed_diff_digest") not in (None, actual_diff):
+            raise ValueError("publication review diff does not match host observation")
+        host_review["reviewed_head"] = actual_head
+        host_review["reviewed_diff_digest"] = actual_diff
+        spec = dict(proposal)
+        spec.update({"repository": task.get("repository"), "canonical_repo": str(canonical),
+                     "task_worktree": str(worktree), "preimage_digest": actual_preimage,
+                     "diff_digest": actual_diff, "review": host_review})
+        if proposal.get("ci") is not None:
+            # A worker may request CI observation, but its reported state is
+            # metadata. The host asks GitHub for the published SHA's checks.
+            def observe_ci(sha):
+                try:
+                    runs = GitHub(task["repository"]).check_runs(sha)
+                except Exception:
+                    return {"sha": sha, "status": "pending"}
+                if not isinstance(runs, list) or not runs:
+                    return {"sha": sha, "status": "pending"}
+                states = {str(row.get("conclusion", row.get("status", ""))).upper()
+                          for row in runs if isinstance(row, dict)}
+                success = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+                return {"sha": sha, "status": "success" if states and states <= success else "failed"}
+            spec["ci_observer"] = observe_ci
+        outcome = publish_scoped(spec)
+        if not isinstance(outcome, dict) or outcome.get("status") != "published":
+            raise ValueError("host publication did not reach a published state")
+        commit = outcome.get("published_sha")
+        if not isinstance(commit, str):
+            raise ValueError("host publication omitted the published commit")
+        return {"commit": commit, "mode": proposal.get("mode", "direct_main"),
+                "files": list(files),
+                "canonical_dirty_before": outcome.get("canonical_dirty_before", []),
+                "canonical_dirty_after": outcome.get("canonical_dirty_after", [])}
 
     def verify_pending(self, verifier):
         outcomes = []
@@ -898,13 +998,45 @@ def default_executor(spec):
                           (agents_root / "policies" / "repository-delivery.md", "Repository delivery policy")):
         if policy.is_file():
             prompt += f"\n\n{label}:\n" + policy.read_text()
-    job = Job(workspace=Path(spec["workspace"]), vault=vault, prompt=prompt,
-              mode="run", provider="codex", codex_model=spec["model"], effort=spec["effort"],
-              timeout=spec["timeout"], fallback=False, run_dir=Path(spec["run_dir"]))
+    prompt += (
+        "\n\nIf the task produces a reviewed, selected-file change that needs host delivery, "
+        "return a structured JSON object containing publication_proposal with canonical_repo, "
+        "task_worktree, files, immutable_base, commit_message, remote, vault_receipt, and any "
+        "reviewed digests. Do not claim publication or completion; the host independently checks "
+        "the diff, review, remote, and CI."
+    )
+    job_args = dict(workspace=Path(spec["workspace"]), vault=vault, prompt=prompt,
+                    mode="run", provider="codex", codex_model=spec["model"], effort=spec["effort"],
+                    timeout=spec["timeout"], fallback=False, run_dir=Path(spec["run_dir"]))
+    # Newer runners persist task identity in their Job record.  Keep this
+    # compatible with the older local runner while passing it whenever the
+    # runner exposes the field.
+    if "task_id" in inspect.signature(Job).parameters:
+        job_args["task_id"] = spec.get("task_id")
+    job = Job(**job_args)
+    if "task_id" in spec and not hasattr(job, "task_id"):
+        job.task_id = spec["task_id"]
     run_dir = Path(spec["run_dir"])
     if run_dir.exists():
-        return resume_job(job, run_dir, env)
-    return run_job(job, env, run_dir=run_dir)
+        result = resume_job(job, run_dir, env)
+    else:
+        result = run_job(job, env, run_dir=run_dir)
+    if isinstance(result, dict):
+        proposal = result.get("publication_proposal")
+        if proposal is None and isinstance(result.get("text"), str):
+            try:
+                decoded = json.loads(result["text"])
+            except (TypeError, ValueError):
+                decoded = None
+            if isinstance(decoded, dict):
+                proposal = decoded.get("publication_proposal")
+        if proposal is not None:
+            if not isinstance(proposal, dict):
+                invalid = dict(result)
+                invalid.pop("publication_proposal", None)
+                return {**invalid, "status": "failed", "text": "publication proposal is malformed"}
+            return {**result, "publication_proposal": proposal}
+    return result
 
 
 def default_reconciler(job, attempt):
@@ -942,8 +1074,14 @@ def observe_publication(job, task, proof):
     if len(main) != 1:
         raise ValueError("one canonical main checkout is required for synchronization readback")
     canonical = main[0]
-    if git(canonical, "status", "--porcelain=v1", "-uall"):
-        raise ValueError("canonical main contains uncommitted work")
+    dirty = git(canonical, "status", "--porcelain=v1", "-z", "-uall")
+    selected_files = proof.get("files") if isinstance(proof.get("files"), list) else None
+    if selected_files is None:
+        if dirty:
+            raise ValueError("canonical main contains uncommitted work")
+    else:
+        if _status_overlaps_selected(dirty, selected_files):
+            raise ValueError("canonical main overlaps selected files")
     local = git(canonical, "rev-parse", "HEAD")
     published = remote.api("commits/main")["sha"]
     if local != published or git(canonical, "merge-base", commit, local) != commit:
@@ -966,7 +1104,20 @@ def observe_publication(job, task, proof):
     if remote.api("commits/main")["sha"] != local or git(canonical, "rev-parse", "HEAD") != local:
         raise ValueError("main moved during publication verification")
     return {"repository": repository, "commit": commit, "main": local,
-            "canonical_workspace": canonical, "mode": proof["mode"]}
+            "canonical_workspace": canonical, "mode": proof["mode"],
+            **({"files": selected_files} if selected_files is not None else {})}
+
+
+def _status_overlaps_selected(raw_status, files):
+    selected = set(files)
+    rename_source = False
+    for entry in raw_status.split("\0"):
+        if len(entry) >= 4 and entry[3:] in selected:
+            return True
+        if rename_source and entry in selected:
+            return True
+        rename_source = len(entry) >= 2 and entry[:2] in {"R ", " R", "C ", " C"}
+    return False
 
 
 def default_verifier(spec):
@@ -981,7 +1132,7 @@ def default_verifier(spec):
             "Act as an independent read-only verifier. Inspect the workspace, saved execution result and artifacts, "
             "the task acceptance criteria, current git status/log, and the public commit/merge/main synchronization. "
             "Do not edit files, run write commands, or infer completion from words alone. Return JSON only: "
-            "{acceptance:boolean, findings:[objects], evidence:string, criteria:[{criterion:string, verified:boolean, evidence:string}], publication:{commit:string, mode:direct_main|pull_request, pr_number:integer}, "
+            "{acceptance:boolean, findings:[objects], evidence:string, criteria:[{criterion:string, verified:boolean, evidence:string}], publication:{commit:string, mode:direct_main|pull_request, pr_number:integer}, publication_review:{status:complete, reviewed_head:string, reviewed_diff_digest:string, findings_complete:true, decisions:[{finding_id:string, decision:adopt|reject|separate, reason:string, evidence:[string], applied:boolean, applied_evidence:[string]}]}, "
             "evidence_links:[strings]}. Copy every task acceptance criterion exactly and cite observed evidence for each. Saber5656/Agents uses direct main publication; other repositories require their PR delivery policy. "
             "Use findings for any missing or incorrect implementation and explain the repair required."
         ),

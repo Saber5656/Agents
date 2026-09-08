@@ -66,6 +66,17 @@ completion; a provider success string or acceptance text alone is
 insufficient. The resulting private acceptance receipt is valid dependency
 completion evidence when the dependent task is later scheduled.
 
+When a worker returns a structured `publication_proposal`, the host owns the
+delivery boundary. It re-reads the task worktree `HEAD`, selected-file
+preimage, and selected diff, and rejects a proposal whose self-reported values
+do not match. The verifier must also return a structured `publication_review`
+with every finding accounted for and applied-fix evidence for adopted findings;
+the worker's own approval text cannot authorize publication. The host then
+calls `publish_scoped`, observes the remote `main` commit through GitHub, and
+records verification only after that readback. If CI was requested, the host
+queries check runs for the published SHA; a pending or failed observation keeps
+the job in verification. Workers receive no additional `.git` write access.
+
 ## Restart, locks, and idle work
 
 Only the scheduler owner performs recovery. A newly constructed `ServiceStore`
