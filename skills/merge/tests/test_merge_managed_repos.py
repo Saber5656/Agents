@@ -153,11 +153,14 @@ class MergeManagedReposTest(unittest.TestCase):
         # resolution; the helper never mechanically discards either side.
         self.assertIn("local side", git(local, "show", "HEAD:README.md"))
         self.assertIn("remote side", git(local, "show", "origin/main:README.md"))
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(local, "merge", "--no-commit", "origin/main")
         write(local / "README.md", "local side\nremote side\n")
         git(local, "add", "README.md")
         git(local, "commit", "-m", "resolve semantic conflict")
         self.assertEqual(git(local, "status", "--porcelain"), "")
         self.assertEqual(git(local, "show", "HEAD:README.md"), "local side\nremote side")
+        self.assertEqual(git(local, "merge-base", "origin/main", "HEAD"), git(local, "rev-parse", "origin/main"))
 
     def test_dry_run_does_not_commit_or_merge(self) -> None:
         remote, local = self.init_repo_pair()
