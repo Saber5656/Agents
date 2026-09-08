@@ -354,6 +354,16 @@ class ServiceTests(unittest.TestCase):
             observe_publication({"workspace": str(self.workspace)},
                                 {"repository": "Saber5656/Agents"}, proof)
 
+    def test_incomplete_verification_persists_backoff_and_update_wakes_it(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=60)
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        self.service.verify_with_agent(job["id"], lambda _: {"acceptance": False})
+        self.assertIsNotNone(self.service.get_job(job["id"])["next_attempt_at"])
+        self.assertFalse(self.service._start_verification(job["id"]))
+        self.service.record_update(job["id"], "new acceptance evidence", ["vault://new"])
+        self.assertTrue(self.service._start_verification(job["id"]))
+
     def test_verifier_error_keeps_successful_implementation_needing_verification(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
         scheduler = Scheduler(self.service, verification_executor=lambda _: (_ for _ in ()).throw(RuntimeError("agent unavailable")))

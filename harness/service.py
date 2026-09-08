@@ -43,6 +43,14 @@ def parse_time(value: str | None):
     return datetime.fromisoformat(value)
 
 
+def retry_delay(base, maximum, attempt):
+    import math
+    if base <= 0 or maximum <= 0:
+        return 0.0
+    exponent = min(max(0, attempt - 1), max(0, math.ceil(math.log2(maximum / base))))
+    return min(maximum, base * 2 ** exponent)
+
+
 def load_agents_env(path: str | os.PathLike, env=None):
     """Load a simple .env without shell expansion or command execution."""
     result = dict(os.environ if env is None else env)
@@ -224,7 +232,7 @@ class ServiceStore:
             rows = self._conn.execute("SELECT id FROM service_jobs WHERE run_dir IS NULL").fetchall()
             self._conn.executemany("UPDATE service_jobs SET run_dir=? WHERE id=?",
                                   [(prefix + row[0], row[0]) for row in rows])
-        for column, kind in (("verification_pid", "INTEGER"), ("verification_identity", "TEXT")):
+        for column, kind in (("verification_pid", "INTEGER"), ("verification_identity", "TEXT"), ("verification_count", "INTEGER NOT NULL DEFAULT 0")):
             if column not in job_columns:
                 self._conn.execute(f"ALTER TABLE service_jobs ADD COLUMN {column} {kind}")
         attempt_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(service_attempts)")}
@@ -395,14 +403,20 @@ class ServiceStore:
 
     def _start_verification(self, job_id):
         with self.tx() as conn:
-            changed = conn.execute("UPDATE service_jobs SET state='verifying',verification_pid=?,verification_identity=?,updated_at=? WHERE id=? AND state='needs_verification'", (os.getpid(), json.dumps(self._process_identity(os.getpid())), now(), job_id)).rowcount
+            changed = conn.execute("UPDATE service_jobs SET state='verifying',verification_count=verification_count+1,verification_pid=?,verification_identity=?,updated_at=? WHERE id=? AND state='needs_verification' AND (next_attempt_at IS NULL OR next_attempt_at<=?)", (os.getpid(), json.dumps(self._process_identity(os.getpid())), now(), job_id, now())).rowcount
             if changed:
                 conn.execute("UPDATE service_attempts SET status='verifying' WHERE job_id=? AND status='needs_verification'", (job_id,))
             return changed == 1
 
     def _reset_verification(self, job_id, diagnostic):
         with self.tx() as conn:
-            conn.execute("UPDATE service_jobs SET state='needs_verification',last_error=?,updated_at=? WHERE id=? AND state='verifying'", (diagnostic, now(), job_id))
+            job = conn.execute("SELECT * FROM service_jobs WHERE id=?", (job_id,)).fetchone()
+            if job is None:
+                raise KeyError(job_id)
+            # Cap the exponent as well as the delay for indefinitely retried work.
+            delay = retry_delay(job["retry_base"], job["retry_max"], job["verification_count"])
+            next_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat(timespec="seconds")
+            conn.execute("UPDATE service_jobs SET state='needs_verification',next_attempt_at=?,last_error=?,updated_at=? WHERE id=? AND state='verifying'", (next_at, diagnostic, now(), job_id))
             conn.execute("UPDATE service_attempts SET status='needs_verification',error=? WHERE job_id=? AND status='verifying'", (diagnostic, job_id))
 
     def _job(self, row):
@@ -459,7 +473,7 @@ class ServiceStore:
             if not conn.execute("SELECT 1 FROM service_jobs WHERE id=?", (job_id,)).fetchone(): raise KeyError(job_id)
             row = conn.execute("SELECT COALESCE(MAX(sequence),0) FROM service_updates WHERE job_id=?", (job_id,)).fetchone()
             conn.execute("INSERT INTO service_updates VALUES (?,?,?,?,?)", (job_id, row[0] + 1, message, json.dumps(list(dict.fromkeys(evidence_links))), now()))
-            conn.execute("UPDATE service_jobs SET updated_at=? WHERE id=?", (now(), job_id))
+            conn.execute("UPDATE service_jobs SET next_attempt_at=NULL,verification_count=0,updated_at=? WHERE id=?", (now(), job_id))
         return self.get_job(job_id)
 
     def _dependencies_ready(self, task):
@@ -547,7 +561,7 @@ class ServiceStore:
         if succeeded:
             next_at = None
         else:
-            delay = min(job["retry_max"], job["retry_base"] * (2 ** max(0, attempt_no - 1)))
+            delay = retry_delay(job["retry_base"], job["retry_max"], attempt_no)
             next_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat(timespec="seconds")
         stamp = now()
         with self.tx() as conn:
