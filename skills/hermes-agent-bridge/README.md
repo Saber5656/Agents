@@ -8,7 +8,8 @@
 python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/hermes_bridge.py" \
   oneshot \
   --prompt "XでOpenAI Codexの最新動向を検索して要点を3つにして" \
-  --toolsets "x-search"
+  --toolsets "x-search" \
+  --timeout 30
 ```
 
 ```bash
@@ -25,6 +26,7 @@ python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/herme
 - 同期応答と非同期応答の違いを明確にする
 - Discord返信でCodexを再開するにはMCP/event polling/runtimeが必要だと明示する
 - Secretary-AIとの責務境界を守る
+- `oneshot --timeout SECONDS` で呼び出しをboundedにし、timeout・実行ファイル欠落を構造化結果で返す
 
 ## Triggers
 

@@ -10,21 +10,61 @@ import sys
 from pathlib import Path
 
 
-def run_command(args: list[str], cwd: str | None = None) -> int:
-    proc = subprocess.run(
-        args,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+def run_command(
+    args: list[str], cwd: str | None = None, timeout: float | None = None
+) -> int:
+    payload = {"command": args, "cwd": cwd}
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        payload.update(
+            {
+                "error": "timeout",
+                "timeout_seconds": timeout,
+                "returncode": 124,
+                "stdout": exc.stdout or "",
+                "stderr": exc.stderr or "",
+            }
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 124
+    except FileNotFoundError as exc:
+        payload.update(
+            {
+                "error": "executable_not_found",
+                "returncode": 127,
+                "stdout": "",
+                "stderr": str(exc),
+            }
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 127
+    except OSError as exc:
+        payload.update(
+            {
+                "error": "execution_error",
+                "returncode": 126,
+                "stdout": "",
+                "stderr": str(exc),
+            }
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 126
+
+    payload.update(
+        {
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
     )
-    payload = {
-        "command": args,
-        "cwd": cwd,
-        "returncode": proc.returncode,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
-    }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return proc.returncode
 
@@ -42,7 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
     oneshot.add_argument("--toolsets")
     oneshot.add_argument("--skills")
     oneshot.add_argument("--cwd")
-    oneshot.add_argument("--timeout-note", default="caller-managed")
+    oneshot.add_argument(
+        "--timeout", type=float, help="Abort the child after this many seconds."
+    )
+    oneshot.add_argument("--timeout-note", default="caller-managed", help=argparse.SUPPRESS)
 
     send = sub.add_parser("send", help="Send a message through Hermes gateway.")
     send.add_argument("--target", required=True)
@@ -71,7 +114,7 @@ def main() -> int:
             cmd.extend(["--toolsets", ns.toolsets])
         if ns.skills:
             cmd.extend(["--skills", ns.skills])
-        return run_command(cmd, cwd=ns.cwd)
+        return run_command(cmd, cwd=ns.cwd, timeout=ns.timeout)
 
     if ns.command == "send":
         if bool(ns.message) == bool(ns.file):

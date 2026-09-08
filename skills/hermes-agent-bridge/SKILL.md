@@ -99,7 +99,8 @@ Preferred command:
 python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/hermes_bridge.py" \
   oneshot \
   --prompt "XでOpenAI Codexの最新動向を検索して要点を3つにして" \
-  --toolsets "x-search"
+  --toolsets "x-search" \
+  --timeout 30
 ```
 
 Equivalent raw command:
@@ -112,6 +113,7 @@ Rules:
 
 - Treat stdout as Hermes' answer.
 - Keep prompts bounded and include expected output format.
+- Set `--timeout` for a bounded call. Timeout returns structured JSON with `error: "timeout"` and exit code 124; a missing `hermes` executable returns `error: "executable_not_found"` and exit code 127. No alternate provider or model is selected by this wrapper.
 - Do not use `--yolo`.
 - If the command needs network or privileged local access and the current runtime blocks it, ask for approval through the current host environment.
 
