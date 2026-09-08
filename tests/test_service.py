@@ -178,6 +178,18 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(reopened.recover_interrupted_verification(), [])
         self.assertEqual(reopened.get_job(job["id"])["state"], "verifying")
 
+    def test_verification_recovery_waits_for_surviving_cli(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.service._start_verification(job["id"])
+        record = Path(job["run_dir"]) / "verification-fixture"
+        record.mkdir(parents=True)
+        (record / "process-state.json").write_text(json.dumps({"status": "running", "pid": os.getpid(),
+            "identity": self.service._process_identity(os.getpid())}))
+        with self.service.tx() as conn:
+            conn.execute("UPDATE service_jobs SET verification_pid=? WHERE id=?", (99999999, job["id"]))
+        self.assertEqual(self.service.recover_interrupted_verification(), [])
+
     def test_recovery_waits_for_output_collectors(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
         claimed = self.service._claim_next(); claimed["_lock"].release()
@@ -259,14 +271,18 @@ class ServiceTests(unittest.TestCase):
                 "findings": [], "evidence": "observed test and merged commit", "evidence_links": []})}}),
             json.dumps({"type": "turn.completed", "status": "completed", "usage": {"input_tokens": 3}}),
         ])
-        with mock.patch("harness.service.subprocess.run") as run:
-            run.side_effect = [mock.Mock(returncode=0, stdout="Logged in using ChatGPT", stderr=""),
-                               mock.Mock(returncode=0, stdout=events, stderr="")]
+        from harness.runner import ProcessResult
+        with mock.patch("harness.service.subprocess.run", return_value=mock.Mock(returncode=0, stdout="Logged in using ChatGPT", stderr="")), mock.patch("harness.runner.execute", return_value=ProcessResult(0, events, "")) as run:
             value = default_verifier({"job": self.service.get_job(job["id"]), "task": self.tasks.get_task(task["id"]),
                                       "agents_root": str(self.root), "vault_root": str(self.vault)})
         self.assertTrue(value["acceptance"])
-        command = run.call_args_list[1].args[0]
+        command = run.call_args.args[0]
         self.assertIn("read-only", command)
+        self.assertIn("plugins", command)
+        self.assertIn("stdout_path", run.call_args.kwargs)
+        record = run.call_args.kwargs["stdout_path"].parent
+        self.assertTrue((record / "prompt.json").is_file())
+        self.assertEqual(json.loads((record / "usage.json").read_text())["input_tokens"], 3)
 
     def test_verification_without_evidence_is_requeued(self):
         task = self.tasks.create_task(purpose="verify incomplete", acceptance_evidence=["accepted"])

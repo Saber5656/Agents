@@ -377,6 +377,17 @@ class ServiceStore:
             for row in rows:
                 if self._pid_state(row["verification_pid"], row["verification_identity"]) != "dead":
                     continue
+                surviving = False
+                for path in Path(row["run_dir"]).glob("verification-*/process-state.json"):
+                    try:
+                        record = json.loads(path.read_text())
+                        processes = [record] + record.get("collectors", [])
+                        if any(self._pid_state(item.get("pid"), item.get("identity")) != "dead" for item in processes):
+                            surviving = True
+                    except (OSError, ValueError, TypeError, AttributeError):
+                        surviving = True
+                if surviving:
+                    continue
                 conn.execute("UPDATE service_jobs SET state='needs_verification',verification_pid=NULL,verification_identity=NULL,last_error=?,updated_at=? WHERE id=?", ("verification interrupted; retrying independent read-only review", now(), row["id"]))
                 conn.execute("UPDATE service_attempts SET status='needs_verification' WHERE job_id=? AND status='verifying'", (row["id"],))
                 recovered.append(row["id"])
@@ -774,17 +785,26 @@ def default_verifier(spec):
             "Use findings for any missing or incorrect implementation and explain the repair required."
         ),
     }, ensure_ascii=False)
+    from .runner import execute, save
+    import uuid
+    record = Path(spec["job"]["run_dir"]) / ("verification-" + uuid.uuid4().hex)
+    record.mkdir(mode=0o700, parents=True)
+    save(record / "prompt.json", prompt, env)
     argv = ["codex", "exec", "--ignore-user-config", "--ephemeral", "--json",
             "--skip-git-repo-check", "-m", "gpt-5.6-luna", "-s", "read-only",
             "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="low"',
-            "--disable", "multi_agent", "-"]
-    try:
-        result = subprocess.run(argv, input=prompt, env=env, cwd=spec["job"]["workspace"],
-                                capture_output=True, text=True, timeout=min(float(spec["job"].get("timeout", 300)), 300))
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AuthError(f"verification agent unavailable: {type(exc).__name__}") from exc
-    if result.returncode:
-        raise AuthError("verification agent did not complete")
+            "-c", 'web_search="disabled"', "-c", "skills.max_context_tokens=1"]
+    for feature in ("apps", "plugins", "browser_use", "computer_use", "image_generation", "multi_agent"):
+        argv.extend(["--disable", feature])
+    argv.append("-")
+    save(record / "command.json", {"argv": argv, "model": "gpt-5.6-luna", "effort": "low"}, env)
+    result = execute(argv, env, spec["job"]["workspace"], prompt,
+                     min(float(spec["job"].get("timeout", 300)), 300),
+                     stdout_path=record / "stdout.jsonl", stderr_path=record / "stderr.txt",
+                     state_path=record / "process-state.json", redaction_env=env)
+    save(record / "outcome.json", {"exit_code": result.code, "output_pending": result.output_pending}, env)
+    if result.code or result.output_pending:
+        raise AuthError("verification agent did not complete; preserved records: " + str(record))
     messages = []
     completed = None
     for line in result.stdout.splitlines():
@@ -803,23 +823,20 @@ def default_verifier(spec):
     # failure statuses remain rejected.
     if completed is None or (completed.get("status") not in (None, "completed", "success", "succeeded")):
         raise AuthError("verification agent turn did not complete successfully")
-    text = "\n".join(messages).strip()
+    save(record / "usage.json", completed.get("usage"), env)
+    text = messages[-1].strip() if messages else ""
     fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", text, flags=re.S)
     candidate = fenced.group(1) if fenced else text
     try:
         value = json.loads(candidate)
     except (TypeError, ValueError) as exc:
-        match = re.search(r"\{.*\}", candidate, flags=re.S)
-        if not match:
-            raise ValueError("verification agent returned malformed JSON") from exc
-        try:
-            value = json.loads(match.group(0))
-        except (TypeError, ValueError) as nested:
-            raise ValueError("verification agent returned malformed JSON") from nested
+        raise ValueError("verification agent returned malformed JSON") from exc
     if not isinstance(value, dict) or not isinstance(value.get("acceptance"), bool):
         raise ValueError("verification agent omitted boolean acceptance verdict")
     if not isinstance(value.get("findings", []), list):
         raise ValueError("verification agent findings must be a list")
+    save(record / "verdict.json", value, env)
+    value.setdefault("evidence_links", []).append(str(record))
     return value
 
 
