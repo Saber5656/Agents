@@ -130,19 +130,14 @@ def _status(cwd: Path) -> list[str]:
 
 
 def _status_overlaps(entries: list[str], files: list[str]) -> bool:
-    """Return whether a porcelain entry touches one of the selected paths."""
     selected = set(files)
     rename_source = False
     for entry in entries:
         if len(entry) >= 4 and entry[3:] in selected:
             return True
-        # Porcelain -z emits the second pathname of rename/copy entries as a
-        # following item without a status prefix.
         if rename_source and entry in selected:
             return True
         rename_source = len(entry) >= 2 and entry[:2] in {"R ", " R", "C ", " C"}
-        if rename_source and len(entry) >= 4 and entry[3:] in selected:
-            return True
     return False
 
 
@@ -330,6 +325,46 @@ def _ci_status(ci: Any, sha: str, observer=None) -> str:
     return "pending"
 
 
+def _github_ci_status(repository: str, remote: str, sha: str) -> str:
+    """Observe workflow/check state for a real GitHub remote.
+
+    Local bare remotes are explicit test adapters and have no GitHub workflow
+    service. A real remote with workflows requires an observed successful
+    check set; missing, pending, or failed checks remain incomplete.
+    """
+    if remote.startswith("file://") or "://" not in remote:
+        return "not_configured"
+    try:
+        from .delivery import GitHub
+        github = GitHub(repository)
+        workflows = github.api("actions/workflows?per_page=100")
+        if not isinstance(workflows, dict) or int(workflows.get("total_count", 0)) == 0:
+            return "not_configured"
+        runs = github.check_runs(sha)
+        if not isinstance(runs, list) or not runs:
+            return "pending"
+        required = github.required_checks("main")
+        by_name = {}
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            name = run.get("name") or run.get("context")
+            if name:
+                by_name.setdefault(name, []).append(run)
+            conclusion = str(run.get("conclusion", run.get("status", ""))).upper()
+            if conclusion not in {"SUCCESS", "NEUTRAL", "SKIPPED"}:
+                return "pending" if conclusion in {"", "QUEUED", "IN_PROGRESS", "PENDING"} else "failed"
+        for requirement in required:
+            matches = by_name.get(requirement.get("context"), [])
+            if requirement.get("app_id") not in (None, -1):
+                matches = [run for run in matches if (run.get("app") or {}).get("id") == requirement["app_id"]]
+            if not matches:
+                return "pending"
+        return "success"
+    except Exception:
+        return "pending"
+
+
 def _save(receipt: Path, payload: dict[str, Any]) -> None:
     payload["updated_at"] = time.time()
     _atomic_json(receipt, payload)
@@ -396,7 +431,9 @@ def publish_scoped(spec: dict[str, Any]) -> dict[str, Any]:
                     raise PublicationError("published receipt origin or canonical HEAD no longer verifies")
                 if _remote_sha(canonical) != published:
                     raise PublicationError("published receipt remote readback no longer verifies")
-                observed_ci = _ci_status(spec.get("ci"), published, spec.get("ci_observer"))
+                observed_ci = (_ci_status(spec.get("ci"), published, spec.get("ci_observer"))
+                               if spec.get("ci") is not None or spec.get("ci_observer") is not None
+                               else _github_ci_status(spec["repository"], spec["remote"], published))
                 if existing.get("ci") == "success" and observed_ci != "success":
                     raise PublicationError("published receipt CI observation no longer verifies")
                 return existing
@@ -435,7 +472,9 @@ def publish_scoped(spec: dict[str, Any]) -> dict[str, Any]:
                 state.update({"status": "incomplete", "stage": "push_unknown", "published_sha": resume_head, "reason": "remote did not read back expected commit"})
                 _save(receipt, state)
                 return state
-            ci_state = _ci_status(spec.get("ci"), resume_head, spec.get("ci_observer"))
+            ci_state = (_ci_status(spec.get("ci"), resume_head, spec.get("ci_observer"))
+                        if spec.get("ci") is not None or spec.get("ci_observer") is not None
+                        else _github_ci_status(spec["repository"], spec["remote"], resume_head))
             state.update({"stage": "pushed", "published_sha": resume_head, "ci": ci_state, "status": "published" if ci_state in {"not_configured", "success"} else ci_state})
             _save(receipt, state)
             return state
@@ -555,7 +594,9 @@ def publish_scoped(spec: dict[str, Any]) -> dict[str, Any]:
             raise PublicationError("canonical checkout overlaps selected files after publication")
         state.update({"stage": "pushed", "published_sha": task_head,
                       "canonical_dirty_after": canonical_dirty_after})
-        ci_state = _ci_status(spec.get("ci"), task_head, spec.get("ci_observer"))
+        ci_state = (_ci_status(spec.get("ci"), task_head, spec.get("ci_observer"))
+                    if spec.get("ci") is not None or spec.get("ci_observer") is not None
+                    else _github_ci_status(spec["repository"], spec["remote"], task_head))
         state["ci"] = ci_state
         state["status"] = "published" if ci_state in {"not_configured", "success"} else ci_state
         _save(receipt, state)
