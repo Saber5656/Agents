@@ -645,9 +645,28 @@ def review_verdict(text):
         text = text.strip()
         fenced = re.fullmatch(r'```(?:json)?\s*\n(.*?)\n```', text, flags=re.S)
         value = json.loads(fenced.group(1) if fenced else text)
+        if not isinstance(value, dict) or value.get('verdict') not in {
+                'approve', 'request_changes', 'incomplete'}:
+            return 'review_incomplete'
         verdict = value.get('verdict')
         if not isinstance(value.get('findings'), list) or not isinstance(value.get('limitations'), list):
             return 'review_incomplete'
+        if not all(isinstance(item, str) and item.strip() for item in value['limitations']):
+            return 'review_incomplete'
+        for finding in value['findings']:
+            if not isinstance(finding, dict):
+                return 'review_incomplete'
+            if finding.get('severity') not in {'high', 'medium', 'low'}:
+                return 'review_incomplete'
+            location = finding.get('file')
+            if not isinstance(location, str) or not re.fullmatch(r'.+:[1-9]\d*', location.strip()):
+                return 'review_incomplete'
+            issue = finding.get('issue')
+            if not isinstance(issue, str) or not issue.strip():
+                return 'review_incomplete'
+            evidence = finding.get('evidence')
+            if not isinstance(evidence, list) or not evidence or not all(isinstance(item, str) and item.strip() for item in evidence):
+                return 'review_incomplete'
         if verdict == 'request_changes' and value['findings']:
             return 'review_findings'
         if verdict == 'approve' and not value['findings']:
@@ -934,7 +953,8 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
                         '指摘の採否と修正方針は呼び出し元のメインエージェントが判断する。'
                         'ユーザーに修正許可を求めず、根拠と影響を返す。\n'
                         'JSON オブジェクトのみ返す: {"verdict":"approve|request_changes|incomplete",'
-                        '"findings":[{"severity":"high|medium|low","file":"path:line","issue":"根拠と影響"}],'
+                        '"findings":[{"severity":"high|medium|low","file":"path:line",'
+                        '"issue":"根拠と影響","evidence":["確認した差分または実行結果"]}],'
                         '"limitations":[]}。修正が必要なら request_changes、判断不能なら incomplete。\n')
     prompt = instruction + '\nユーザーの依頼:\n' + job.prompt
     if (run_dir/'request.md').exists():

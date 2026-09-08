@@ -335,9 +335,23 @@ class JobTests(unittest.TestCase):
         self.assertEqual(h.run_job(self.job,self.env,run)['status'],'review_incomplete')
 
     def test_review_findings_are_not_approval(self):
-        text=json.dumps({'verdict':'request_changes','findings':[{'issue':'bug'}],'limitations':[]})
+        text=json.dumps({'verdict':'request_changes','findings':[{
+            'severity':'high','file':'src/parser.py:10','issue':'bug',
+            'evidence':['fixture diff']}],'limitations':[]})
         run=self.executor([h.ProcessResult(0,claude_result(text))])
         self.assertEqual(h.run_job(self.job,self.env,run)['status'],'review_findings')
+
+    def test_review_verdict_rejects_finding_without_location_and_severity(self):
+        text=json.dumps({'verdict':'request_changes','findings':[{'issue':'bug'}],'limitations':[]})
+        self.assertEqual(h.review_verdict(text),'review_incomplete')
+
+    def test_review_finding_requires_observed_evidence_and_positive_line(self):
+        for evidence,location in [([], 'src/parser.py:1'), (['diff'], 'src/parser.py:0')]:
+            with self.subTest(evidence=evidence, location=location):
+                value={'verdict':'request_changes','findings':[{
+                    'severity':'high','file':location,'issue':'bug','evidence':evidence}],
+                    'limitations':[]}
+                self.assertEqual(h.review_verdict(json.dumps(value)), 'review_incomplete')
 
     def test_missing_vault_is_not_created(self):
         self.job.vault=self.root/'missing'
@@ -525,7 +539,9 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(r.status,'failed'); self.assertIn(text,r.text)
 
     def test_fenced_review_json(self):
-        text='```json\n'+json.dumps({'verdict':'request_changes','findings':[{'issue':'bug'}],'limitations':[]})+'\n```'
+        text='```json\n'+json.dumps({'verdict':'request_changes','findings':[{
+            'severity':'medium','file':'src/parser.py:10','issue':'bug',
+            'evidence':['fixture diff']}],'limitations':[]})+'\n```'
         self.assertEqual(h.review_verdict(text),'review_findings')
 
     def test_approval_with_nonblocking_notes(self):
@@ -580,7 +596,9 @@ class ReviewFixTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); work = root/'work'; vault = root/'vault'; work.mkdir(); vault.mkdir()
             job = h.Job(work, vault, 'Review')
-            review = json.dumps({'verdict': 'request_changes', 'findings': [{'issue': 'bug'}], 'limitations': []})
+            review = json.dumps({'verdict': 'request_changes', 'findings': [{
+                'severity':'high','file':'src/parser.py:10','issue':'bug',
+                'evidence':['fixture diff']}], 'limitations': []})
             result = h.run_job(job, {'PATH': os.environ.get('PATH', ''), 'HOME': str(root)},
                                lambda *args: h.ProcessResult(0, claude_result(review)))
             record = json.loads((Path(result['run_dir'])/'result.json').read_text())
@@ -647,7 +665,9 @@ class ReviewFixTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); work = root/'work'; vault = root/'vault'; work.mkdir(); vault.mkdir()
             run_dir = vault/'existing'; run_dir.mkdir()
-            text = json.dumps({'verdict': 'request_changes', 'findings': [{'issue': 'bug'}], 'limitations': []})
+            text = json.dumps({'verdict': 'request_changes', 'findings': [{
+                'severity':'high','file':'src/parser.py:10','issue':'bug',
+                'evidence':['fixture diff']}], 'limitations': []})
             h.save(run_dir/'result.json', {'run_dir': str(run_dir), 'workspace': str(work),
                                            'mode': 'review', 'status': 'running',
                                            'attempts': [{'provider': 'claude', 'status': 'running'}]}, {})
