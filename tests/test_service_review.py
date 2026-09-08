@@ -167,24 +167,20 @@ def test_default_codex_request_has_read_only_boundaries_and_persists_identity(ro
     findings = [finding()]
     commands = []
 
-    class Process:
-        pid = 4242
-        returncode = 0
-
-        def communicate(self, prompt, timeout):
-            assert prompt
-            assert timeout == 300.0
-            return (json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": response_for(findings)}})
-                    + "\n" + json.dumps({"type": "turn.completed", "status": "completed", "usage": {"input": 4}}), "")
-
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr("harness.service_review.shutil.which", lambda name, path=None: "/bin/codex")
     monkeypatch.setattr("harness.service_review.subprocess.run", lambda *args, **kwargs:
                         type("Completed", (), {"returncode": 0, "stdout": "Logged in with ChatGPT subscription", "stderr": ""})())
-    def popen(command, **kwargs):
+    from harness.runner import ProcessResult
+    def execute(command, env, cwd, prompt, timeout, **kwargs):
         commands.append((command, kwargs))
-        return Process()
-    monkeypatch.setattr("harness.service_review.subprocess.Popen", popen)
+        events = (json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": response_for(findings)}})
+                  + "\n" + json.dumps({"type": "turn.completed", "usage": {"input": 4}}))
+        kwargs["state_path"].write_text(json.dumps({"pid": 4242, "status": "completed"}))
+        kwargs["stdout_path"].write_text(events)
+        kwargs["stderr_path"].write_text("provider diagnostic")
+        return ProcessResult(0, events, "provider diagnostic")
+    monkeypatch.setattr("harness.runner.execute", execute)
     result = decide_findings(spec(agents, vault, "task-root"), review(findings))
     assert result["status"] == "complete"
     command = commands[0][0]
@@ -192,6 +188,8 @@ def test_default_codex_request_has_read_only_boundaries_and_persists_identity(ro
     for feature in ("multi_agent", "apps", "plugins"):
         assert command[command.index("--disable", command.index(feature) - 2) + 1] == feature
     assert result["process_identity"]["pid"] == 4242
+    assert any("turn.completed" in p.read_text() for p in (vault / "service-review").rglob("stdout.jsonl"))
+    assert any("provider diagnostic" in p.read_text() for p in (vault / "service-review").rglob("stderr.txt"))
 
 
 def test_reject_is_a_decision_and_completed_result_is_reused(roots):
@@ -267,3 +265,18 @@ def test_same_separate_finding_does_not_duplicate_when_job_state_changes(roots):
         second = decide_findings(request, review(findings), runner=lambda _: response_for(findings, "separate"))
         assert first["separate_task_ids"] == second["separate_task_ids"]
         assert len(store.list_tasks()) == 2
+
+
+def test_restart_does_not_duplicate_surviving_decision_provider(roots, monkeypatch):
+    from harness.service_review import input_digest
+    agents, vault = roots
+    request = spec(agents, vault, "task-root"); findings = [finding()]
+    directory = vault / "service-review" / input_digest(request, review(findings)) / "attempt-prior"
+    directory.mkdir(parents=True)
+    (directory / "process.json").write_text(json.dumps({"pid": 4242, "status": "running"}))
+    monkeypatch.setattr("harness.runner.reconcile_process", lambda _: {"status": "alive"})
+    calls = []
+    result = decide_findings(request, review(findings), runner=lambda _: calls.append(1))
+    assert result["status"] == "incomplete"
+    assert "running" in result["reason"]
+    assert calls == []

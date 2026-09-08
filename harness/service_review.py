@@ -25,7 +25,7 @@ from .tasks import TaskStore
 MODEL = "gpt-6-astra"
 REASONING_EFFORT = "high"
 SANDBOX = "read-only"
-DISABLED_FEATURES = ("multi_agent", "apps", "plugins")
+DISABLED_FEATURES = ("multi_agent", "apps", "plugins", "browser_use", "computer_use", "image_generation")
 PAID_ROUTE_KEYS = frozenset({
     "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE",
     "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
@@ -153,7 +153,7 @@ def _prompt(spec: Mapping[str, Any], findings: list[dict[str, Any]], evidence_li
     }
     return (
         "You are the primary review coordinator. Read only and do not edit files, "
-        "call external tools, create Issues, or delegate. For every finding exactly "
+        "make external mutations, create Issues, or delegate. You may read the local workspace and saved evidence using read-only tools. For every finding exactly "
         "once, return JSON only with decisions [{finding_id, decision, reason, evidence}]. "
         "decision must be adopt, reject, or separate. Every reason and evidence list "
         "must be non-empty and grounded in the supplied evidence. "
@@ -193,29 +193,21 @@ def _run_codex_review(spec: Mapping[str, Any], prompt: str, directory: Path) -> 
                "-c", 'approval_policy="never"', "-c", f'model_reasoning_effort="{REASONING_EFFORT}"']
     for feature in DISABLED_FEATURES:
         command.extend(["--disable", feature])
-    command.append("-")
+    command.extend(["-c", 'web_search="disabled"', "-c", "skills.max_context_tokens=1", "-"])
     process_identity = {"pid": None, "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                         "argv": command, "cwd": str(workspace)}
-    try:
-        process = subprocess.Popen(command, cwd=workspace, env=env, stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        process_identity["pid"] = process.pid
-        _save_json(directory / "process.json", process_identity, env)
-        stdout, stderr = process.communicate(prompt, timeout=float(spec["job"].get("timeout", 300)))
-    except subprocess.TimeoutExpired:
-        process.kill()
-        stdout, stderr = process.communicate()
-        result = {"status": "incomplete", "reason": "review provider timed out", "process_identity": process_identity}
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        result = {"status": "incomplete", "reason": "review provider failed: " + type(exc).__name__, "process_identity": process_identity}
-    else:
-        process_identity["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        process_identity["returncode"] = process.returncode
-        _save_json(directory / "process.json", process_identity, env)
-        result = _parse_provider_output(stdout, process.returncode, process_identity)
-        result["stderr"] = _redact(stderr or "", env)
+    from .runner import execute
+    _save_json(directory / "command.json", process_identity, env)
+    outcome = execute(command, env, workspace, prompt, float(spec["job"].get("timeout", 300)),
+                      stdout_path=directory / "stdout.jsonl", stderr_path=directory / "stderr.txt",
+                      state_path=directory / "process.json", redaction_env=env)
+    process_identity = _load_json(directory / "process.json") or process_identity
+    result = (_parse_provider_output(outcome.stdout, outcome.code, process_identity)
+              if not outcome.output_pending else {"status": "incomplete", "reason": "output collection still running"})
     result.setdefault("usage", None)
-    _save_json(directory / "provider-output.json", {"prompt": prompt, "output": stdout if "stdout" in locals() else "", "usage": result.get("usage"), "process_identity": process_identity}, env)
+    result["artifact_dir"] = str(directory)
+    _save_json(directory / "provider-output.json", {"prompt": prompt, "output": outcome.stdout,
+               "stderr": outcome.stderr, "usage": result.get("usage"), "process_identity": process_identity}, env)
     return result
 
 
@@ -336,6 +328,37 @@ def _register_separate(spec: Mapping[str, Any], review: Mapping[str, Any], decis
         return created
 
 
+def _recover_provider(directory):
+    """Observe survivors and reuse terminal output saved before an interruption."""
+    from .runner import reconcile_process
+    resumable = None
+    for attempt in sorted(directory.glob("attempt-*"), key=lambda path: path.stat().st_mtime_ns):
+        state_file = attempt / "process.json"
+        if not state_file.exists():
+            continue
+        state = _load_json(state_file)
+        if state is None:
+            return {"status": "incomplete", "reason": "saved provider identity is unreadable"}
+        collectors = state.get("collectors", [])
+        if not isinstance(collectors, list):
+            return {"status": "incomplete", "reason": "saved collector list is unreadable"}
+        records = [state] + collectors
+        for record in records:
+            if not isinstance(record, dict):
+                return {"status": "incomplete", "reason": "saved collector identity is unreadable"}
+            try:
+                process_state = reconcile_process(record).get("status")
+            except (OSError, ValueError, TypeError):
+                process_state = "unknown"
+            if process_state in ("alive", "unknown"):
+                return {"status": "incomplete", "reason": "previous decision provider or collector is still running or uninspectable"}
+        if not (attempt / "coordinator-result.json").exists() and not (attempt / "reconciliation.json").exists() and (attempt / "stdout.jsonl").is_file():
+            recovered = _parse_provider_output((attempt / "stdout.jsonl").read_text(), state.get("exit_code", 0), state)
+            if recovered.get("status") == "completed":
+                resumable = {**recovered, "recovered_from": str(attempt)}
+    return resumable
+
+
 def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner: Any = None) -> dict[str, Any]:
     """Return durable adopt/reject/separate decisions for every review finding."""
     digest = input_digest(spec, review)
@@ -346,6 +369,9 @@ def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner
     cached = _load_json(directory / "result.json")
     if cached and cached.get("status") == "complete":
         return cached
+    recovered = _recover_provider(directory)
+    if recovered and recovered.get("status") == "incomplete":
+        return {**recovered, "input_digest": digest}
     attempt_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=directory))
     env = dict(os.environ)
     try:
@@ -355,7 +381,9 @@ def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner
         paid = sorted(key for key in PAID_ROUTE_KEYS if env.get(key))
         if paid:
             raise ReviewInputError("paid API route is configured: " + ", ".join(paid))
-        if runner is None:
+        if recovered is not None:
+            provider_result = recovered
+        elif runner is None:
             provider_result = _run_codex_review(normalized_spec, prompt, attempt_dir)
         else:
             request = {"prompt": prompt, "model": MODEL, "reasoning_effort": REASONING_EFFORT,
@@ -382,6 +410,8 @@ def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner
         result = {"status": "incomplete", "input_digest": digest, "reason": str(exc) or type(exc).__name__}
     result = _redact_value(result, env)
     _save_json(directory / "result.json", result, env)
+    if recovered and recovered.get("recovered_from"):
+        _save_json(Path(recovered["recovered_from"]) / "reconciliation.json", result, env)
     # Each attempt keeps all accessible records; root files are only a latest-view index.
     for name in ("request.json", "provider-output.json", "result.json"):
         source = directory / name
