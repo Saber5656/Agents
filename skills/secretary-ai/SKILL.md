@@ -50,9 +50,9 @@ argument-hint: "[briefing|今日の予定|メール確認|タスク追加 ...]"
 
 task handoff draft には、元メール/予定の要約、期待成果物、期限、承認要否、添付やリンクの有無を含める。
 外部フロー上の routing や policy 判定が必要な場合は task handoff draft を呼び出し元へ返す。
-実行を続けるには、決定済みの routing / policy を記録した caller-supplied Saihai task context が
-呼び出し元から明示的に渡されていなければならない。secretary-ai 自身は role、approval owner、
-review provider、publication ownership を選択しない。
+実行を続ける場合も、旧ハーネスの envelope や manifest は前提にしない。外部フローの
+routing / policy が必要な依頼は、現在の task context に要件と判断根拠を記録して呼び出し元へ
+返す。secretary-ai 自身は role、approval owner、review provider、publication ownership を選択しない。
 secretary-ai は該当タスクの実作業を開始しない。
 
 ## 前提条件

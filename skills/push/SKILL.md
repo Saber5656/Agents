@@ -19,6 +19,14 @@ Use existing changes and verified results. Preserve unrelated files, index entri
 
 Resolve the intended repository and exact fetch/push destinations from the current assignment and origin. Verify any URL rewrite and upstream before sending data. Freeze the selected commit SHA and compare all unpublished commits and paths against the task scope; inspect their contents and public metadata for personal paths and secrets.
 
-Use the existing Git credentials to push the task branch without force. Never push the default branch, use an obsolete repository whitelist, bypass hooks/protection or publish unrelated commits. Read back the remote SHA and verify it equals the intended commit. If the response is lost, query the ref before repeating. Divergence is preserved and reconciled, not force-pushed away.
+Use the existing Git credentials to push the task branch without force. A
+repository-specific policy may explicitly authorize a reviewed coordinator to
+push its default branch; for Agents, follow
+`policies/repository-delivery.md` and keep workers on task branches. Without
+that explicit authorization, do not push the default branch. Never use an
+obsolete repository whitelist, bypass hooks/protection or publish unrelated
+commits. Read back the remote SHA and verify it equals the intended commit. If
+the response is lost, query the ref before repeating. Divergence is preserved
+and reconciled, not force-pushed away.
 
 Do not ask again for already-authorized push. If PR creation is in scope, continue through `pr`; a successful push alone does not mean the task is complete. A genuinely new destination or missing publication authorization requires that concrete user decision.

@@ -33,10 +33,11 @@ python3 skills/merge/scripts/merge_managed_repos.py --execute --stash
   set's full validation are the quality gates.
 - Permission expansion, authentication secrets, and data-loss risk receive at most one limited review.
 - GitHub PR URLs, PR-number merge requests, merge queues, and auto-merge are explicit negative triggers.
-- Mixed local/PR requests fail closed with no fetch, commit, stash, or local merge. A complete profile-bound PR
-  handoff may be handed to `pr-merge-gate`; otherwise ask only for the missing identity/scope/authorization choice.
-- GitHub PR merge is routed to `pr-merge-gate` only when a complete `trusted_local_v1` host authority/report or
-  explicitly selected `legacy_managed` Saihai envelope carries the required identity; a bare PR URL/number returns
-  the handoff requirement without local merge.
+- Mixed local/PR requests fail closed with no fetch, commit, stash, or local merge. An explicit PR request with
+  repository, base, head, and PR identity may be handed to `pr-merge-gate`; missing identity or scope remains pending.
+- GitHub PR merge is routed to `pr-merge-gate` when the current request contains
+  the required repository, base/head and PR identity. A bare PR URL/number is
+  inspected for missing identity and remains pending until the request scope is
+  clear; no legacy envelope is required.
 
 See [SKILL.md](SKILL.md) for full workflow details.

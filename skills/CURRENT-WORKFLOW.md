@@ -45,5 +45,8 @@ expand access outside the assignment or bypass repository protection.
 
 GitHub titles/bodies are English and checked for private paths/secrets before
 create, edit or comment. Use `Refs` until the actual acceptance is met; distinguish
-mock success, tested, installed, merged and real usability. No direct main push,
-force push, history rewrite, hook bypass or automatic destruction of other work.
+mock success, tested, installed, merged and real usability. For this Agents
+repository, the coordinator may push verified `main` directly as specified by
+`policies/repository-delivery.md`; workers do not push the shared default branch.
+Other repositories retain their normal PR workflow. Never force push, rewrite
+history, bypass hooks/protection, or automatically destroy other work.
