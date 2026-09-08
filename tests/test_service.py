@@ -134,6 +134,38 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("paid-api", detail["last_error"])
         self.assertEqual(detail["state"], "held")
 
+    def test_held_job_requires_explicit_safe_recheck_before_resume(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        blocked = AuthError("extra billing blocked", hold=True, action="purchase", source="paid-api")
+        with mock.patch.object(self.service, "auth_guard", side_effect=blocked):
+            self.assertEqual(self.service.run_once()["status"], "held")
+        before = self.service.get_job(job["id"])
+
+        denied = self.service.resume_held(job["id"],
+                                          lambda _: {"safe": False, "reason": "paid route remains configured"})
+        self.assertEqual(denied["status"], "held")
+        self.assertEqual(self.service.get_job(job["id"])["state"], "held")
+        self.assertEqual(len(self.service.list_attempts(job["id"])), 1)
+        self.assertGreater(len(self.service.get_job(job["id"])["updates"]), len(before["updates"]))
+
+        resumed = self.service.resume_held(job["id"],
+                                           lambda _: {"safe": True, "reason": "subscription route verified"})
+        self.assertEqual(resumed["status"], "retry")
+        self.assertEqual(self.service.get_job(job["id"])["state"], "retry")
+        self.assertEqual(self.service.get_job(job["id"])["attempts"][0]["status"], "held")
+        self.assertEqual(self.service.run_once(executor=lambda _: {"status": "failed", "text": "still ordinary retry"})["status"], "retry")
+
+    def test_held_resume_checker_failure_preserves_hold_and_history(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        blocked = AuthError("security hold", hold=True, action="expand_access", source="fixture")
+        with mock.patch.object(self.service, "auth_guard", side_effect=blocked):
+            self.assertEqual(self.service.run_once()["status"], "held")
+        result = self.service.resume_held(job["id"], lambda _: (_ for _ in ()).throw(RuntimeError("recheck unavailable")))
+        self.assertEqual(result["status"], "held")
+        detail = self.service.get_job(job["id"])
+        self.assertEqual(detail["state"], "held")
+        self.assertIn("recheck unavailable", " ".join(update["message"] for update in detail["updates"]))
+
     def test_worker_timeout_is_recorded_and_rescheduled_without_model_promotion(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)
         seen = []

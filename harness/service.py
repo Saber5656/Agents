@@ -611,6 +611,71 @@ class ServiceStore:
             conn.execute("UPDATE service_jobs SET next_attempt_at=NULL,verification_count=0,updated_at=? WHERE id=?", (now(), job_id))
         return self.get_job(job_id)
 
+    def recheck_held(self, job_id, checker):
+        """Run an explicit, read-only safety check for a held job.
+
+        A hold is durable by design.  The checker must return ``{"safe":
+        True}`` before a caller may resume it; a missing, false, or failed
+        check leaves the job held and appends the diagnostic to its history.
+        No provider or worker is started here.
+        """
+        if not callable(checker):
+            raise TypeError("an explicit held-job checker is required")
+        job = self.get_job(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job["state"] != "held":
+            raise ValueError(f"job state {job['state']} is not held")
+        try:
+            result = checker(dict(job))
+        except Exception as exc:
+            diagnostic = f"held recheck failed: {type(exc).__name__}: {exc}"
+            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-failed"])
+            return {"status": "held", "safe": False, "reason": diagnostic}
+        if not isinstance(result, dict) or result.get("safe") is not True:
+            reason = result.get("reason", "explicit safety recheck did not pass") if isinstance(result, dict) else "explicit safety recheck was malformed"
+            diagnostic = f"held recheck blocked resume: {reason}"
+            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-blocked"])
+            return {"status": "held", "safe": False, "reason": diagnostic}
+        return {"status": "ready", "safe": True,
+                "reason": result.get("reason", "explicit safety recheck passed"),
+                "evidence": list(result.get("evidence", [])) if isinstance(result.get("evidence", []), list) else []}
+
+    def resume_held(self, job_id, checker):
+        """Resume a held job only after an explicit safe recheck.
+
+        The held attempt remains immutable history.  If dependencies or task
+        state are still unsafe, the job stays held and no worker is claimed.
+        """
+        result = self.recheck_held(job_id, checker)
+        if result.get("safe") is not True:
+            return result
+        job = self.get_job(job_id)
+        task = self.tasks.get_task(job["task_id"])
+        if task is None or not self._dependencies_ready(task):
+            diagnostic = "held recheck passed but dependencies are not ready"
+            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-dependencies"])
+            return {"status": "held", "safe": False, "reason": diagnostic}
+        with self.tx() as conn:
+            changed = conn.execute(
+                "UPDATE service_jobs SET state='retry',next_attempt_at=NULL,last_error=NULL,updated_at=? WHERE id=? AND state='held'",
+                (now(), job_id)).rowcount
+        if not changed:
+            return {"status": "held", "safe": False, "reason": "held job changed during resume"}
+        try:
+            current = self.tasks.get_task(job["task_id"])
+            self.tasks.update_task(job["task_id"], expected_version=current["version"], execution_status="planned")
+        except Exception as exc:
+            diagnostic = f"held resume task update failed: {type(exc).__name__}: {exc}"
+            with self.tx() as conn:
+                conn.execute("UPDATE service_jobs SET state='held',last_error=?,updated_at=? WHERE id=? AND state='retry'",
+                             (diagnostic, now(), job_id))
+            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-task-update-failed"])
+            return {"status": "held", "safe": False, "reason": diagnostic}
+        self.record_update(job_id, "Held job explicitly resumed after safety recheck: " + str(result.get("reason", "passed")),
+                           result.get("evidence", []) or ["local://cost-security/recheck-passed"])
+        return {"status": "retry", "safe": True, "job_id": job_id}
+
     def _dependencies_ready(self, task):
         for dependency_id in task.get("dependencies", []):
             dependency = self.tasks.get_task(dependency_id)
