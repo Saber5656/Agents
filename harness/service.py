@@ -487,8 +487,41 @@ class ServiceStore:
                 return False
             evidence = [str(item).lower() for item in dependency.get("completion_evidence", []) + dependency.get("evidence_links", [])]
             if not any(("main" in item and "sync" in item) or "merged" in item for item in evidence):
-                return False
+                if not any(self._structured_completion_receipt(item, dependency)
+                           for item in dependency.get("completion_evidence", [])):
+                    return False
         return True
+
+    @staticmethod
+    def _structured_completion_receipt(value, task):
+        """Recognize the service's persisted acceptance/publication receipt."""
+        try:
+            path = Path(value)
+            if not path.is_file():
+                return False
+            receipt = json.loads(path.read_text())
+            review = receipt.get("review")
+            publication = receipt.get("publication_readback")
+            if (not isinstance(receipt, dict) or not isinstance(review, dict)
+                    or review.get("acceptance") is not True or review.get("findings")
+                    or not isinstance(review.get("criteria"), list) or not review["criteria"]
+                    or not isinstance(publication, dict)):
+                return False
+            if not re.fullmatch(r"[0-9a-fA-F]{40}", str(publication.get("commit", ""))):
+                return False
+            if publication.get("main") != publication.get("commit"):
+                return False
+            criteria = review["criteria"]
+            expected = {item["evidence"] for item in task.get("acceptance_records", [])}
+            observed = {item.get("criterion") for item in criteria if isinstance(item, dict)}
+            if observed != expected or publication.get("repository") != task.get("repository"):
+                return False
+            return all(isinstance(item, dict) and item.get("verified") is True
+                       and isinstance(item.get("criterion"), str)
+                       and isinstance(item.get("evidence"), str)
+                       and item["evidence"].strip() for item in criteria)
+        except (OSError, TypeError, ValueError, AttributeError):
+            return False
 
     def _ready_rows(self):
         with self._lock:
@@ -613,6 +646,8 @@ class ServiceStore:
         import uuid
         job = self.get_job(job_id)
         if job is None: raise KeyError(job_id)
+        if job["state"] not in ("needs_verification", "verifying"):
+            raise ValueError(f"job state {job['state']} cannot be verified")
         task = self.tasks.get_task(job["task_id"])
         if not isinstance(evidence, dict) or evidence.get("acceptance") is not True or evidence.get("findings"):
             raise ValueError("a structured acceptance review with no unresolved findings is required")

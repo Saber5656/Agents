@@ -50,6 +50,31 @@ class ServiceTests(unittest.TestCase):
         self.tasks.update_task(dependency["id"], expected_version=current["version"], execution_status="verified")
         self.assertEqual(self.service.run_once(executor=lambda _: {"status": "completed"})["status"], "needs_verification")
 
+    def test_dependency_accepts_structured_service_receipt(self):
+        dependency = self.tasks.create_task(
+            purpose="receipt dependency", repository="Saber5656/Agents",
+            acceptance_evidence=["check"],
+        )
+        self.tasks.add_acceptance_evidence(dependency["id"], "check", verified=True)
+        receipt = self.vault / "acceptance.json"
+        receipt.write_text(json.dumps({
+            "review": {"acceptance": True, "findings": [], "criteria": [
+                {"criterion": "check", "verified": True, "evidence": "test log"}
+            ]},
+            "publication_readback": {
+                "repository": "Saber5656/Agents", "commit": "a" * 40,
+                "main": "a" * 40, "mode": "direct_main"
+            },
+            "task_version": 3, "observed_at": "2026-09-08T00:00:00+00:00",
+        }))
+        current = self.tasks.get_task(dependency["id"])
+        self.tasks.update_task(dependency["id"], expected_version=current["version"],
+                               execution_status="verified")
+        self.tasks.add_completion_evidence(dependency["id"], str(receipt))
+        task = self.tasks.create_task(purpose="receipt dependent", dependencies=[dependency["id"]])
+        self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        self.assertEqual(self.service.run_once(executor=lambda _: {"status": "completed"})["status"], "needs_verification")
+
     def test_attempt_timeout_is_per_attempt_and_success_needs_verification(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", timeout=0.1)
         called = []
@@ -303,6 +328,20 @@ class ServiceTests(unittest.TestCase):
             self.service.verify(job["id"], "vault://accepted-only")
         with self.assertRaises(ValueError):
             self.service.verify(job["id"], "vault://merge;main-sync")
+
+    def test_verify_rejects_pending_job_even_with_valid_evidence(self):
+        task = self.tasks.create_task(purpose="verify state", repository="Saber5656/Agents",
+                                      acceptance_evidence=["accepted"])
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
+        evidence = {"acceptance": True, "findings": [],
+                    "criteria": [{"criterion": "accepted", "verified": True,
+                                   "evidence": "saved test"}],
+                    "publication": {"commit": "a" * 40, "mode": "direct_main"}}
+        with mock.patch("harness.service.observe_publication", return_value={"commit": "a" * 40}):
+            with self.assertRaisesRegex(ValueError, "state"):
+                self.service.verify(job["id"], evidence)
+        self.assertEqual(self.service.get_job(job["id"])["state"], "pending")
+        self.assertEqual(self.tasks.get_task(task["id"])["execution_status"], "planned")
 
     def test_verifier_requires_every_exact_acceptance_criterion(self):
         task = self.tasks.create_task(purpose="verify exact", repository="Saber5656/Agents",
