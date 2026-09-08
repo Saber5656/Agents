@@ -877,6 +877,11 @@ class ServiceStore:
                             "vault_root": str(self.tasks.vault_root)}
             if proposal is not None:
                 verifier_spec["publication_snapshot"] = proposal_snapshot
+            if resumed_proof is not None:
+                # The sandboxed reviewer need not repeat a network request.
+                # Supply the host's actual readback before final review, then
+                # recheck it again at the completion boundary below.
+                verifier_spec["publication_readback"] = observe_publication(job, task, resumed_proof)
             result = verifier(verifier_spec)
         except Exception as exc:
             self._reset_verification(job_id, str(exc))
@@ -1337,13 +1342,33 @@ def default_verifier(spec):
     task = spec["task"]
     env = load_agents_env(Path(spec["agents_root"]) / ".env")
     ServiceStore.auth_guard(env)
+    phase = "pre_publication" if spec.get("publication_snapshot") is not None else "final_acceptance"
+    phase_instructions = (
+        "Review only source readiness for host publication now. An uncommitted diff, pending CI, "
+        "and not-yet-published main are expected at this phase, not a source defect or a separate task. "
+        "Do not require remote publication to set publication_readiness=true. Do not attempt network "
+        "or GitHub checks: the host performs them after your source review. Keep acceptance=false "
+        "and publication-dependent criteria unverified until the later final acceptance phase; "
+        "this must not create findings when source checks pass. Return explicit empty findings "
+        "and decisions when the code/docs, validation and scope are correct."
+        if phase == "pre_publication" else
+        "Review final acceptance against actual artifacts and the supplied host publication_readback. "
+        "That readback was obtained by the host from Git/GitHub immediately before this review and "
+        "will be rechecked before completion. Use its exact commit/main identity as external evidence; "
+        "do not repeat network requests from the read-only sandbox or treat its network unavailability "
+        "as a product defect. Missing host readback remains unverified."
+    )
     prompt = json.dumps({
+        "phase": phase,
+        "phase_instructions": phase_instructions,
         "task": task,
         "job": spec["job"],
         "publication_snapshot": spec.get("publication_snapshot"),
+        "publication_readback": spec.get("publication_readback"),
         "instructions": (
             "Act as an independent read-only verifier. Inspect the workspace, saved execution result and artifacts, "
-            "the task acceptance criteria, current git status/log, and the public commit/merge/main synchronization. "
+            "the task acceptance criteria and current git status/log. Follow phase_instructions: "
+            "public commit/merge/main evidence belongs only to final_acceptance and comes from host readback. "
             "For a publication proposal, separately verify the code/test change and return publication_readiness=true "
             "only when those pre-publication checks are complete. Bind publication_review to the observed worktree "
             "head and selected diff digest supplied in publication_snapshot (the host computed these from the "

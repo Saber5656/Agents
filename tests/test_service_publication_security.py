@@ -179,6 +179,7 @@ def test_published_receipt_requests_only_final_acceptance_review(publication_job
         result = service.verify_with_agent(job["id"], verifier)
     assert result["status"] == "needs_verification"
     verifier.assert_called_once()
+    assert verifier.call_args.args[0]["publication_readback"] == {"commit": "a" * 40}
     publish.assert_not_called()
 
 
