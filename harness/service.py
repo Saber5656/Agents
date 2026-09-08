@@ -224,6 +224,9 @@ class ServiceStore:
             rows = self._conn.execute("SELECT id FROM service_jobs WHERE run_dir IS NULL").fetchall()
             self._conn.executemany("UPDATE service_jobs SET run_dir=? WHERE id=?",
                                   [(prefix + row[0], row[0]) for row in rows])
+        for column, kind in (("verification_pid", "INTEGER"), ("verification_identity", "TEXT")):
+            if column not in job_columns:
+                self._conn.execute(f"ALTER TABLE service_jobs ADD COLUMN {column} {kind}")
         attempt_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(service_attempts)")}
         if "identity" not in attempt_columns:
             self._conn.execute("ALTER TABLE service_attempts ADD COLUMN identity TEXT")
@@ -309,7 +312,13 @@ class ServiceStore:
                 return "unknown"
             if not isinstance(record, dict):
                 return "unknown"
-            if record.get("status") not in ("starting", "running"):
+            for collector in record.get("collectors", []):
+                if not isinstance(collector, dict):
+                    return "unknown"
+                collector_state = self._pid_state(collector.get("pid"), collector.get("identity"))
+                if collector_state != "dead":
+                    return collector_state
+            if record.get("status") not in ("starting", "running", "collecting"):
                 continue
             provider_state = self._pid_state(record.get("pid"), record.get("identity"))
             if provider_state in ("alive", "unknown"):
@@ -340,7 +349,7 @@ class ServiceStore:
                     conn.execute("UPDATE service_jobs SET state='reconciling',last_error=?,updated_at=? WHERE id=?", ("worker died; read-only reconciliation in progress", stamp, row["id"]))
                     conn.execute("UPDATE service_attempts SET status='reconciling',ended_at=?,error=? WHERE id=? AND status IN ('running','reconciling')", (stamp, "worker process is definitely dead", row["attempt_id"]))
                 try:
-                    result = (reconciler or default_reconciler)(self._job(current), row)
+                    result = (reconciler or default_reconciler)(self._job(current), dict(row))
                 except Exception as exc:
                     result = {"safe_to_resume": False, "reason": "receipt reconciliation failed", "error": str(exc)}
                 safe = isinstance(result, dict) and result.get("safe_to_resume") is True
@@ -361,18 +370,21 @@ class ServiceStore:
         return recovered
 
     def recover_interrupted_verification(self):
-        """Return verification attempts interrupted with the service process."""
+        """Requeue only verification whose recorded owner is definitely dead."""
+        recovered = []
         with self.tx() as conn:
-            rows = list(conn.execute("SELECT id FROM service_jobs WHERE state='verifying'"))
-            stamp = now()
+            rows = list(conn.execute("SELECT * FROM service_jobs WHERE state='verifying'"))
             for row in rows:
-                conn.execute("UPDATE service_jobs SET state='needs_verification',last_error=?,updated_at=? WHERE id=?", ("verification interrupted; retrying independent read-only review", stamp, row["id"]))
+                if self._pid_state(row["verification_pid"], row["verification_identity"]) != "dead":
+                    continue
+                conn.execute("UPDATE service_jobs SET state='needs_verification',verification_pid=NULL,verification_identity=NULL,last_error=?,updated_at=? WHERE id=?", ("verification interrupted; retrying independent read-only review", now(), row["id"]))
                 conn.execute("UPDATE service_attempts SET status='needs_verification' WHERE job_id=? AND status='verifying'", (row["id"],))
-        return [row["id"] for row in rows]
+                recovered.append(row["id"])
+        return recovered
 
     def _start_verification(self, job_id):
         with self.tx() as conn:
-            changed = conn.execute("UPDATE service_jobs SET state='verifying',updated_at=? WHERE id=? AND state='needs_verification'", (now(), job_id)).rowcount
+            changed = conn.execute("UPDATE service_jobs SET state='verifying',verification_pid=?,verification_identity=?,updated_at=? WHERE id=? AND state='needs_verification'", (os.getpid(), json.dumps(self._process_identity(os.getpid())), now(), job_id)).rowcount
             if changed:
                 conn.execute("UPDATE service_attempts SET status='verifying' WHERE job_id=? AND status='needs_verification'", (job_id,))
             return changed == 1
@@ -677,6 +689,7 @@ def default_executor(spec):
 
 def default_reconciler(job, attempt):
     """Read only receipt reconciliation after a definitely dead worker."""
+    attempt = dict(attempt)
     run_dir = Path(attempt.get("attempt_run_dir") or attempt.get("run_dir") or job["run_dir"])
     result_file = run_dir / "result.json"
     if not result_file.is_file():
@@ -766,14 +779,11 @@ class Scheduler:
         self._prepared = False; self._prepare_lock = threading.Lock()
 
     def _prepare(self):
-        if self._prepared:
-            return
+        # A surviving provider can finish after scheduler startup. Revisit
+        # persisted ownership on each scheduling pass, without model polling.
         with self._prepare_lock:
-            if self._prepared:
-                return
             self.store.recover_stale_jobs(self.reconciler)
             self.store.recover_interrupted_verification()
-            self._prepared = True
 
     def run_once(self, executor=None):
         self._prepare()
@@ -795,8 +805,8 @@ class Scheduler:
         workers = {}
         verifiers = {}
         try:
-            self._prepare()
             while not self.stop_event.is_set():
+                self._prepare()
                 while len(workers) < self.worker_capacity:
                     future = worker_pool.submit(self.store.run_once, executor, None)
                     workers[future] = True

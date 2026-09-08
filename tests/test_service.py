@@ -164,8 +164,46 @@ class ServiceTests(unittest.TestCase):
         self.service.run_once(executor=lambda _: {"status": "completed"})
         self.service._start_verification(job["id"])
         self.assertEqual(self.service.get_job(job["id"])["state"], "verifying")
+        with self.service.tx() as conn:
+            conn.execute("UPDATE service_jobs SET verification_pid=? WHERE id=?", (99999999, job["id"]))
         self.assertEqual(self.service.recover_interrupted_verification(), [job["id"]])
         self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
+
+    def test_other_scheduler_does_not_reclaim_live_verification(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        reopened = ServiceStore(self.db, self.tasks)
+        self.addCleanup(reopened.close)
+        self.assertEqual(reopened.recover_interrupted_verification(), [])
+        self.assertEqual(reopened.get_job(job["id"])["state"], "verifying")
+
+    def test_recovery_waits_for_output_collectors(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        claimed = self.service._claim_next(); claimed["_lock"].release()
+        run_dir = Path(claimed["attempt_run_dir"]); run_dir.mkdir(parents=True)
+        (run_dir / "0-codex-state.json").write_text(json.dumps({
+            "status": "collecting", "pid": 99999999, "collectors": [
+                {"pid": os.getpid(), "identity": self.service._process_identity(os.getpid())}]}))
+        with self.service.tx() as conn:
+            conn.execute("UPDATE service_attempts SET pid=? WHERE job_id=?", (99999999, job["id"]))
+        self.assertEqual(self.service.recover_stale_jobs(lambda *_: {"safe_to_resume": True}), [])
+
+    def test_default_reconciliation_accepts_persisted_sqlite_attempt(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        claimed = self.service._claim_next(); claimed["_lock"].release()
+        run_dir = Path(claimed["attempt_run_dir"]); run_dir.mkdir(parents=True)
+        (run_dir / "result.json").write_text(json.dumps({"status": "incomplete"}))
+        with self.service.tx() as conn:
+            conn.execute("UPDATE service_attempts SET pid=? WHERE job_id=?", (99999999, job["id"]))
+        self.assertEqual(self.service.recover_stale_jobs(), [{"job_id": job["id"], "state": "retry"}])
+
+    def test_scheduler_rechecks_survivors_that_die_after_startup(self):
+        scheduler = Scheduler(self.service)
+        with mock.patch.object(self.service, "recover_stale_jobs") as recover:
+            scheduler.run_once(executor=lambda _: {"status": "completed"})
+            scheduler.run_once(executor=lambda _: {"status": "completed"})
+        self.assertEqual(recover.call_count, 2)
 
     def test_workspace_process_lock_blocks_second_owner_and_releases_on_exit(self):
         lock1 = WorkspaceLock(self.root / "same", self.root / "locks")
