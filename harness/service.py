@@ -29,6 +29,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Callable
 
+from .context import ContextError, RequirementLedger
 from .tasks import ConflictError, TaskStore
 from .service_review import decide_findings
 
@@ -158,6 +159,17 @@ CREATE TABLE IF NOT EXISTS service_jobs (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS service_jobs_ready ON service_jobs(state, next_attempt_at);
+CREATE TABLE IF NOT EXISTS service_selections (
+  job_id TEXT PRIMARY KEY REFERENCES service_jobs(id) ON DELETE CASCADE,
+  requirement_id TEXT NOT NULL,
+  work_unit_id TEXT,
+  repository TEXT NOT NULL,
+  canonical_repo TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  immutable_base TEXT NOT NULL,
+  vault_reference TEXT NOT NULL,
+  criteria_json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS service_updates (
   job_id TEXT NOT NULL REFERENCES service_jobs(id) ON DELETE CASCADE,
   sequence INTEGER NOT NULL,
@@ -558,6 +570,17 @@ class ServiceStore:
         if row is None:
             return None
         result = dict(row)
+        selection = self._conn.execute(
+            "SELECT requirement_id,work_unit_id,repository,canonical_repo,branch,"
+            "immutable_base,vault_reference,criteria_json FROM service_selections WHERE job_id=?",
+            (row["id"],),
+        ).fetchone()
+        if selection is not None:
+            result.update(dict(selection))
+            try:
+                result["criteria"] = json.loads(result["criteria_json"])
+            except (TypeError, ValueError):
+                result["criteria"] = None
         result["updates"] = [{"message": x[0], "evidence_links": json.loads(x[1])} for x in self._conn.execute("SELECT message,evidence_links FROM service_updates WHERE job_id=? ORDER BY sequence", (row["id"],))]
         result["attempts"] = [dict(x) for x in self._conn.execute("SELECT * FROM service_attempts WHERE job_id=? ORDER BY attempt_number", (row["id"],))]
         for item in result["attempts"]:
@@ -602,6 +625,255 @@ class ServiceStore:
               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
                          (jid, task_id, str(workspace), str(run_dir), resource, prompt, context, model, effort, float(timeout), float(retry_base), float(retry_max), stamp, stamp))
         return self.get_job(jid)
+
+    @staticmethod
+    def _selection_value(value, name):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} is required")
+        return value.strip()
+
+    def _validate_vault_reference(self, reference):
+        reference = self._selection_value(reference, "vault_reference")
+        vault_root = self.tasks.vault_root.resolve()
+        if reference.startswith("vault://"):
+            relative = reference.removeprefix("vault://")
+            if not relative or Path(relative).is_absolute():
+                raise ValueError("vault_reference must identify an existing Vault record")
+            target = (vault_root / relative).resolve()
+        else:
+            target = Path(reference).expanduser().resolve()
+        try:
+            target.relative_to(vault_root)
+        except ValueError as exc:
+            raise ValueError("vault_reference must stay inside the configured Vault") from exc
+        if not target.is_file() or target.is_symlink():
+            raise ValueError("vault_reference must identify an existing Vault file")
+        return reference
+
+    def _selection_dependencies_ready(self, row):
+        if isinstance(row, dict):
+            requirement_id = row.get("requirement_id")
+        elif "requirement_id" in row.keys():
+            requirement_id = row["requirement_id"]
+        else:
+            selection = self._conn.execute(
+                "SELECT requirement_id FROM service_selections WHERE job_id=?",
+                (row["id"],),
+            ).fetchone()
+            requirement_id = selection[0] if selection else None
+        if not requirement_id:
+            return True
+        # Walk the RequirementLedger dependency graph iteratively.  The
+        # selected requirement itself is the work being scheduled, so its own
+        # task is not required to be complete; only its prerequisites are.
+        # A cycle or a missing node is an incomplete dependency, never a
+        # reason to start a worker.
+        root = self.tasks.get_requirement(requirement_id)
+        if root is None:
+            return False
+        root_dependencies = list(root.get("dependencies", []))
+        states = {requirement_id: "root"}
+        requirements = {requirement_id: root}
+        stack = []
+        for dependency_id in root_dependencies:
+            if dependency_id == requirement_id:
+                return False
+            stack.append((dependency_id, False))
+        while stack:
+            current_id, expanded = stack.pop()
+            state = states.get(current_id)
+            if expanded:
+                requirement = requirements.get(current_id)
+                if requirement is None:
+                    states[current_id] = False
+                    continue
+                dependencies = requirement.get("dependencies", [])
+                if any(states.get(dependency_id) is not True
+                       for dependency_id in dependencies):
+                    states[current_id] = False
+                    continue
+                task_ids = requirement.get("task_ids") or []
+                if not task_ids:
+                    states[current_id] = False
+                    continue
+                required_acceptance = set(requirement.get("acceptance") or [])
+                ready = True
+                verified = set()
+                for task_id in task_ids:
+                    task = self.tasks.get_task(task_id)
+                    if (task is None or not self._dependencies_ready(task)
+                            or not self._dependencies_ready({"dependencies": [task_id]})):
+                        ready = False
+                        break
+                    records = task.get("acceptance_records") or []
+                    if (not records or
+                            not all(item.get("verified") is True for item in records)):
+                        ready = False
+                        break
+                    verified.update(item.get("evidence") for item in records
+                                    if item.get("verified") is True)
+                    if not task.get("completion_evidence"):
+                        ready = False
+                        break
+                states[current_id] = ready and required_acceptance.issubset(verified)
+                continue
+            if state is True or state is False:
+                continue
+            if state in ("visiting", "root"):
+                return False
+            requirement = self.tasks.get_requirement(current_id)
+            if requirement is None:
+                return False
+            requirements[current_id] = requirement
+            states[current_id] = "visiting"
+            stack.append((current_id, True))
+            for dependency_id in requirement.get("dependencies", []):
+                if states.get(dependency_id) == "visiting":
+                    return False
+                if dependency_id not in states:
+                    stack.append((dependency_id, False))
+        return all(states.get(dependency_id) is True
+                   for dependency_id in root_dependencies)
+
+    def enroll_selected(self, requirement_id, task_id, *, ledger, workspace,
+                        repository, repository_path, branch, immutable_base,
+                        vault_reference, criteria, work_unit=None, model="gpt-5.6-luna",
+                        effort="low", timeout=300.0, retry_base=30.0,
+                        retry_max=3600.0, resource="default"):
+        """Enroll one coordinator-selected requirement/task binding.
+
+        This method deliberately has no backlog-discovery path.  The caller
+        must pass an existing selected ledger requirement and an already
+        linked TaskStore task.  Its immutable selection metadata is persisted
+        with the service job so a restart or retry reuses the same identity.
+        """
+        if not isinstance(ledger, RequirementLedger):
+            raise TypeError("an existing RequirementLedger is required")
+        if Path(ledger.store.db_path).resolve() != Path(self.tasks.db_path).resolve():
+            raise ContextError("RequirementLedger must use the same TaskStore database")
+        handoff = ledger.handoff()
+        selected = set(handoff.get("selected", []))
+        if requirement_id not in selected:
+            raise ContextError("requirement must be explicitly selected before enrollment")
+        requirement = next((item for item in handoff.get("requirements", [])
+                            if item.get("id") == requirement_id), None)
+        if requirement is None:
+            raise ContextError(f"unknown requirement: {requirement_id}")
+        if task_id not in requirement.get("task_ids", []):
+            raise ValueError("task is not linked to the selected requirement")
+        task = self.tasks.get_task(task_id)
+        if task is None:
+            raise KeyError(f"unknown task: {task_id}")
+        repository = self._selection_value(repository, "repository")
+        if task.get("repository") and task["repository"] != repository:
+            raise ValueError("repository does not match the selected task")
+        workspace = Path(workspace).expanduser().resolve()
+        repository_path = Path(repository_path).expanduser().resolve()
+        if not workspace.is_dir():
+            raise ValueError(f"workspace does not exist: {workspace}")
+        if not repository_path.is_dir():
+            raise ValueError(f"repository_path does not exist: {repository_path}")
+        branch = self._selection_value(branch, "branch")
+        immutable_base = self._selection_value(immutable_base, "immutable_base")
+        vault_reference = self._validate_vault_reference(vault_reference)
+        if isinstance(criteria, str) or not criteria:
+            raise TypeError("criteria must be a non-empty sequence of strings")
+        criteria = list(criteria)
+        if any(not isinstance(item, str) or not item.strip() for item in criteria):
+            raise ValueError("criteria must contain non-empty strings")
+        criteria = list(dict.fromkeys(item.strip() for item in criteria))
+        required = set(requirement.get("acceptance") or [])
+        if required - set(criteria):
+            raise ValueError("criteria must cover every selected requirement acceptance criterion")
+        tracked = {item["evidence"] for item in task.get("acceptance_records", [])}
+        if set(criteria) - tracked:
+            raise ValueError("selected criteria must be recorded in task acceptance before enrollment")
+        if work_unit is not None:
+            work_unit = self._selection_value(work_unit, "work_unit")
+            unit = self.tasks.get_work_unit(work_unit)
+            if unit is None or task_id not in {item["id"] for item in unit.get("tasks", [])}:
+                raise ValueError("work_unit must be an existing unit linked to the selected task")
+        # Validate the existing checkout identity before any service row is
+        # written.  prepare_worktree does not reset or clean a matching tree.
+        from .delivery import prepare_worktree
+        prepared = prepare_worktree(repository_path, workspace, branch, immutable_base)
+        if prepared["worktree"] != str(workspace) or prepared["branch"] != branch:
+            raise ValueError("prepared worktree identity does not match selection")
+        context = json.dumps({
+            "selection": {"requirement_id": requirement_id, "task_id": task_id,
+                          "work_unit_id": work_unit},
+            "repository": repository, "repository_path": str(repository_path),
+            "worktree": str(workspace), "branch": branch,
+            "immutable_base": immutable_base, "vault_reference": vault_reference,
+            "criteria": criteria,
+        }, ensure_ascii=False, sort_keys=True)
+        prompt = (f"Execute selected task {task_id}. Consult {vault_reference} and "
+                  "satisfy the recorded acceptance criteria; preserve the "
+                  "immutable base and selected worktree scope.")
+        metadata = {
+            "requirement_id": requirement_id, "work_unit_id": work_unit,
+            "repository": repository, "canonical_repo": str(repository_path),
+            "branch": branch, "immutable_base": immutable_base,
+            "vault_reference": vault_reference,
+            "criteria_json": json.dumps(criteria, ensure_ascii=False),
+        }
+        with self.tx() as conn:
+            rows = conn.execute(
+                "SELECT * FROM service_jobs WHERE task_id=? "
+                "ORDER BY CASE WHEN state IN ('completed','cancelled') THEN 1 ELSE 0 END, created_at",
+                (task_id,),
+            ).fetchall()
+            # Any existing selected or ordinary active job is the durable
+            # identity for this task.  Never create a second worker after a
+            # restart, even if the first job is already terminal.
+            candidate = rows[0] if rows else None
+            if candidate is None:
+                jid = "job_" + hashlib.sha256(f"{task_id}\0{time.time_ns()}".encode()).hexdigest()[:24]
+                run_dir = self.tasks.vault_root / "01-Projects" / "agent-runs" / f"service-{jid}"
+                stamp = now()
+                conn.execute("""INSERT INTO service_jobs
+                  (id,task_id,workspace,run_dir,resource,prompt,context,model,effort,timeout,retry_base,retry_max,state,created_at,updated_at)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
+                             (jid, task_id, str(workspace), str(run_dir), resource, prompt, context,
+                              model, effort, float(timeout), float(retry_base), float(retry_max),
+                              stamp, stamp))
+                conn.execute("""INSERT INTO service_selections
+                    (job_id,requirement_id,work_unit_id,repository,canonical_repo,branch,
+                     immutable_base,vault_reference,criteria_json)
+                    VALUES (?,?,?,?,?,?,?,?,?)""",
+                             (jid, requirement_id, work_unit, repository, str(repository_path),
+                              branch, immutable_base, vault_reference, metadata["criteria_json"]))
+                return self.get_job(jid)
+            existing_selection = conn.execute(
+                "SELECT requirement_id,work_unit_id,repository,canonical_repo,branch,"
+                "immutable_base,vault_reference,criteria_json FROM service_selections WHERE job_id=?",
+                (candidate["id"],),
+            ).fetchone()
+            for key, expected in metadata.items():
+                current = existing_selection[key] if existing_selection is not None else None
+                if current is not None and current != expected:
+                    raise ConflictError(f"existing service job selection differs for {key}")
+            if Path(candidate["workspace"]).resolve() != workspace:
+                raise ConflictError("existing service job workspace differs from selection")
+            if existing_selection is None:
+                conn.execute("""INSERT INTO service_selections
+                    (job_id,requirement_id,work_unit_id,repository,canonical_repo,branch,
+                     immutable_base,vault_reference,criteria_json)
+                    VALUES (?,?,?,?,?,?,?,?,?)""",
+                             (candidate["id"], requirement_id, work_unit, repository,
+                              str(repository_path), branch, immutable_base, vault_reference,
+                              metadata["criteria_json"]))
+            else:
+                conn.execute("""UPDATE service_selections SET requirement_id=?,work_unit_id=?,
+                    repository=?,canonical_repo=?,branch=?,immutable_base=?,vault_reference=?,criteria_json=?
+                    WHERE job_id=?""",
+                             tuple(metadata.values()) + (candidate["id"],))
+            conn.execute("UPDATE service_jobs SET updated_at=? WHERE id=?", (now(), candidate["id"]))
+            jid = candidate["id"]
+        return self.get_job(jid)
+
+    # Descriptive alias for callers that prefer the ledger terminology.
+    enroll_requirement_task = enroll_selected
 
     def record_update(self, job_id, message, evidence_links=()):
         with self.tx() as conn:
@@ -749,15 +1021,28 @@ class ServiceStore:
 
     def _ready_rows(self):
         with self._lock:
-            rows = list(self._conn.execute("SELECT * FROM service_jobs WHERE state IN ('pending','retry') AND (next_attempt_at IS NULL OR next_attempt_at<=?) ORDER BY created_at", (now(),)))
+            rows = list(self._conn.execute(
+                "SELECT j.*,s.requirement_id AS requirement_id FROM service_jobs j "
+                "LEFT JOIN service_selections s ON s.job_id=j.id "
+                "WHERE j.state IN ('pending','retry') AND "
+                "(j.next_attempt_at IS NULL OR j.next_attempt_at<=?) ORDER BY j.created_at",
+                (now(),)))
         return rows
 
     def _claim_job(self, job_id):
         with self.tx() as conn:
-            row = conn.execute("SELECT * FROM service_jobs WHERE id=? AND state IN ('pending','retry') AND (next_attempt_at IS NULL OR next_attempt_at<=?)", (job_id, now())).fetchone()
+            row = conn.execute(
+                "SELECT j.*,s.requirement_id AS requirement_id FROM service_jobs j "
+                "LEFT JOIN service_selections s ON s.job_id=j.id "
+                "WHERE j.id=? AND j.state IN ('pending','retry') AND "
+                "(j.next_attempt_at IS NULL OR j.next_attempt_at<=?)",
+                (job_id, now()),
+            ).fetchone()
             if row is None: return None
             task = self.tasks.get_task(row["task_id"])
-            if task is None or not self._dependencies_ready(task): return None
+            if (task is None or not self._dependencies_ready(task)
+                    or not self._selection_dependencies_ready(row)):
+                return None
             previous = conn.execute(
                 "SELECT * FROM service_attempts WHERE job_id=? ORDER BY attempt_number DESC LIMIT 1",
                 (job_id,),
@@ -792,7 +1077,8 @@ class ServiceStore:
     def _claim_next(self):
         for row in self._ready_rows():
             task = self.tasks.get_task(row["task_id"])
-            if task is None or not self._dependencies_ready(task):
+            if (task is None or not self._dependencies_ready(task)
+                    or not self._selection_dependencies_ready(row)):
                 continue
             lock = WorkspaceLock(row["workspace"], self.tasks.agents_root / ".local" / "service-locks", row["resource"])
             if not lock.acquire(blocking=False):
@@ -880,7 +1166,12 @@ class ServiceStore:
     def run_once(self, executor: Callable | None = None, verifier: Callable | None = None):
         job = self._claim_next()
         if job is None:
-            blocked = any(self.tasks.get_task(row["task_id"]) is not None and not self._dependencies_ready(self.tasks.get_task(row["task_id"])) for row in self._ready_rows())
+            blocked = any(
+                self.tasks.get_task(row["task_id"]) is not None
+                and (not self._dependencies_ready(self.tasks.get_task(row["task_id"]))
+                     or not self._selection_dependencies_ready(row))
+                for row in self._ready_rows()
+            )
             return {"status": "blocked" if blocked else "idle", **({"reason": "dependencies"} if blocked else {})}
         if "_claim_error" in job:
             return job["_claim_error"]
@@ -902,7 +1193,11 @@ class ServiceStore:
                 executor = default_executor
             try:
                 latest = self.get_job(job["id"])
-                result = executor({"job_id": job["id"], "task_id": job["task_id"], "workspace": job["workspace"], "run_dir": job.get("attempt_run_dir") or str(Path(job["run_dir"]) / f"attempt-{job['attempts_count']}"), "attempt_id": job["attempt_id"], "attempt": job["attempts_count"], "agents_root": str(self.tasks.agents_root), "vault_root": str(self.tasks.vault_root), "prompt": job["prompt"], "context": job["context"], "model": job["model"], "effort": job["effort"], "timeout": job["timeout"], "updates": latest["updates"]})
+                result = executor({"job_id": job["id"], "task_id": job["task_id"], "workspace": job["workspace"], "run_dir": job.get("attempt_run_dir") or str(Path(job["run_dir"]) / f"attempt-{job['attempts_count']}"), "attempt_id": job["attempt_id"], "attempt": job["attempts_count"], "agents_root": str(self.tasks.agents_root), "vault_root": str(self.tasks.vault_root), "prompt": job["prompt"], "context": job["context"], "model": job["model"], "effort": job["effort"], "timeout": job["timeout"], "updates": latest["updates"], "requirement_id": latest.get("requirement_id"), "work_unit_id": latest.get("work_unit_id"), "criteria": latest.get("criteria"), "selection_context": {
+                    key: latest[key] for key in ("requirement_id", "work_unit_id", "repository",
+                        "canonical_repo", "workspace", "branch", "immutable_base", "vault_reference", "criteria")
+                    if key in latest
+                } if latest.get("requirement_id") else None})
             except AuthError as exc:
                 # An executor may call the same local preflight boundary as
                 # the built-in executor.  Preserve a concrete cost/security
@@ -1381,6 +1676,9 @@ def default_executor(spec):
         raise ValueError("explicit AGENTS_ROOT and AGENTS_VAULT_ROOT directories are required")
     env = load_agents_env(agents_root / ".env")
     prompt = spec["prompt"] + "\n\nContext:\n" + spec["context"]
+    if spec.get("selection_context"):
+        prompt += "\n\nRecorded requirement selection:\n" + json.dumps(
+            spec["selection_context"], ensure_ascii=False, sort_keys=True)
     for update in spec.get("updates", []):
         prompt += f"\n\nUpdate: {update['message']}\nEvidence: {', '.join(update['evidence_links'])}"
     for policy, label in ((agents_root / "COMMON-AGENTS.md", "Current common policy"),
@@ -1797,6 +2095,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Durable App-independent Agents service")
     parser.add_argument("--db", default=None); sub = parser.add_subparsers(dest="command", required=True)
     en = sub.add_parser("enroll"); en.add_argument("--task", required=True); en.add_argument("--workspace", required=True); prompt_group = en.add_mutually_exclusive_group(required=True); prompt_group.add_argument("--prompt"); prompt_group.add_argument("--prompt-file"); en.add_argument("--context", required=True); en.add_argument("--model", default="gpt-5.6-luna"); en.add_argument("--effort", default="low"); en.add_argument("--timeout", type=float, default=300); en.add_argument("--json", action="store_true")
+    selected = sub.add_parser("enroll-selected", help="enroll one explicitly selected RequirementLedger task")
+    selected.add_argument("--ledger", required=True, help="existing RequirementLedger JSON record")
+    selected.add_argument("--requirement", required=True); selected.add_argument("--task", required=True)
+    selected.add_argument("--workspace", required=True); selected.add_argument("--repository", required=True)
+    selected.add_argument("--repository-path", required=True); selected.add_argument("--branch", required=True)
+    selected.add_argument("--immutable-base", required=True); selected.add_argument("--vault-reference", required=True)
+    selected.add_argument("--criteria", nargs="+", action="append", required=True)
+    selected.add_argument("--work-unit"); selected.add_argument("--model", default="gpt-5.6-luna")
+    selected.add_argument("--effort", default="low"); selected.add_argument("--timeout", type=float, default=300)
+    selected.add_argument("--json", action="store_true")
     ls = sub.add_parser("list"); ls.add_argument("--db", default=argparse.SUPPRESS); ls.add_argument("--state"); ls.add_argument("--json", action="store_true")
     sh = sub.add_parser("show"); sh.add_argument("--db", default=argparse.SUPPRESS); sh.add_argument("job_id"); sh.add_argument("--json", action="store_true")
     run = sub.add_parser("run"); run.add_argument("--db", default=argparse.SUPPRESS); run.add_argument("--poll", type=float, default=30)
@@ -1814,6 +2122,17 @@ def main(argv=None):
         if args.command == "enroll":
             prompt = Path(args.prompt_file).read_text() if args.prompt_file else args.prompt
             value = store.enroll(args.task, args.workspace, prompt, args.context, model=args.model, effort=args.effort, timeout=args.timeout)
+        elif args.command == "enroll-selected":
+            ledger = RequirementLedger(store.tasks, args.ledger)
+            criteria = [item for group in args.criteria for item in group]
+            value = store.enroll_selected(
+                args.requirement, args.task, ledger=ledger, workspace=args.workspace,
+                repository=args.repository, repository_path=args.repository_path,
+                branch=args.branch, immutable_base=args.immutable_base,
+                vault_reference=args.vault_reference, criteria=criteria,
+                work_unit=args.work_unit, model=args.model, effort=args.effort,
+                timeout=args.timeout,
+            )
         elif args.command == "list": value = store.list_jobs(args.state)
         elif args.command == "show": value = store.get_job(args.job_id)
         elif args.command == "verify": value = store.verify(args.job_id, json.loads(Path(args.evidence).read_text()))

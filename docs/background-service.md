@@ -147,3 +147,34 @@ review; this implementation does not activate a real LaunchAgent by itself.
 App-quit and host-reboot continuation still require a live acceptance run on
 the supported host. The subprocess and restart fixtures here prove durable
 local recovery and lock behavior only.
+
+## Explicit RequirementLedger enrollment
+
+The coordinator can connect one already selected requirement to one already
+linked TaskStore task with `enroll-selected`. This command has no backlog or
+discovery mode: it refuses an unselected requirement, an unlinked task, an
+unknown work unit, a missing Vault record, or a worktree whose branch does not
+descend from the supplied immutable base.
+
+```sh
+python3 -m harness.service enroll-selected \
+  --ledger "$AGENTS_ROOT/.local/requirements.json" \
+  --requirement REQ_ID --task TASK_ID --work-unit UNIT_ID \
+  --workspace "$AGENTS_ROOT/worktrees/parser" \
+  --repository Saber5656/Agents --repository-path "$AGENTS_ROOT" \
+  --branch task/parser --immutable-base BASE_SHA \
+  --vault-reference vault://execution-01/parser/criteria.json \
+  --criteria "criterion one" "criterion two" --json
+```
+
+The same operation is available as `ServiceStore.enroll_selected(...)`. It
+stores the requirement/task/work-unit identity, repository/worktree binding,
+immutable base, Vault reference, and criteria in the service SQLite row. A
+repeat call returns the existing job, including after restart, and preserves
+the original prompt and update history. Requirement and task dependencies
+remain pending until their linked tasks have verified acceptance and completion
+evidence; the service does not auto-create implementation tasks or GitHub
+Issues. The worker receives a short selection prompt plus the Vault reference
+and criteria, rather than a copied requirement narrative. An existing
+work-unit may carry many tasks, Issues, and PRs through TaskStore and is never
+silently created by enrollment.
