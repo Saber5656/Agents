@@ -360,7 +360,7 @@ SKILL.md frontmatterのdescriptionフィールドは、エージェントがス�
 ]
 ```
 
-クエリはリアルで、Codex CLIまたはCodex CLIのユーザーが実際に入力するようなものでなければならない。抽象的な要求ではなく、具体的で詳細なもの。例えば、ファイルパス、ユーザーの仕事や状況についての個人的なコンテキスト、カラム名と値、会社名、URL。少しの背景説明。小文字や略語、タイポ、カジュアルな表現を含むものもある。長さのバリエーションを使い、明確なものよりもエッジケースに焦点を当てる（ユーザーがサインオフする機会がある）。
+クエリはリアルで、Codex CLIまたはCodex Appのユーザーが実際に入力するようなものでなければならない。抽象的な要求ではなく、具体的で詳細なもの。例えば、ファイルパス、ユーザーの仕事や状況についての個人的なコンテキスト、カラム名と値、会社名、URL。少しの背景説明。小文字や略語、タイポ、カジュアルな表現を含むものもある。長さのバリエーションを使い、明確なものよりもエッジケースに焦点を当てる（ユーザーがサインオフする機会がある）。
 
 悪い例：`"このデータをフォーマットして"`、`"PDFからテキストを抽出して"`、`"グラフを作って"`
 
@@ -406,7 +406,7 @@ python -m scripts.run_loop \
   --verbose
 ```
 
-システムプロンプトのモデルID（現在のセッションを動かしているもの）を使うことで、Codex routing eval がユーザーが実際に体験するモデルに近くなる。
+現在のセッションに合わせる場合も、`--routing-model` と `--routing-reasoning-effort` でモデルと reasoning effort を明示して渡す。設定ファイルの既定値に依存しない。
 
 実行中は、定期的に出力をtailして、どのイテレーションにいてスコアがどうか、ユーザーに更新情報を提供する。
 
@@ -416,7 +416,7 @@ python -m scripts.run_loop \
 
 ### スキルトリガーの仕組み
 
-routing eval の仕組みを理解することで、より良いevalクエリを設計できる。Codex は skill name + description + user query を見て、そのスキルを使うべきかを構造化出力で判定する。これは Codex CLI の live `available_skills` trigger 観測ではない。その代わり、`codex exec` を使わず、Codex 環境でのスキル選択判断を安定して回せる。
+routing eval の仕組みを理解することで、より良いevalクエリを設計できる。Codex は skill name + description + user query を見て、そのスキルを使うべきかを構造化出力で判定する。これは Codex CLI の live `available_skills` trigger 観測ではなく、`run_eval.py` が明示したモデル・reasoning effortで `codex exec` を実行する routing 品質テストである。実行前に ChatGPT subscription のログイン状態を確認し、API-key route と browser / App UI / shell tool を無効化する。
 
 つまりevalクエリは、スキルを使うかどうかの判断が本当に難しいものにする。明らかな肯定例だけでなく、隣接スキルに任せるべきケース、普通の会話で済むケース、キーワードは似ているが意図が違うケースを必ず混ぜる。
 
@@ -440,10 +440,10 @@ python -m scripts.package_skill <path/to/skill-folder>
 
 ## 実行環境と制約
 
-- 現在の consuming model/provider（通常は authenticated Codex CLI）を使い、モデル名、reasoning effort、設定、入力、出力、終了状態を記録する。未実行の model result や timing を作らない。
+- authenticated ChatGPT subscription の Codex CLI を consuming provider として使い、モデル名、reasoning effort、設定、入力、出力、終了状態を記録する。モデルと effort は明示し、未実行の model result や timing を作らない。
 - 実行は独立した Codex CLI または決定論的 fixture でよい。サブエージェント、固定 reviewer sequence、追加 provider、paid API route を必須にしない。
 - ブラウザや App UI が使えない場合は static viewer を生成するか、出力と未検証範囲を保存する。UI readback を model output や filesystem digest から推測しない。
-- `package_skill.py` は Python と filesystem だけで実行でき、`quick_validate.py` は PyYAML がない環境でも最小 frontmatter validation を行う。依存する拡張機能が必要なら明示的に incomplete と報告する。
+- `package_skill.py` は Python と filesystem だけで実行でき、`quick_validate.py` は PyYAML の有無に依存せず、top-level の文字列・宣言済み boolean / sequence・folded / literal block scalar だけを検証する。implicit null、未対応の list / mapping、unmatched quote は invalid として扱う。依存する拡張機能が必要なら明示的に incomplete と報告する。
 
 ## リファレンスファイル
 

@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Optional
 
 from scripts.utils import parse_skill_md
+from scripts.run_eval import (
+    DEFAULT_REASONING_EFFORT,
+    build_codex_command,
+    ensure_chatgpt_subscription,
+)
 
 
 DESCRIPTION_SCHEMA = {
@@ -56,6 +61,7 @@ def improve_description(
     log_dir: Optional[Path] = None,
     iteration: Optional[int] = None,
     timeout: int = 300,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
 ) -> str:
     """Call Codex to improve the description based on routing eval results."""
     failed_triggers = [
@@ -140,25 +146,23 @@ I'd encourage you to be creative and mix up the style in different iterations si
 
 Return JSON matching the provided schema with a single `description` field."""
 
+    if not model:
+        raise ValueError("an explicit model is required for description improvement")
+    ensure_chatgpt_subscription()
+
     with tempfile.NamedTemporaryFile("w", suffix=".schema.json", delete=False) as schema_file:
         json.dump(DESCRIPTION_SCHEMA, schema_file)
         schema_path = Path(schema_file.name)
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as output_file:
         output_path = Path(output_file.name)
 
-    cmd = [
-        "codex",
-        "exec",
-        "--ephemeral",
-        "--sandbox", "read-only",
-        "--skip-git-repo-check",
-        "--output-schema", str(schema_path),
-        "--output-last-message", str(output_path),
-        "--color", "never",
-    ]
-    if model:
-        cmd.extend(["--model", model])
-    cmd.append(prompt)
+    cmd = build_codex_command(
+        schema_path=schema_path,
+        output_path=output_path,
+        prompt=prompt,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
 
     try:
         result = subprocess.run(
@@ -213,6 +217,7 @@ def main():
     parser.add_argument("--skill-path", required=True, help="Path to skill directory")
     parser.add_argument("--history", default=None, help="Path to history JSON (previous attempts)")
     parser.add_argument("--model", required=True, help="Model for improvement")
+    parser.add_argument("--reasoning-effort", default=DEFAULT_REASONING_EFFORT, help=f"Explicit reasoning effort (default: {DEFAULT_REASONING_EFFORT})")
     parser.add_argument("--verbose", action="store_true", help="Print thinking to stderr")
     args = parser.parse_args()
 
@@ -240,6 +245,7 @@ def main():
         eval_results=eval_results,
         history=history,
         model=args.model,
+        reasoning_effort=args.reasoning_effort,
     )
 
     if args.verbose:
