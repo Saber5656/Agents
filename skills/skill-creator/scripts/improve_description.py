@@ -14,12 +14,23 @@ from pathlib import Path
 
 from typing import Optional
 
-from scripts.utils import parse_skill_md
-from scripts.run_eval import (
-    DEFAULT_REASONING_EFFORT,
-    build_codex_command,
-    ensure_chatgpt_subscription,
-)
+try:
+    from scripts.utils import parse_skill_md
+    from scripts.run_eval import (
+        DEFAULT_REASONING_EFFORT,
+        build_codex_command,
+        ensure_chatgpt_subscription,
+    )
+except ModuleNotFoundError:
+    # Keep direct script invocation usable from a repository root as well as
+    # package-style imports.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from utils import parse_skill_md
+    from run_eval import (
+        DEFAULT_REASONING_EFFORT,
+        build_codex_command,
+        ensure_chatgpt_subscription,
+    )
 
 
 DESCRIPTION_SCHEMA = {
@@ -167,6 +178,7 @@ Return JSON matching the provided schema with a single `description` field."""
     try:
         result = subprocess.run(
             cmd,
+            input=prompt,
             capture_output=True,
             text=True,
             timeout=timeout,

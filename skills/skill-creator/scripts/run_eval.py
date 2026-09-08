@@ -8,6 +8,7 @@ of queries. Outputs results as JSON and records the requested execution settings
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -84,13 +85,17 @@ def ensure_chatgpt_subscription(status_runner=None, env=None) -> None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=20,
         )
     except (FileNotFoundError, OSError) as exc:
         raise AuthenticationError("Codex login status is unavailable") from exc
     if result is None:
         raise AuthenticationError("Codex login status is unavailable")
     detail = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-    if result.returncode != 0 or "chatgpt" not in detail.lower():
+    lower_detail = detail.lower()
+    logged_in = re.search(r"\blogged in using chatgpt\b", lower_detail)
+    explicitly_logged_out = re.search(r"\bnot\s+logged in using chatgpt\b", lower_detail)
+    if result.returncode != 0 or not logged_in or explicitly_logged_out:
         raise AuthenticationError("Codex must be logged in through a ChatGPT subscription")
     if any(term in detail.lower() for term in ("api key", "api_key", "apikey")):
         raise SubscriptionBoundaryError("Codex API-key authentication is not allowed")
@@ -141,9 +146,9 @@ def build_codex_command(
         "image_generation",
     ):
         cmd.extend(["--disable", feature])
-    # Keep the prompt as the final argv element.  This avoids shell parsing and
-    # makes it impossible for a caller to accidentally omit the user query.
-    cmd.append(prompt)
+    # Read the prompt from stdin so it never appears in process listings or
+    # shell history.  The trailing dash is Codex's explicit stdin marker.
+    cmd.append("-")
     return cmd
 
 
@@ -213,6 +218,7 @@ def run_single_query(
         try:
             result = subprocess.run(
                 cmd,
+                input=prompt,
                 capture_output=True,
                 text=True,
                 cwd=project_root,

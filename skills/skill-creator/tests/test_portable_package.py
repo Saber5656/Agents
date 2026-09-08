@@ -50,7 +50,7 @@ def test_quick_validate_is_portable_without_yaml_package(tmp_path):
     assert "valid" in result.stdout.lower()
 
 
-@pytest.mark.parametrize("value", ["true", "null", "[a, b]", '"unterminated'])
+@pytest.mark.parametrize("value", ["true", "null", "123", "[a, b]", '"unterminated', "'bad'quote'"])
 def test_quick_validate_rejects_non_string_description_scalars(tmp_path, value):
     skill = make_skill(tmp_path)
     skill.joinpath("SKILL.md").write_text(
@@ -94,6 +94,36 @@ def test_quick_validate_parser_has_stable_types_without_optional_yaml():
         "user-invocable": True,
         "fallback_models": ["gpt-5.6-luna", "gpt-5.4-mini"],
     }
+
+
+def test_quick_validate_rejects_duplicate_keys_without_optional_yaml(tmp_path):
+    skill = make_skill(tmp_path)
+    skill.joinpath("SKILL.md").write_text(
+        "---\nname: demo\nname: duplicate\ndescription: desc\n---\n# Demo\n"
+    )
+
+    result = run(SCRIPTS / "quick_validate.py", str(skill))
+
+    assert result.returncode != 0
+
+
+def test_quick_validate_accepts_nested_metadata_with_yaml_or_reports_dependency(tmp_path):
+    skill = make_skill(tmp_path)
+    skill.joinpath("SKILL.md").write_text(
+        "---\n"
+        "name: demo\n"
+        "description: desc\n"
+        "metadata:\n"
+        "  owner: team\n"
+        "---\n# Demo\n"
+    )
+
+    result = run(SCRIPTS / "quick_validate.py", str(skill))
+
+    yaml_available = importlib.util.find_spec("yaml") is not None
+    assert result.returncode == (0 if yaml_available else 1)
+    if not yaml_available:
+        assert "PyYAML" in result.stdout or "PyYAML" in result.stderr
 
 
 def test_package_script_runs_from_repository_root_and_excludes_evals(tmp_path):
@@ -142,8 +172,9 @@ def test_run_single_query_uses_subscription_safe_explicit_command(monkeypatch, t
     module = load_script("run_eval")
     commands = []
 
-    def fake_run(cmd, **kwargs):
+    def fake_run(cmd, input=None, **kwargs):
         commands.append(cmd)
+        assert input == module.build_routing_prompt("create a skill", "demo", "create skills")
         output_path = Path(cmd[cmd.index("--output-last-message") + 1])
         output_path.write_text('{"should_use_skill": true, "confidence": 1, "reason": "fixture"}')
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -163,7 +194,8 @@ def test_run_single_query_uses_subscription_safe_explicit_command(monkeypatch, t
 
     assert result["should_use_skill"] is True
     command = commands[0]
-    assert command[-1] == module.build_routing_prompt("create a skill", "demo", "create skills")
+    assert command[-1] == "-"
+    assert module.build_routing_prompt("create a skill", "demo", "create skills") not in command
     assert "--ignore-user-config" in command
     assert command[command.index("--model") + 1] == "gpt-5.6-luna"
     effort_arg = next(item for item in command if item.startswith("model_reasoning_effort="))
@@ -180,6 +212,34 @@ def test_run_single_query_requires_explicit_model_and_effort(monkeypatch, tmp_pa
         module.run_single_query("q", "demo", "desc", 1, str(tmp_path), None, "low")
     with pytest.raises(ValueError, match="reasoning effort"):
         module.run_single_query("q", "demo", "desc", 1, str(tmp_path), "gpt-5.6-luna", None)
+
+
+def test_description_improvement_sends_prompt_over_stdin(monkeypatch):
+    module = load_script("improve_description")
+    commands = []
+
+    def fake_run(cmd, input=None, **kwargs):
+        commands.append((cmd, input))
+        assert input and "Return JSON matching the provided schema" in input
+        output_path = Path(cmd[cmd.index("--output-last-message") + 1])
+        output_path.write_text('{"description": "improved description"}')
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(module, "ensure_chatgpt_subscription", lambda: None)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    result = module.improve_description(
+        skill_name="demo",
+        skill_content="# Demo",
+        current_description="demo",
+        eval_results={"results": [], "summary": {"passed": 1, "total": 1}},
+        history=[],
+        model="gpt-5.6-luna",
+        timeout=1,
+    )
+
+    assert result == "improved description"
+    assert commands[0][0][-1] == "-"
+    assert commands[0][1] not in commands[0][0]
 
 
 def test_subscription_guard_rejects_api_key_environment(monkeypatch):
@@ -205,7 +265,19 @@ def test_subscription_guard_accepts_only_chatgpt_login(monkeypatch):
         "capture_output": True,
         "text": True,
         "check": False,
+        "timeout": 20,
     })]
+
+
+def test_subscription_guard_rejects_negative_chatgpt_status():
+    module = load_script("run_eval")
+
+    status = subprocess.CompletedProcess(
+        ["codex", "login", "status"], 0,
+        stdout="Not logged in using ChatGPT", stderr="",
+    )
+    with pytest.raises(module.AuthenticationError):
+        module.ensure_chatgpt_subscription(status_runner=lambda *args, **kwargs: status)
 
 
 def test_creator_instructions_match_routing_implementation():

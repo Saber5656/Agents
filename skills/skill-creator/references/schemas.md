@@ -63,7 +63,7 @@ description最適化用の routing eval を定義する。`run_eval.py` / `run_l
 
 ## Codex routing decision
 
-`run_eval.py` は各 query / run で `codex exec --output-schema` を使い、次の構造を要求する。
+`run_eval.py` は各 query / run で、promptをstdinから渡す `codex exec --output-schema -` を使い、次の構造を要求する。promptをargvへ置かないことで、プロセス一覧への入力露出を避ける。
 
 ```json
 {

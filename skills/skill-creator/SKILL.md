@@ -443,7 +443,7 @@ python -m scripts.package_skill <path/to/skill-folder>
 - authenticated ChatGPT subscription の Codex CLI を consuming provider として使い、モデル名、reasoning effort、設定、入力、出力、終了状態を記録する。モデルと effort は明示し、未実行の model result や timing を作らない。
 - 実行は独立した Codex CLI または決定論的 fixture でよい。サブエージェント、固定 reviewer sequence、追加 provider、paid API route を必須にしない。
 - ブラウザや App UI が使えない場合は static viewer を生成するか、出力と未検証範囲を保存する。UI readback を model output や filesystem digest から推測しない。
-- `package_skill.py` は Python と filesystem だけで実行でき、`quick_validate.py` は PyYAML の有無に依存せず、top-level の文字列・宣言済み boolean / sequence・folded / literal block scalar だけを検証する。implicit null、未対応の list / mapping、unmatched quote は invalid として扱う。依存する拡張機能が必要なら明示的に incomplete と報告する。
+- `package_skill.py` は Python と filesystem だけで実行できる。`quick_validate.py` は宣言済み PyYAML を通常経路として使い、nested metadata mappingを検証する。PyYAMLがない場合はtop-levelの文字列・宣言済みboolean / sequence・folded / literal block scalarを検証し、nested mappingは依存不足として明示する。implicit null、数値を文字列欄へ置く値、unmatched quote、重複キーはinvalidとして扱う。
 
 ## リファレンスファイル
 

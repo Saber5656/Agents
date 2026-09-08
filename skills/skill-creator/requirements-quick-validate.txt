@@ -1,3 +1,4 @@
-# quick_validate.py uses its documented strict frontmatter subset and has no
-# third-party runtime dependency.  Keep this file so installers can detect
-# that no package bootstrap is required.
+# PyYAML is the normal parser for nested frontmatter metadata. Without it,
+# quick_validate.py supports its portable scalar/sequence subset and reports
+# an actionable dependency error for nested mappings.
+PyYAML==6.0.3

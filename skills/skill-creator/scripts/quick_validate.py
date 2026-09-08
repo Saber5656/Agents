@@ -4,13 +4,43 @@ Quick validation script for skills - minimal version
 """
 
 import sys
+import datetime as _datetime
 import json
 import re
 from pathlib import Path
 
+try:
+    import yaml
+except ModuleNotFoundError:  # Keep simple metadata validation usable in a clean install.
+    yaml = None
+
 
 class FrontmatterError(ValueError):
     """A frontmatter value is outside the validator's deliberately small YAML subset."""
+
+
+if yaml is not None:
+    class _UniqueSafeLoader(yaml.SafeLoader):
+        """SafeLoader variant that makes duplicate metadata keys invalid."""
+
+        def construct_mapping(self, node, deep=False):
+            mapping = {}
+            for key_node, value_node in node.value:
+                key = self.construct_object(key_node, deep=deep)
+                if key in mapping:
+                    raise FrontmatterError(f"duplicate frontmatter key: {key}")
+                mapping[key] = self.construct_object(value_node, deep=deep)
+            return mapping
+
+
+def _normalise_yaml(value):
+    if isinstance(value, (_datetime.datetime, _datetime.date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _normalise_yaml(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalise_yaml(item) for item in value]
+    return value
 
 
 def _split_flow_items(raw: str) -> list[str]:
@@ -43,9 +73,8 @@ def _split_flow_items(raw: str) -> list[str]:
 def _parse_scalar(raw: str):
     """Parse only scalar/flow-sequence forms used by Codex skill metadata.
 
-    The package validator intentionally uses this parser even when PyYAML is
-    installed.  That keeps the accepted language and type checks identical in
-    clean Python environments and environments with optional dependencies.
+    This is the portable fallback for environments without the declared
+    PyYAML dependency; full nested YAML is handled by PyYAML when available.
     """
     if not raw:
         return None
@@ -58,6 +87,14 @@ def _parse_scalar(raw: str):
             except json.JSONDecodeError as exc:
                 raise FrontmatterError(f"Invalid double-quoted scalar: {exc.msg}") from exc
         inner = raw[1:-1]
+        index = 0
+        while index < len(inner):
+            if inner[index] == "'":
+                if index + 1 >= len(inner) or inner[index + 1] != "'":
+                    raise FrontmatterError("Unescaped single quote")
+                index += 2
+            else:
+                index += 1
         return inner.replace("''", "'")
     if raw[0] == '[':
         if not raw.endswith(']'):
@@ -71,6 +108,8 @@ def _parse_scalar(raw: str):
         return False
     if raw in ('null', 'Null', 'NULL', '~'):
         return None
+    if re.fullmatch(r"[+-]?(?:\d[\d_]*|\d[\d_]*\.\d+|\d[\d_]*[eE][+-]?\d+)", raw):
+        raise FrontmatterError("numeric metadata requires a quoted string")
     if raw in (']', '}'):
         raise FrontmatterError("Unexpected flow collection terminator")
     return raw
@@ -93,6 +132,8 @@ def parse_frontmatter(text):
         raw = raw.strip()
         if not key:
             raise ValueError("Frontmatter key cannot be empty")
+        if key in values:
+            raise FrontmatterError(f"duplicate frontmatter key: {key}")
         if raw in ('>', '|', '>-', '|-'):
             continuation = []
             index += 1
@@ -109,6 +150,8 @@ def parse_frontmatter(text):
                 index += 1
             values[key] = sequence
             continue
+        if not raw and index + 1 < len(lines) and (lines[index + 1].startswith('  ') or lines[index + 1].startswith('\t')):
+            raise FrontmatterError("nested mappings require PyYAML; install the declared PyYAML dependency")
         values[key] = _parse_scalar(raw)
         index += 1
     return values
@@ -136,14 +179,18 @@ def validate_skill(skill_path):
 
     # Parse YAML frontmatter
     try:
-        # Do not switch parsers based on an optional dependency.  The fallback
-        # parser is the portable contract and rejects implicit invalid types
-        # rather than silently turning them into strings.
-        frontmatter = parse_frontmatter(frontmatter_text)
+        if yaml is not None:
+            frontmatter = _normalise_yaml(yaml.load(frontmatter_text, Loader=_UniqueSafeLoader))
+        else:
+            frontmatter = parse_frontmatter(frontmatter_text)
         if not isinstance(frontmatter, dict):
             return False, "Frontmatter must be a YAML dictionary"
     except (FrontmatterError, ValueError, TypeError) as e:
         return False, f"Invalid YAML in frontmatter: {e}"
+    except Exception as e:
+        if yaml is not None and isinstance(e, yaml.YAMLError):
+            return False, f"Invalid YAML in frontmatter: {e}"
+        raise
 
     # Define allowed properties
     ALLOWED_PROPERTIES = {
