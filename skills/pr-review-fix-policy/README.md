@@ -11,8 +11,10 @@
 - PR横断で見やすく整理しつつ、head・返信・resolve・完了判定はPRごとに分離する。関連Issueをfeature unitにまとめる場合も、PR identityは分離する。
 - current headとreview/thread commit identityを照合し、old-head evidenceを`old_head_review_invalid`として除外する。
 - review 0件、thread不存在、未解決0件、timeoutを別状態として返し、timeoutをpassにしない。
-- Review results must be bound to the current PR head and retain provider/request provenance where available;
-  no retired role, envelope, or manifest is a prerequisite.
+- Review results must retain request/session/head/integrity provenance: the request and session references,
+  exact reviewed head, provider, requested and effective model, and raw-record/digest references where available.
+  Record missing fields explicitly; do not invent an effective model or treat old-head evidence as current.
+  No retired role, envelope, or manifest is a prerequisite.
 - unresolvedかつnot outdatedのreview threadsだけを修正対象にする。
 - ファイル単位でクラスタリングし、コメントごとの指摘を残す。
 - 各コメントについて、現状の問題/デメリットと対応メリット/解決される課題を明記する。

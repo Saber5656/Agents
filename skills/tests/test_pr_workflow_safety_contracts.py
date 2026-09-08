@@ -1019,7 +1019,7 @@ class ReviewFixSafetyTest(unittest.TestCase):
             "old_head_review_invalid",
             "request/session/head/integrity provenance",
             "effective model",
-            "role/provider/effective model",
+            "requested and effective model",
             "integrity provenance",
         ]:
             self.assertIn(phrase, text)
