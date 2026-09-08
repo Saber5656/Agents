@@ -399,6 +399,20 @@ class RuntimeHelperTests(unittest.TestCase):
             directory.mkdir()
         for repo in (self.agents, self.user):
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            # Keep fixture behavior independent of init.defaultBranch and the
+            # developer's global identity configuration.
+            subprocess.run(
+                ["git", "-C", str(repo), "symbolic-ref", "HEAD", "refs/heads/main"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "--local", "user.name", "Fixture"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repo), "config", "--local", "user.email", "fixture@example.invalid"],
+                check=True,
+            )
         self.origins = {}
         for repo, key in ((self.agents, "agents"), (self.user, "user")):
             origin = self.root / f"{key}-origin.git"
