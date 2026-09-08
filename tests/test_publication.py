@@ -204,6 +204,30 @@ def test_required_check_must_be_present_and_successful():
         assert publication._github_ci_status("Saber5656/Agents", "https://github.com/Saber5656/Agents.git", "a" * 40) == "failed"
 
 
+def test_in_progress_check_with_null_conclusion_is_pending():
+    github = mock.Mock()
+    github.api.return_value = {"total_count": 1}
+    github.required_checks.return_value = [{"context": "test", "app_id": None}]
+    github.check_runs.return_value = [{"name": "test", "status": "in_progress", "conclusion": None}]
+    with mock.patch("harness.delivery.GitHub", return_value=github):
+        assert publication._github_ci_status(
+            "Saber5656/Agents", "git@github.com:Saber5656/Agents.git", "a" * 40
+        ) == "pending"
+
+
+def test_required_neutral_or_skipped_check_does_not_satisfy_protection():
+    github = mock.Mock()
+    github.api.return_value = {"total_count": 1}
+    github.required_checks.return_value = [{"context": "test", "app_id": 7}]
+    for conclusion in ("NEUTRAL", "SKIPPED"):
+        github.check_runs.return_value = [{"name": "test", "conclusion": conclusion,
+                                           "app": {"id": 7}}]
+        with mock.patch("harness.delivery.GitHub", return_value=github):
+            assert publication._github_ci_status(
+                "Saber5656/Agents", "git@github.com:Saber5656/Agents.git", "a" * 40
+            ) == "failed"
+
+
 def test_selected_new_file_is_published_and_receipt_is_idempotent(fixture):
     canonical, worktree, remote, vault, base = fixture
     new_file = worktree / "src" / "new.txt"

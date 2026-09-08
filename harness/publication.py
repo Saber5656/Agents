@@ -391,7 +391,13 @@ def _github_ci_status(repository: str, remote: str, sha: str) -> str:
             name = run.get("name") or run.get("context")
             if name:
                 by_name.setdefault(name, []).append(run)
-            conclusion = str(run.get("conclusion", run.get("status", ""))).upper()
+            raw_conclusion = run.get("conclusion")
+            # GitHub check-runs use ``conclusion: null`` while a run is
+            # queued/in progress; do not turn Python's ``None`` into the
+            # terminal-looking string ``NONE``.
+            if raw_conclusion is None:
+                raw_conclusion = run.get("status", "")
+            conclusion = str(raw_conclusion).upper()
             if conclusion not in {"SUCCESS", "NEUTRAL", "SKIPPED"}:
                 return "pending" if conclusion in {"", "QUEUED", "IN_PROGRESS", "PENDING"} else "failed"
         for requirement in required:
@@ -400,6 +406,14 @@ def _github_ci_status(repository: str, remote: str, sha: str) -> str:
                 matches = [run for run in matches if (run.get("app") or {}).get("id") == requirement["app_id"]]
             if not matches:
                 return "pending"
+            # Required protection rules need an actual successful check-run
+            # from the required producer.  Neutral/skipped are acceptable for
+            # unrelated optional runs, but cannot satisfy a required check.
+            if not any(str(run.get("conclusion", "")).upper() == "SUCCESS" for run in matches):
+                if any(str(run.get("conclusion") or run.get("status", "")).upper()
+                       in {"", "QUEUED", "IN_PROGRESS", "PENDING"} for run in matches):
+                    return "pending"
+                return "failed"
         return "success"
     except Exception:
         return "pending"
