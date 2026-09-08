@@ -48,7 +48,7 @@ the parent work unit can pass only adopted findings to its correction step.
 
 `separate` creates a local TaskStore follow-up using
 `source_task_id=<spec.task.id>` and a deterministic
-`source_event_key=review:<input-digest>:<finding-id>`. Repeating the same
+`source_event_key=review:<source-task-id>:<finding-id>`. Repeating the same
 completed input reuses that task. No GitHub Issue or remote write is made.
 
 The default provider path validates a real `codex login status` containing a

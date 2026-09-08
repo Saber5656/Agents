@@ -217,3 +217,53 @@ def test_invalid_subscription_route_is_incomplete_without_runner(roots, monkeypa
     assert result["status"] == "incomplete"
     assert "paid" in result["reason"]
     assert "synthetic-secret" not in json.dumps(result)
+
+
+def test_overlapping_same_input_runs_one_coordinator(roots):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    agents, vault = roots
+    findings = [finding()]
+    entered = threading.Event(); release = threading.Event(); calls = []
+    def runner(_):
+        calls.append(1); entered.set(); release.wait(2)
+        return response_for(findings)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(decide_findings, spec(agents, vault, "task-root"), review(findings), runner=runner)
+        assert entered.wait(2)
+        second = pool.submit(decide_findings, spec(agents, vault, "task-root"), review(findings), runner=runner)
+        release.set()
+        assert first.result()["status"] == second.result()["status"] == "complete"
+    assert calls == [1]
+
+
+def test_retry_preserves_previous_provider_output(roots):
+    agents, vault = roots
+    findings = [finding()]
+    first = decide_findings(spec(agents, vault, "task-root"), review(findings), runner=lambda _: "first-invalid-output")
+    decide_findings(spec(agents, vault, "task-root"), review(findings), runner=lambda _: response_for(findings))
+    files = list((vault / "service-review" / first["input_digest"]).rglob("*.json"))
+    assert any("first-invalid-output" in file.read_text() for file in files)
+
+
+def test_separate_inherits_source_task_repository(roots):
+    agents, vault = roots
+    with TaskStore(agents_root=agents, vault_root=vault) as store:
+        source = store.create_task(purpose="root", repository="Saber5656/Agents")
+        request = spec(agents, vault, source["id"]); request["task"] = source
+        findings = [finding()]
+        result = decide_findings(request, review(findings), runner=lambda _: response_for(findings, "separate"))
+        assert store.get_task(result["separate_task_ids"][0])["repository"] == "Saber5656/Agents"
+
+
+def test_same_separate_finding_does_not_duplicate_when_job_state_changes(roots):
+    agents, vault = roots
+    with TaskStore(agents_root=agents, vault_root=vault) as store:
+        source = store.create_task(purpose="root", repository="Saber5656/Agents")
+        request = spec(agents, vault, source["id"]); request["task"] = source
+        findings = [finding()]
+        first = decide_findings(request, review(findings), runner=lambda _: response_for(findings, "separate"))
+        request["job"]["attempts_count"] = 2
+        second = decide_findings(request, review(findings), runner=lambda _: response_for(findings, "separate"))
+        assert first["separate_task_ids"] == second["separate_task_ids"]
+        assert len(store.list_tasks()) == 2

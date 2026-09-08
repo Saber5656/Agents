@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -307,13 +308,11 @@ def _register_separate(spec: Mapping[str, Any], review: Mapping[str, Any], decis
     if not separate:
         return []
     with TaskStore(agents_root=spec["agents_root"], vault_root=spec["vault_root"]) as store:
-        try:
-            store.get_task(spec["task"]["id"])
-        except KeyError as exc:
-            raise ReviewInputError("source task is not present in TaskStore") from exc
+        if store.get_task(spec["task"]["id"]) is None:
+            raise ReviewInputError("source task is not present in TaskStore")
         created: list[str] = []
         for item in separate:
-            key = f"review:{digest}:{item['finding_id']}"
+            key = f"review:{spec['task']['id']}:{item['finding_id']}"
             existing = next((task for task in store.list_tasks() if task.get("source_task_id") == spec["task"]["id"] and task.get("source_event_key") == key), None)
             if existing:
                 created.append(existing["id"])
@@ -325,7 +324,7 @@ def _register_separate(spec: Mapping[str, Any], review: Mapping[str, Any], decis
                     source="service-review-separate", source_task_id=spec["task"]["id"], source_event_key=key,
                     expected_result=str(finding.get("issue", "review follow-up")),
                     evidence_links=list(dict.fromkeys(list(review["evidence_links"]) + item["evidence"])),
-                    repository=spec["job"].get("repository"), priority=finding.get("severity"),
+                    repository=spec["task"].get("repository") or spec["job"].get("repository"), priority=finding.get("severity"),
                 )
             except sqlite3.IntegrityError:
                 task = next((candidate for candidate in store.list_tasks()
@@ -337,7 +336,7 @@ def _register_separate(spec: Mapping[str, Any], review: Mapping[str, Any], decis
         return created
 
 
-def decide_findings(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner: Any = None) -> dict[str, Any]:
+def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner: Any = None) -> dict[str, Any]:
     """Return durable adopt/reject/separate decisions for every review finding."""
     digest = input_digest(spec, review)
     vault_value = spec.get("vault_root") if isinstance(spec, Mapping) else None
@@ -347,6 +346,7 @@ def decide_findings(spec: Mapping[str, Any], review: Mapping[str, Any], *, runne
     cached = _load_json(directory / "result.json")
     if cached and cached.get("status") == "complete":
         return cached
+    attempt_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=directory))
     env = dict(os.environ)
     try:
         normalized_spec, normalized_review, findings, evidence_links = _validate(spec, review)
@@ -356,7 +356,7 @@ def decide_findings(spec: Mapping[str, Any], review: Mapping[str, Any], *, runne
         if paid:
             raise ReviewInputError("paid API route is configured: " + ", ".join(paid))
         if runner is None:
-            provider_result = _run_codex_review(normalized_spec, prompt, directory)
+            provider_result = _run_codex_review(normalized_spec, prompt, attempt_dir)
         else:
             request = {"prompt": prompt, "model": MODEL, "reasoning_effort": REASONING_EFFORT,
                        "sandbox": SANDBOX, "read_only": True, "disabled_features": list(DISABLED_FEATURES),
@@ -382,4 +382,24 @@ def decide_findings(spec: Mapping[str, Any], review: Mapping[str, Any], *, runne
         result = {"status": "incomplete", "input_digest": digest, "reason": str(exc) or type(exc).__name__}
     result = _redact_value(result, env)
     _save_json(directory / "result.json", result, env)
+    # Each attempt keeps all accessible records; root files are only a latest-view index.
+    for name in ("request.json", "provider-output.json", "result.json"):
+        source = directory / name
+        if source.is_file():
+            _save_json(attempt_dir / ("coordinator-" + name), json.loads(source.read_text()), env)
     return result
+
+
+def decide_findings(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner: Any = None) -> dict[str, Any]:
+    """Serialize one immutable input throughout inference and local registration."""
+    vault = spec.get("vault_root") if isinstance(spec, Mapping) else None
+    if not isinstance(vault, str) or not Path(vault).is_dir():
+        return _decide_locked(spec, review, runner=runner)
+    directory = _artifact_dir(Path(vault), input_digest(spec, review))
+    fd = os.open(directory / ".lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            return _decide_locked(spec, review, runner=runner)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
