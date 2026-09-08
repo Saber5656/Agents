@@ -895,6 +895,20 @@ class ServiceStore:
             try:
                 latest = self.get_job(job["id"])
                 result = executor({"job_id": job["id"], "task_id": job["task_id"], "workspace": job["workspace"], "run_dir": job.get("attempt_run_dir") or str(Path(job["run_dir"]) / f"attempt-{job['attempts_count']}"), "attempt_id": job["attempt_id"], "attempt": job["attempts_count"], "agents_root": str(self.tasks.agents_root), "vault_root": str(self.tasks.vault_root), "prompt": job["prompt"], "context": job["context"], "model": job["model"], "effort": job["effort"], "timeout": job["timeout"], "updates": latest["updates"]})
+            except AuthError as exc:
+                # An executor may call the same local preflight boundary as
+                # the built-in executor.  Preserve a concrete cost/security
+                # hold instead of treating it as an ordinary retry; the
+                # adapter has raised before its external operation runs.
+                held = exc.hold
+                diagnostic = str(exc)
+                if held:
+                    diagnostic += f" [source={exc.source or 'unknown'}; action={exc.action or 'unknown'}]"
+                result = {"status": "held" if held else "failed", "text": diagnostic}
+                if held:
+                    result.update({"action": exc.action, "source": exc.source,
+                                   "hold_category": "cost_or_security"})
+                return self._finish_attempt(job, result=result, error=diagnostic)
             except Exception as exc:
                 return self._finish_attempt(job, result={"status": "failed", "text": str(exc)}, error=str(exc))
             outcome = self._finish_attempt(job, result=result)

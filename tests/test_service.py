@@ -155,6 +155,95 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("paid-api", detail["last_error"])
         self.assertEqual(detail["state"], "held")
 
+    def test_real_guarded_adapter_is_held_before_paid_call(self):
+        """The worker boundary must preserve a concrete preflight hold.
+
+        This uses the real ``run_once`` exception boundary and the real
+        subscription/API-route guard.  Only the external adapter is fake, so
+        the test proves that a paid call is never reached or recorded as a
+        successful attempt when the local guard rejects it.
+        """
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        calls = []
+
+        class PaidAdapter:
+            def execute(self):
+                calls.append("sent")
+                return {"status": "completed"}
+
+        adapter = PaidAdapter()
+
+        def worker(_spec):
+            self.service.auth_guard({"OPENAI_API_KEY": "fixture-only"})
+            return adapter.execute()
+
+        result = self.service.run_once(executor=worker)
+        self.assertEqual(result["status"], "held")
+        self.assertEqual(calls, [])
+        detail = self.service.get_job(job["id"])
+        self.assertEqual(detail["state"], "held")
+        self.assertEqual(detail["attempts"][0]["status"], "held")
+        self.assertIn("OPENAI_API_KEY", detail["last_error"])
+        self.assertIn("local://cost-security/OPENAI_API_KEY/inference_api_route",
+                      self.tasks.get_task(self.task["id"])["evidence_links"])
+
+        other = self.tasks.create_task(purpose="independent subscription work")
+        other_workspace = self.root / "independent-work"
+        other_workspace.mkdir()
+        other_job = self.service.enroll(other["id"], other_workspace, "prompt", "context")
+        resumed = self.service.run_once(executor=lambda _: {"status": "completed", "usage": {"input_tokens": 1}})
+        self.assertEqual(resumed["status"], "needs_verification")
+        self.assertEqual(resumed["job_id"], other_job["id"])
+        self.assertEqual(self.service.get_job(job["id"])["state"], "held")
+
+    def test_concrete_unsafe_adapter_actions_are_held_and_recorded(self):
+        """Concrete unsafe operation names are retained without execution."""
+        for action in ("secret_exfiltration", "bypass_protection", "access_expansion"):
+            task = self.tasks.create_task(purpose=f"unsafe {action}")
+            workspace = self.root / action
+            workspace.mkdir()
+            job = self.service.enroll(task["id"], workspace, "prompt", "context")
+            calls = []
+
+            class UnsafeAdapter:
+                def preflight(self):
+                    self.secret = "fixture-secret-never-recorded"
+                    raise AuthError(f"fixture blocked {action}", hold=True,
+                                    action=action, source="fixture-adapter")
+
+                def execute(self):
+                    calls.append("mutated")
+
+            adapter = UnsafeAdapter()
+
+            def worker(_spec):
+                adapter.preflight()
+                adapter.execute()
+                return {"status": "completed"}
+
+            result = self.service.run_once(executor=worker)
+            self.assertEqual(result["status"], "held")
+            self.assertEqual(calls, [])
+            detail = self.service.get_job(job["id"])
+            self.assertEqual(detail["state"], "held")
+            self.assertIn(action, detail["last_error"])
+            evidence = self.tasks.get_task(task["id"])["evidence_links"]
+            self.assertIn(f"local://cost-security/fixture-adapter/{action}", evidence)
+            self.assertNotIn("fixture-secret-never-recorded", " ".join(evidence))
+
+    def test_subscription_usage_is_retained_without_paid_fallback(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+
+        def subscription_worker(_spec):
+            return {"status": "completed", "usage": {"input_tokens": 7, "output_tokens": 3},
+                    "provider": "chatgpt-subscription"}
+
+        result = self.service.run_once(executor=subscription_worker)
+        self.assertEqual(result["status"], "needs_verification")
+        attempt = self.service.get_job(job["id"])["attempts"][0]
+        self.assertEqual(attempt["result"]["usage"]["input_tokens"], 7)
+        self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
+
     def test_held_job_requires_explicit_safe_recheck_before_resume(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
         blocked = AuthError("extra billing blocked", hold=True, action="purchase", source="paid-api")
