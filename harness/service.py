@@ -18,9 +18,11 @@ import plistlib
 import re
 import shutil
 import sqlite3
+import stat
 import string
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -74,6 +76,55 @@ def load_agents_env(path: str | os.PathLike, env=None):
         except (KeyError, ValueError) as exc:
             raise ValueError(f"unresolved .env variable at line {line_number}") from exc
     return result
+
+
+def _reject_symlink_components(path):
+    """Reject a target or explicitly selected parent symlink."""
+    path = Path(path)
+    try:
+        if path.is_symlink():
+            raise ValueError(f"path component must not be a symlink: {path}")
+    except OSError as exc:
+        raise ValueError(f"cannot inspect path component: {path}") from exc
+
+
+def _read_nofollow(path):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            fd = None
+            return stream.read()
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _atomic_write_bytes(path, content):
+    """Write private bytes and atomically replace the destination."""
+    path = Path(path)
+    _reject_symlink_components(path.parent)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            fd = None
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 SCHEMA = """
@@ -209,9 +260,28 @@ class ServiceStore:
         if self.db_path.parent.is_symlink():
             raise ValueError(f"database parent must not be a symlink: {self.db_path.parent}")
         self.db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if not self.db_path.exists():
-            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(self.db_path, flags, 0o600)
+        current = self.db_path.parent.resolve()
+        self.db_path = current / self.db_path.name
+        immediate_parent = current
+        while True:
+            info = current.stat()
+            mode = stat.S_IMODE(info.st_mode)
+            trusted_owner = not hasattr(os, "geteuid") or info.st_uid in (0, os.geteuid())
+            sticky_ancestor = current != immediate_parent and bool(mode & stat.S_ISVTX) and trusted_owner
+            if not trusted_owner or (mode & 0o022 and not sticky_ancestor):
+                raise ValueError(f"database parent must not be writable by other users: {current}")
+            if current == current.parent:
+                break
+            current = current.parent
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.db_path, flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            opened = os.fstat(fd)
+            actual = os.stat(self.db_path, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (actual.st_dev, actual.st_ino):
+                raise ValueError("database path changed while opening")
+        finally:
             os.close(fd)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.db_path, timeout=timeout, check_same_thread=False)
@@ -1036,23 +1106,41 @@ class Launchd:
     def install(self, label="com.agents.service", path=None):
         if sys.platform != "darwin": raise OSError("launchd installation is only supported on macOS")
         target = Path(path or Path.home() / "Library" / "LaunchAgents" / f"{label}.plist")
+        _reject_symlink_components(target)
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _reject_symlink_components(target)
         content = self.generate(label)
+        desired = content.encode()
         backup = None
         changed = False
-        old_content = target.read_text() if target.exists() else None
-        if old_content is not None and old_content != content:
+        old_content = _read_nofollow(target) if target.exists() else None
+        if old_content is not None and old_content != desired:
             suffix = datetime.now().strftime("%Y%m%d%H%M%S")
             backup = target.with_name(target.name + ".bak-" + suffix)
             serial = 1
-            while backup.exists():
+            while os.path.lexists(backup):
                 backup = target.with_name(target.name + f".bak-{suffix}-{serial}")
                 serial += 1
-            backup.write_text(old_content); backup.chmod(0o600)
-        if old_content != content:
-            target.write_text(content); target.chmod(0o600); changed = True
-            if target.read_text() != content:
-                raise OSError(f"launchd plist readback failed: {target}")
+            _atomic_write_bytes(backup, old_content)
+        if old_content != desired:
+            try:
+                _atomic_write_bytes(target, desired)
+                if _read_nofollow(target) != desired:
+                    raise OSError(f"launchd plist readback failed: {target}")
+            except Exception:
+                try:
+                    if old_content is None:
+                        _reject_symlink_components(target)
+                        if target.exists():
+                            target.unlink()
+                    else:
+                        _atomic_write_bytes(target, old_content)
+                except Exception:
+                    # Preserve the original failure while leaving the backup
+                    # available for manual recovery.
+                    pass
+                raise
+            changed = True
         return {"path": str(target), "backup": str(backup) if backup else None, "changed": changed}
 
     def start(self, label="com.agents.service", path=None):

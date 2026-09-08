@@ -531,6 +531,11 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ServiceStore(link / "service.sqlite3", self.tasks)
 
+    def test_service_rejects_untrusted_database_ancestor(self):
+        parent = self.root / "world-writable"; parent.mkdir(); parent.chmod(0o777)
+        with self.assertRaisesRegex(ValueError, "writable"):
+            ServiceStore(parent / "service.sqlite3", self.tasks)
+
     def test_launchd_plist_has_absolute_python_and_no_secret_values(self):
         plist = Launchd(self.root, self.root / "service.sqlite3").generate("com.example.agents")
         self.assertIn(sys.executable, plist)
@@ -555,6 +560,35 @@ class ServiceTests(unittest.TestCase):
             with mock.patch.object(launchd, "status", return_value=mock.Mock(returncode=0)) as status:
                 launchd.start("com.example.agents", target)
                 status.assert_called_once_with("com.example.agents")
+
+    def test_launchd_install_rejects_symlink_target(self):
+        outside = self.root / "outside.plist"; outside.write_bytes(b"keep")
+        target = self.root / "LaunchAgents" / "service.plist"
+        target.parent.mkdir(); target.symlink_to(outside)
+        launchd = Launchd(self.root, self.root / "service.sqlite3", self.vault)
+        with mock.patch("harness.service.sys.platform", "darwin"):
+            with self.assertRaises(ValueError):
+                launchd.install("com.example.agents", target)
+        self.assertEqual(outside.read_bytes(), b"keep")
+
+    def test_launchd_install_restores_exact_preimage_after_atomic_failure(self):
+        target = self.root / "LaunchAgents" / "service.plist"
+        target.parent.mkdir(); old = b"old plist\r\n\xff"; target.write_bytes(old)
+        launchd = Launchd(self.root, self.root / "service.sqlite3", self.vault)
+        real_replace = os.replace; calls = []
+        def fail_target(source, destination):
+            calls.append(destination)
+            if len(calls) == 2:
+                raise OSError("simulated replacement failure")
+            return real_replace(source, destination)
+        with mock.patch("harness.service.sys.platform", "darwin"), \
+             mock.patch("harness.service.os.replace", side_effect=fail_target):
+            with self.assertRaisesRegex(OSError, "simulated"):
+                launchd.install("com.example.agents", target)
+        self.assertEqual(target.read_bytes(), old)
+        backups = list(target.parent.glob(target.name + ".bak-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), old)
 
     def test_dotenv_loader_rejects_shell_and_auth_guard_rejects_api_route(self):
         path = self.root / ".env"; path.write_text("AGENTS_ROOT=/safe\nSKILLS_ROOT=${AGENTS_ROOT}/skills\nCODEX_MODEL=gpt-5.6-luna\n")
