@@ -4,7 +4,7 @@
 
 ## What It Does
 
-通常の修正は、追加のレビュー起動やユーザー承認を待たずに実装へ渡します。valid blocking finding は現行 head に結び付けて検証し、スコープ内で修正して focused validation と再読出しを行います。minor/improvement は follow-up issue へ送ります。
+通常の修正は、追加のレビュー起動やユーザー承認を待たずに実装へ渡します。valid blocking finding は現行 head に結び付けて検証し、スコープ内で修正して focused validation と再読出しを行います。元の作業に必要な指摘は重要度にかかわらず修正します。別課題はローカル登録し、GitHub Issue 化は別バッチに委ねます。
 
 - 現在のgitワークツリーブランチからPRを特定する。
 - `owner/repo#123` を複数指定して、最大20 PRをthread-awareに一括取得する。
@@ -16,7 +16,7 @@
 - unresolvedかつnot outdatedのreview threadsだけを修正対象にする。
 - ファイル単位でクラスタリングし、コメントごとの指摘を残す。
 - 各コメントについて、現状の問題/デメリットと対応メリット/解決される課題を明記する。
-- 通常のvalid blocking findingは追加承認なしで実装handoffへ渡し、要件・スコープ・互換性・設計の選択が必要なものだけ個別に確認する。permission expansion、authentication secret、data-loss riskだけは指定providerによる一度の限定review対象にする。
+- 通常のvalid blocking findingは追加承認なしで実装handoffへ渡し、要件・スコープ・互換性・設計の選択が必要なものだけ個別に確認する。追加の費用・権限や秘密値・データ損失に関わる具体的な操作は現在の許可範囲を照合し、未承認の操作だけ保留する。再レビューは変更の影響に応じて行う。
 - 実装用スキルへhandoffする。code changeではpush・remote-head確認後、explanation-onlyでは新規commit/pushを作らず説明検証後に、対象threadを再取得して個別返信し、返信成功後の再取得を経てresolveし、`isResolved`を確認する。
 - 保存した private watch から bounded に再開する。再開時は認証済みの現在の PR/head/review/thread state
   を取得し、取得失敗や identity 不一致を保留として保持する。

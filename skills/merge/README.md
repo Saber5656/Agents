@@ -31,7 +31,8 @@ python3 skills/merge/scripts/merge_managed_repos.py --execute --stash
 - Merge conflicts are aborted and reported, never auto-resolved.
 - Normal-risk local integration does not wait for an agent/bot review; focused validation and the integrated change
   set's full validation are the quality gates.
-- Permission expansion, authentication secrets, and data-loss risk receive at most one limited review.
+- Check concrete permission, secret-handling, and data-loss operations against the current authorization;
+  perform review and revalidation according to the change impact, without a fixed review-count limit.
 - GitHub PR URLs, PR-number merge requests, merge queues, and auto-merge are explicit negative triggers.
 - Mixed local/PR requests fail closed with no fetch, commit, stash, or local merge. An explicit PR request with
   repository, base, head, and PR identity may be handed to `pr-merge-gate`; missing identity or scope remains pending.
