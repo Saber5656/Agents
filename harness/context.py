@@ -315,7 +315,7 @@ class VaultContext:
 
     @staticmethod
     def _source_digest(record):
-        """Return a secret-free identity for an externally sourced record."""
+        """Identify one visible, redacted revision of an externally sourced record."""
         if not isinstance(record, dict):
             return None
         candidate = None
@@ -332,7 +332,7 @@ class VaultContext:
         if candidate is None:
             return None
         return hashlib.sha256(
-            json.dumps(candidate, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            json.dumps(["visible-revision-v2", candidate, record], ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
 
     def index(self):
@@ -365,20 +365,22 @@ class VaultContext:
             fresh_records = []
             fresh_digests = []
             for record in records:
-                digest = self._source_digest(record)
+                clean = self._visible(record)
+                if clean is None:
+                    continue
+                # Never fingerprint hidden content or raw secret values. A reused
+                # event ID can carry a corrected or completed visible revision.
+                clean = json.loads(redact(json.dumps(clean, ensure_ascii=False), env))
+                digest = self._source_digest(clean)
                 if digest is not None and digest in known_digests:
                     continue
-                fresh_records.append(record)
+                fresh_records.append(clean)
                 if digest is not None:
                     known_digests.add(digest)
                     fresh_digests.append(digest)
             records_index = list(old.get("records", []))
-            rendered_fresh = []
-            for record in fresh_records:
-                clean = self._visible(record)
-                if clean is not None:
-                    rendered_fresh.append(redact(json.dumps(clean, ensure_ascii=False) + "\n", env))
-            text = "".join(rendered_fresh)
+            text = "".join(json.dumps(record, ensure_ascii=False) + "\n"
+                           for record in fresh_records)
             for offset in range(0, len(text), self.chunk_size):
                 part = text[offset:offset + self.chunk_size]
                 number = offset // self.chunk_size

@@ -292,3 +292,26 @@ def test_missing_or_unwritable_vault_never_uses_fallback(tmp_path):
             VaultContext(vault, "run")
     finally:
         vault.chmod(0o700)
+
+
+def test_source_event_revisions_preserve_new_visible_content(tmp_path):
+    context = VaultContext(tmp_path, "revisions")
+    first = {"id": "shared", "text": "partial result"}
+    revised = {"id": "shared", "text": "complete corrected result"}
+    context.save_records("tools", [first])
+    context.save_records("tools", [first, revised], complete=True)
+    context.save_records("tools", [revised], complete=True)
+    raw = "".join((context.run_dir / row["path"]).read_text()
+                  for row in context.index()["records"])
+    assert raw.count("partial result") == 1
+    assert raw.count("complete corrected result") == 1
+
+
+def test_filtered_event_does_not_suppress_later_visible_event(tmp_path):
+    context = VaultContext(tmp_path, "visibility")
+    context.save_records("conversation", [{"id": "message", "channel": "analysis", "text": "private"}])
+    context.save_records("conversation", [{"id": "message", "channel": "final", "text": "visible result"}])
+    raw = "".join((context.run_dir / row["path"]).read_text()
+                  for row in context.index()["records"])
+    assert "visible result" in raw
+    assert "private" not in raw
