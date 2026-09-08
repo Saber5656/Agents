@@ -15,6 +15,14 @@ it. Official GitHub Actions are pinned to full commit SHAs.
 
 The command runs every test under `tests/` and `skills/`, then runs the portfolio scanner against the repository's nested `skills/*` scope at the current Git `HEAD`. It prints discovered, passed, failed, error, skipped, and xfailed counts, followed by skill, finding, blocker, compliance-status, and scope-digest counts. A missing `pytest`, missing scanner, missing evidence output, or incomplete audit is an error; no missing check is treated as a pass.
 
+For an application or data-bearing project, pair this repository validation
+with the optional [project delivery profile](delivery-profiles.md), when one is
+present. Otherwise reuse only concrete build, service, health, deployment, and
+migration commands documented in the repository README, package scripts, CI,
+or configuration. `scripts/validate.py` never invents commands from a missing
+profile; a stage whose target or read-back evidence is unavailable remains
+unverified until it is recorded.
+
 The scanner requires a clean selected scope. Run it after committing the revision under test, or use `python scripts/validate.py --skip-portfolio` only when you are iterating on unrelated uncommitted changes. The skip is explicit and reported.
 
 Portfolio reports are written to a temporary directory and removed after the command. To retain the complete run, pass an explicit evidence directory:

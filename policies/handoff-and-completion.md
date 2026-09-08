@@ -10,6 +10,31 @@
 - Vault へ全コンテキストを保存し、記録と成果物への参照を返す。未完了・未検証・取得不能な情報を明示する。
 - 最終応答では結論を先に、成果・根拠・制限を利用者に理解できる言葉で伝える。
 
+## プロジェクト固有の delivery profile
+
+アプリケーションやデータを扱う作業では、リポジトリの任意の
+[delivery profile](../docs/delivery-profiles.md) を索引として解決する。profile が
+ない場合は README、package scripts、CI workflow、project config に実在する情報だけを
+再利用し、一般的な build、起動、migration、deploy コマンドを推測してはならない。
+profile または既存情報が必要なコマンド・対象・read-back 方法を欠く場合は、その段階を
+`incomplete` と記録し、実行できた段階だけを報告する。
+
+完了の状態は別々に記録する。`packaged` は成果物の identity と digest を確認した
+状態、`deployed` は指定された test target への変更と endpoint の実 read-back が
+成功した状態、`migrated` は指定 data target の migration 結果を read-back した状態、
+`recovered` は失敗した deploy または migration の bounded rollback/recovery 後に
+以前の usable state を確認した状態、`usable` は利用者が見る health または主要動作を
+実際に確認した状態を表す。一つの状態を別の状態の証拠として流用しない。
+
+明示的な deploy または migration の依頼がない限り、profile の optional な
+`deploy`/`migration` 段階は実行しない。その場合も no-deployment の証跡として release
+や tag が作られていないこと、関連する disposable database が変更されていないことを
+対象だけの read-only Git/DB snapshot で確認する。無関係な database を読む必要はない。
+provider の成功文字列、metadata、HTTP
+status、mock のみでは `deployed`、`migrated`、`usable` を報告しない。handoff には
+source/effective revision、実行した command、target、期待値と実測値、artifact または
+read-back の場所、未検証段階を含める。
+
 handoff は選択された作業単位だけでなく、元の全要件、最新revision、依存、未完了の
 acceptanceを含める。完了判定はTaskStoreのverified acceptanceとcompletion evidenceに
 加え、要件の依存が解決していることを確認する。別課題のlocal-only follow-upは元作業の
