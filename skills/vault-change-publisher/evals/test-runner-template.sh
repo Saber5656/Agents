@@ -67,7 +67,7 @@ done
 /bin/chmod 0755 "$MODE_FIXTURE_ROOT"/*.py "$MODE_FIXTURE_ROOT"/*.sh
 /bin/chmod 0644 "$MODE_FIXTURE_ROOT/collect-public-sources.py"
 set +e
-/bin/zsh "$MODE_FIXTURE_ROOT/run-daily-it-news-vulnerability-check.sh" \
+/bin/bash "$MODE_FIXTURE_ROOT/run-daily-it-news-vulnerability-check.sh" \
   >"$MODE_FIXTURE_ROOT/stdout.log" 2>"$MODE_FIXTURE_ROOT/stderr.log"
 MODE_FIXTURE_STATUS=$?
 set -e
@@ -86,7 +86,7 @@ fi
 /bin/chmod 0755 "$MODE_FIXTURE_ROOT/collect-public-sources.py"
 /bin/chmod 0644 "$MODE_FIXTURE_ROOT/run-pinned-review.py"
 set +e
-/bin/zsh "$MODE_FIXTURE_ROOT/run-daily-it-news-vulnerability-check.sh" \
+/bin/bash "$MODE_FIXTURE_ROOT/run-daily-it-news-vulnerability-check.sh" \
   >"$MODE_FIXTURE_ROOT/pinned-stdout.log" 2>"$MODE_FIXTURE_ROOT/pinned-stderr.log"
 PINNED_MODE_FIXTURE_STATUS=$?
 set -e
