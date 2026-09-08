@@ -24,6 +24,14 @@ Review findings are judged by the main agent. Accepted in-scope defects are
 fixed and verified automatically; unrelated discoveries are captured locally
 for a separately invoked issueization agent, never silently implemented.
 
+Run one review for unchanged work and evidence. Reuse its recorded result,
+including an incomplete or malformed response; a timer or an unchanged failed
+check does not authorize another model review. After a relevant adopted repair,
+perform only the checks and targeted re-review needed for the changed evidence.
+Resolve transport/process state mechanically before deciding whether any new
+provider invocation is needed. Do not add frameworks or unrelated improvements
+to finish a concrete acceptance task; record new separate work locally instead.
+
 Use one active writer per worktree/ref/shared resource. Pin immutable bases and
 reuse matching existing work. Preserve unrelated staged/dirty files and commits.
 The local task system keeps execution state separate from issueization status,
