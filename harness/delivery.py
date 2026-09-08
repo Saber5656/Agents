@@ -124,6 +124,23 @@ def sync_main(repo,branch,merge_sha,remote):
     return target
 
 
+def _check_successful(check):
+    """Accept only an unambiguous completed success from a check object.
+
+    Check runs report ``status=COMPLETED`` and ``conclusion=SUCCESS`` while
+    status contexts report ``state=SUCCESS``.  A mixed or incomplete object is
+    deliberately rejected so one field cannot mask a contradictory result.
+    """
+    conclusion = check.get('conclusion')
+    state = check.get('state')
+    status = check.get('status')
+    if conclusion is not None:
+        if str(conclusion).upper() != 'SUCCESS' or state is not None:
+            return False
+        return status is None or str(status).upper() == 'COMPLETED'
+    return state is not None and str(state).upper() == 'SUCCESS' and status is None
+
+
 def merge_ready(state,head,base,required,threads):
     if required is None:raise DeliveryError('Required check discovery unavailable')
     if state['headRefOid']!=head or state['baseRefOid']!=base:
@@ -144,11 +161,11 @@ def merge_ready(state,head,base,required,threads):
             matches=[c for c in checks if (c.get('name') or c.get('context'))==name]
         if not matches:raise DeliveryError('Missing required check: '+name)
         for check in matches:
-            if str(check.get('conclusion','')).upper() not in ('SUCCESS','NEUTRAL','SKIPPED') and str(check.get('state','')).upper()!='SUCCESS':
+            if not _check_successful(check):
                 raise DeliveryError('Required check not successful: '+name)
     # A reported failed/pending check is not silently ignored even if unprotected.
     for check in checks:
-        if str(check.get('conclusion','')).upper() not in ('SUCCESS','NEUTRAL','SKIPPED') and str(check.get('state','')).upper()!='SUCCESS':
+        if not _check_successful(check):
             raise DeliveryError('Observed check not successful')
 
 
@@ -193,9 +210,9 @@ class GitHub:
         return [row for row in rows
                 if row.get('baseRefName') == base and row.get('headRefName') in owners]
 
-    def push_branch(self, repo, branch, head, remote='origin', expected_remote=None,
-                    *, base=None, allowed_paths=None, env=None):
-        """Push one reviewed commit and verify the remote ref, without force."""
+    def push_branch(self, repo, branch, head, remote='origin', *, expected_remote,
+                    base, allowed_paths=None, env=None):
+        """Push one reviewed commit bound to its remote and immutable base."""
         repo = Path(repo).resolve(); oid(head)
         if branch in ('main', 'master') or branch.startswith('-'):
             raise DeliveryError('A task branch is required for PR publication')
@@ -209,31 +226,30 @@ class GitHub:
         if git(repo, 'rev-parse', 'HEAD') != head:
             raise DeliveryError('Selected commit is not the current HEAD')
         dirty = git(repo, 'status', '--porcelain=v1', '-uall').splitlines()
-        if base is not None:
-            oid(base)
-            try:
-                if git(repo, 'merge-base', base, head) != base:
-                    raise DeliveryError('Selected commit does not descend from the reviewed base')
-            except DeliveryError as exc:
-                if str(exc) == 'Selected commit does not descend from the reviewed base':
-                    raise
-                raise DeliveryError('Reviewed base is unavailable') from exc
-            public_git_changes(repo, base, head, env)
-            if allowed_paths is not None:
-                dirty_names = [line[3:] for line in dirty if len(line) >= 4]
-                allowed = tuple(str(path).rstrip('/') for path in allowed_paths)
-                if any(name == path or name.startswith(path + '/')
-                       for name in dirty_names for path in allowed):
-                    raise DeliveryError('Task-owned unpublished changes must be committed first')
-                names = git(repo, 'diff', '--name-only', base + '..' + head, '--').splitlines()
-                if any(not any(name == path or name.startswith(path + '/') for path in allowed)
-                       for name in names):
-                    raise DeliveryError('Selected commit contains an out-of-scope path')
+        oid(base)
+        try:
+            if git(repo, 'merge-base', base, head) != base:
+                raise DeliveryError('Selected commit does not descend from the reviewed base')
+        except DeliveryError as exc:
+            if str(exc) == 'Selected commit does not descend from the reviewed base':
+                raise
+            raise DeliveryError('Reviewed base is unavailable') from exc
+        public_git_changes(repo, base, head, env)
+        if allowed_paths is not None:
+            dirty_names = [line[3:] for line in dirty if len(line) >= 4]
+            allowed = tuple(str(path).rstrip('/') for path in allowed_paths)
+            if any(name == path or name.startswith(path + '/')
+                   for name in dirty_names for path in allowed):
+                raise DeliveryError('Task-owned unpublished changes must be committed first')
+            names = git(repo, 'diff', '--name-only', base + '..' + head, '--').splitlines()
+            if any(not any(name == path or name.startswith(path + '/') for path in allowed)
+                   for name in names):
+                raise DeliveryError('Selected commit contains an out-of-scope path')
         urls = [git(repo, 'remote', 'get-url', remote),
                 git(repo, 'remote', 'get-url', '--push', remote)]
         if urls[0] != urls[1]:
             raise DeliveryError('Remote fetch and push destinations differ')
-        if expected_remote is not None and urls[0] != expected_remote:
+        if urls[0] != expected_remote:
             raise DeliveryError('Remote destination changed')
         before = git(repo, 'ls-remote', '--heads', remote, branch)
         before_oid = before.split()[0] if before else None
@@ -257,10 +273,11 @@ class GitHub:
                 'unrelated_dirty': dirty}
 
     def create_or_reuse_pr(self, head, base, title, body, *, assignees=(), labels=(),
-                           head_oid=None, env=None):
-        """Create one ready PR or reconcile an existing/lost create result."""
+                           head_oid, env=None):
+        """Create/reconcile one PR whose readback is bound to reviewed ``head_oid``."""
         if not head or not base or head == base or head in ('main', 'master'):
             raise DeliveryError('A task branch and distinct base are required')
+        oid(head_oid)
         public_text(title, env, english=True); public_text(body, env, english=True)
         rows = self.list_prs(head, base)
         matches = self._matching_prs(rows, head, base)
@@ -296,7 +313,7 @@ class GitHub:
             raise DeliveryError('Matching PR is not open')
         if result.get('title') != title or result.get('body') != body:
             raise DeliveryError('PR readback public content differs from draft')
-        if head_oid is not None and result.get('headRefOid') != head_oid:
+        if result.get('headRefOid') != head_oid:
             raise DeliveryError('PR head readback mismatch')
         if assignees:
             observed = {item.get('login') if isinstance(item, dict) else item
