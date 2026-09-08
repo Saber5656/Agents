@@ -52,6 +52,7 @@ original attempt and all recheck diagnostics remain in the service history.
 
 ```sh
 python3 -m harness.service run-once --json
+python3 -m harness.service resume-held JOB_ID --recheck /path/to/safety-recheck.json --json
 python3 -m harness.service verify JOB_ID --evidence /path/to/acceptance-review.json
 python3 -m harness.service run --poll 30
 ```
