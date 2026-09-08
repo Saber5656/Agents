@@ -19,7 +19,13 @@ from typing import Optional
 
 from scripts.generate_report import generate_html
 from scripts.improve_description import improve_description
-from scripts.run_eval import find_project_root, run_eval
+from scripts.run_eval import (
+    DEFAULT_MODEL,
+    DEFAULT_REASONING_EFFORT,
+    VALID_REASONING_EFFORTS,
+    find_project_root,
+    run_eval,
+)
 from scripts.utils import parse_skill_md
 
 
@@ -61,6 +67,7 @@ def run_loop(
     verbose: bool,
     live_report_path: Optional[Path] = None,
     log_dir: Optional[Path] = None,
+    routing_reasoning_effort: str = DEFAULT_REASONING_EFFORT,
 ) -> dict:
     """Run the Codex routing eval + improvement loop."""
     project_root = find_project_root()
@@ -98,7 +105,8 @@ def run_loop(
             project_root=project_root,
             runs_per_query=runs_per_query,
             trigger_threshold=trigger_threshold,
-            model=routing_model,
+            model=routing_model or DEFAULT_MODEL,
+            reasoning_effort=routing_reasoning_effort,
         )
         eval_elapsed = time.time() - t0
 
@@ -243,7 +251,8 @@ def run_loop(
             current_description=current_description,
             eval_results=train_results,
             history=blinded_history,
-            model=improvement_model or routing_model,
+            model=improvement_model or routing_model or DEFAULT_MODEL,
+            reasoning_effort=routing_reasoning_effort,
             log_dir=log_dir,
             iteration=iteration,
         )
@@ -294,7 +303,8 @@ def main():
     parser.add_argument("--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold")
     parser.add_argument("--holdout", type=float, default=0.4, help="Fraction of eval set to hold out for testing (0 to disable)")
     parser.add_argument("--model", default=None, help="Deprecated alias for --routing-model")
-    parser.add_argument("--routing-model", default=None, help="Model to use for Codex routing eval")
+    parser.add_argument("--routing-model", default=DEFAULT_MODEL, help=f"Model to use for Codex routing eval (default: {DEFAULT_MODEL})")
+    parser.add_argument("--routing-reasoning-effort", default=DEFAULT_REASONING_EFFORT, choices=sorted(VALID_REASONING_EFFORTS), help=f"Explicit reasoning effort for routing and improvement (default: {DEFAULT_REASONING_EFFORT})")
     parser.add_argument("--improvement-model", default=None, help="Model to use for Codex description improvement (defaults to routing model)")
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     parser.add_argument("--report", default="auto", help="Generate HTML report at this path (default: 'auto' for temp file, 'none' to disable)")
@@ -346,6 +356,7 @@ def main():
         routing_model=args.routing_model or args.model,
         improvement_model=args.improvement_model,
         verbose=args.verbose,
+        routing_reasoning_effort=args.routing_reasoning_effort,
         live_report_path=live_report_path,
         log_dir=log_dir,
     )

@@ -14,7 +14,14 @@ import fnmatch
 import sys
 import zipfile
 from pathlib import Path
-from scripts.quick_validate import validate_skill
+
+try:
+    from scripts.quick_validate import validate_skill
+except ModuleNotFoundError:
+    # Support both `python -m scripts.package_skill` from this directory and
+    # direct execution from a repository checkout.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from quick_validate import validate_skill
 
 # Patterns to exclude when packaging skills.
 EXCLUDE_DIRS = {"__pycache__", "node_modules"}

@@ -4,10 +4,43 @@ Quick validation script for skills - minimal version
 """
 
 import sys
-import os
+import datetime as _datetime
 import re
-import yaml
 from pathlib import Path
+
+try:
+    import yaml
+except ModuleNotFoundError:  # Report setup instructions without an import traceback.
+    yaml = None
+
+
+class FrontmatterError(ValueError):
+    """Frontmatter violates the metadata contract."""
+
+
+if yaml is not None:
+    class _UniqueSafeLoader(yaml.SafeLoader):
+        """SafeLoader variant that makes duplicate metadata keys invalid."""
+
+        def construct_mapping(self, node, deep=False):
+            mapping = {}
+            for key_node, value_node in node.value:
+                key = self.construct_object(key_node, deep=deep)
+                if key in mapping:
+                    raise FrontmatterError(f"duplicate frontmatter key: {key}")
+                mapping[key] = self.construct_object(value_node, deep=deep)
+            return mapping
+
+
+def _normalise_yaml(value):
+    if isinstance(value, (_datetime.datetime, _datetime.date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _normalise_yaml(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalise_yaml(item) for item in value]
+    return value
+
 
 def validate_skill(skill_path):
     """Basic validation of a skill"""
@@ -30,13 +63,21 @@ def validate_skill(skill_path):
 
     frontmatter_text = match.group(1)
 
-    # Parse YAML frontmatter
+    # One parser keeps metadata semantics identical across installations.
+    if yaml is None:
+        return False, ("PyYAML is required: install the declared dependency with "
+                       "python3 -m pip install -r "
+                       "skills/skill-creator/requirements-quick-validate.txt")
     try:
-        frontmatter = yaml.safe_load(frontmatter_text)
+        frontmatter = _normalise_yaml(yaml.load(frontmatter_text, Loader=_UniqueSafeLoader))
         if not isinstance(frontmatter, dict):
             return False, "Frontmatter must be a YAML dictionary"
-    except yaml.YAMLError as e:
+    except (FrontmatterError, ValueError, TypeError) as e:
         return False, f"Invalid YAML in frontmatter: {e}"
+    except Exception as e:
+        if yaml is not None and isinstance(e, yaml.YAMLError):
+            return False, f"Invalid YAML in frontmatter: {e}"
+        raise
 
     # Define allowed properties
     ALLOWED_PROPERTIES = {
@@ -46,6 +87,8 @@ def validate_skill(skill_path):
         'allowed-tools',
         'metadata',
         'compatibility',
+        'disable-model-invocation',
+        'references',
         'user-invocable',
         'category',
         'created',
@@ -61,6 +104,7 @@ def validate_skill(skill_path):
         'execution_provider',
         'execution_mode',
         'model_rationale',
+        'model_reasoning_effort',
         'upgrade_policy',
         'cost_tier',
         'long_run_preferred',
@@ -74,6 +118,23 @@ def validate_skill(skill_path):
             f"Allowed properties are: {', '.join(sorted(ALLOWED_PROPERTIES))}"
         )
 
+    expected_types = {
+        key: str
+        for key in ALLOWED_PROPERTIES
+        if key not in {'user-invocable', 'disable-model-invocation', 'long_run_preferred', 'metadata', 'references', 'fallback_models'}
+    }
+    expected_types.update({
+        'user-invocable': bool,
+        'disable-model-invocation': bool,
+        'long_run_preferred': bool,
+        'metadata': dict,
+        'references': list,
+        'fallback_models': list,
+    })
+    for key, expected in expected_types.items():
+        if key in frontmatter and not isinstance(frontmatter[key], expected):
+            return False, f"{key} must be a {expected.__name__}, got {type(frontmatter[key]).__name__}"
+
     # Check required fields
     if 'name' not in frontmatter:
         return False, "Missing 'name' in frontmatter"
@@ -85,6 +146,8 @@ def validate_skill(skill_path):
     if not isinstance(name, str):
         return False, f"Name must be a string, got {type(name).__name__}"
     name = name.strip()
+    if not name:
+        return False, 'Name cannot be empty'
     if name:
         # Check naming convention (kebab-case: lowercase with hyphens)
         if not re.match(r'^[a-z0-9-]+$', name):
@@ -100,6 +163,8 @@ def validate_skill(skill_path):
     if not isinstance(description, str):
         return False, f"Description must be a string, got {type(description).__name__}"
     description = description.strip()
+    if not description:
+        return False, 'Description cannot be empty'
     if description:
         # Check for angle brackets
         if '<' in description or '>' in description:

@@ -11,7 +11,7 @@
 | フィールド | 必須 | 説明 |
 |-----------|:----:|------|
 | `name` | ✅ | スキルID（ディレクトリ名と一致させる） |
-| `description` | ✅ | Claude Code の自動検出トリガー。「いつ使うか」を明確に書く（TRIGGER/DO NOT TRIGGER 形式推奨） |
+| `description` | ✅ | Codex CLI の自動検出トリガー。「いつ使うか」を明確に書く（TRIGGER/DO NOT TRIGGER 形式推奨） |
 | `user-invocable` | ✅ | `true` = `/スキル名` で直接呼び出し可、`false` = 自動トリガーのみ |
 | `allowed-tools` | ✅ | 使用するツールのみ列挙（例: `Read, Grep, Bash, Write`） |
 | `category` | ✅ | Obsidian 管理用カテゴリ（後述） |

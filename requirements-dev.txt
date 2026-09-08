@@ -1,1 +1,4 @@
 pytest==9.0.3
+
+# Skill creator metadata validation and packaging use the same declared parser.
+-r skills/skill-creator/requirements-quick-validate.txt
