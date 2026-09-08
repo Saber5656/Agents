@@ -152,6 +152,49 @@ class LifecycleTests(unittest.TestCase):
                                    project_id="p", host_id="h", base_oid="short",
                                    worktree=self.worktree)
 
+    def test_concurrent_first_open_preserves_registered_units(self):
+        path = self.vault / "new-registry.json"
+        observed = threading.Event(); first_finished = threading.Event()
+        original = Path.exists
+        errors = []
+        def exists(candidate):
+            result = original(candidate)
+            if candidate == path and threading.current_thread().name == "delayed-init" and not result:
+                observed.set()
+                first_finished.wait(1)
+            return result
+        def open_and_register(name):
+            try:
+                store = LifecycleStore(path, vault_root=self.vault)
+                store.register(name, purpose=name, repository="org/repo", project_id="p", host_id="h",
+                               base_oid=self.base, worktree=self.worktree)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                if name == "first": first_finished.set()
+        with mock.patch.object(Path, "exists", exists):
+            delayed = threading.Thread(target=open_and_register, args=("delayed",), name="delayed-init")
+            delayed.start(); self.assertTrue(observed.wait(2))
+            first = threading.Thread(target=open_and_register, args=("first",))
+            first.start(); first.join(3); delayed.join(3)
+        self.assertEqual(errors, [])
+        self.assertEqual({row["id"] for row in LifecycleStore(path, vault_root=self.vault).list_units()}, {"first", "delayed"})
+
+    def test_ready_readback_must_match_requested_thread_id(self):
+        real = self.backend.create_thread(prompt="x", work_unit_id="wu-1", project_id="p", host_id="host-1",
+                                          worktree=str(self.worktree), base_oid=self.base)
+        real["threadId"] = "wrong-thread"
+        with mock.patch.object(self.backend, "read_thread", return_value=real):
+            result = self.chat.create("wu-1", "request", self.backend)
+        self.assertEqual(result["state"], "ambiguous")
+
+    def test_reconciliation_rejects_multiple_ready_matches(self):
+        self.chat.create("wu-1", "request", self.backend)
+        duplicate = dict(self.backend.threads[0]); duplicate["threadId"] = "duplicate"
+        self.backend.threads.append(duplicate)
+        with self.assertRaisesRegex(LifecycleError, "multiple"):
+            self.chat.reconcile("wu-1", self.backend)
+
     def test_create_readback_records_ready_thread_and_cwd_base(self):
         result = self.chat.create("wu-1", "latest requirements", self.backend)
         self.assertEqual(result["state"], "ready")

@@ -70,8 +70,9 @@ class LifecycleStore:
         self.lock_path = self.path.with_name(self.path.name + ".lock")
         self.lock_path.touch(mode=0o600, exist_ok=True)
         self.lock_path.chmod(0o600)
-        if not self.path.exists():
-            self._write({"version": 1, "work_units": {}})
+        with self._locked():
+            if not self.path.exists():
+                self._write({"version": 1, "work_units": {}})
 
     @contextmanager
     def _locked(self):
@@ -306,6 +307,8 @@ class ChatLifecycle:
             thread = backend.read_thread(thread_id, host_id=unit["host_id"])
         except Exception as exc:
             raise LifecycleError("ready thread readback is incomplete") from exc
+        if str(_thread_id(thread)) != str(thread_id):
+            raise LifecycleError("remote readback returned a different thread identity")
         return self._verify_thread(unit, thread)
 
     def _adopt_ready(self, unit, backend, response, *, handoff=None):
@@ -333,6 +336,9 @@ class ChatLifecycle:
                 candidates.append(thread)
         if not candidates:
             return self._save_chat(unit_id, state="ambiguous" if chat["state"] in ("creating", "ambiguous") else chat["state"])
+        identities = {_thread_id(row) for row in candidates if _thread_id(row)}
+        if len(identities) > 1:
+            raise LifecycleError("multiple ready threads match this operation; reconcile their identities")
         ready = next((row for row in candidates if _thread_id(row)), None)
         if ready is not None:
             return self._adopt_ready(unit, backend, ready)
@@ -440,6 +446,9 @@ class ChatLifecycle:
             text = " ".join(str(thread.get(key, "")) for key in ("title", "summary", "prompt", "description"))
             if marker in text or (handoff.get("client_thread_id") and _client_id(thread) == handoff["client_thread_id"]):
                 candidates.append(thread)
+        identities = {_thread_id(row) for row in candidates if _thread_id(row)}
+        if len(identities) > 1:
+            raise LifecycleError("multiple ready threads match this operation; reconcile their identities")
         ready = next((row for row in candidates if _thread_id(row)), None)
         if ready is not None:
             try:
