@@ -36,10 +36,13 @@ durable exponential backoff and no fixed whole-task retry count. A successful
 provider result moves the job to `needs_verification`. It does not mark the
 task complete. The service then uses a separate reserved verification slot for an
 actual read-only Codex Luna/low review of the acceptance criteria, saved result
-and artifacts, workspace state, and public merge/main synchronization. A verifier
-finding is recorded as a durable update and returns the job to `retry` so the next
-attempt receives the latest instruction. Call `verify` with completion evidence
-only after all task acceptance records have been explicitly verified.
+and artifacts, workspace state, and public merge/main synchronization. Review
+findings are sent to the Astra/high read-only review coordinator. An adopted
+finding is recorded as a repair instruction and returns the job to `retry`;
+rejected findings retain their rationale, and separated findings create only a
+local follow-up while the original verification continues. Call `verify` with
+completion evidence only after all task acceptance records have been explicitly
+verified.
 
 ```sh
 python3 -m harness.service run-once --json

@@ -312,13 +312,87 @@ class ServiceTests(unittest.TestCase):
         task = self.tasks.create_task(purpose="verify findings", acceptance_evidence=["accepted"])
         self.tasks.add_acceptance_evidence(task["id"], "accepted", verified=True)
         job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
-        result = Scheduler(self.service, verification_executor=lambda spec: {
-            "acceptance": False, "merge": False, "main_sync": False,
-            "findings": [{"issue": "missing test"}], "evidence": None,
-        }).run_once(executor=lambda _: {"status": "completed", "text": "provider success"})
+        finding = {"issue": "missing test", "severity": "high"}
+        disposition = {"status": "complete", "decisions": [],
+                       "adopted_findings": [{"finding": finding, "decision": "adopt",
+                                             "reason": "It blocks acceptance.",
+                                             "evidence": ["vault://review"]}],
+                       "rejected_findings": [], "separate_task_ids": []}
+        with mock.patch("harness.service.decide_findings", return_value=disposition) as coordinator:
+            result = Scheduler(self.service, verification_executor=lambda spec: {
+                "acceptance": False, "merge": False, "main_sync": False,
+                "findings": [finding], "evidence": None,
+                "evidence_links": ["vault://review"],
+            }).run_once(executor=lambda _: {"status": "completed", "text": "provider success"})
+        coordinator.assert_called_once()
         self.assertEqual(result["status"], "retry")
         self.assertEqual(self.service.get_job(job["id"])["state"], "retry")
         self.assertIn("Verification finding adopted", self.service.get_job(job["id"])["updates"][-1]["message"])
+
+    def test_rejected_finding_is_recorded_and_does_not_force_repair(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        finding = {"issue": "out of scope suggestion", "severity": "medium"}
+        disposition = {"status": "complete", "decisions": [], "adopted_findings": [],
+                       "rejected_findings": [{"finding": finding, "decision": "reject",
+                                              "reason": "Outside the task scope.",
+                                              "evidence": ["vault://review"]}],
+                       "separate_task_ids": []}
+        review = {"acceptance": True, "findings": [finding], "criteria": [],
+                  "evidence_links": ["vault://review"]}
+        with mock.patch("harness.service.decide_findings", return_value=disposition), \
+             mock.patch.object(self.service, "verify", return_value={"state": "completed"}) as verify:
+            result = Scheduler(self.service, verification_executor=lambda _: review).run_once(
+                executor=lambda _: {"status": "completed"})
+        self.assertEqual(result["status"], "verified")
+        verify.assert_called_once()
+        self.assertEqual(verify.call_args.args[1]["findings"], [])
+        self.assertIn("Verification finding rejected", self.service.get_job(job["id"])["updates"][-1]["message"])
+
+    def test_separate_finding_registers_local_follow_up_without_repair(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        finding = {"issue": "future improvement", "severity": "low"}
+        disposition = {"status": "complete", "decisions": [], "adopted_findings": [],
+                       "rejected_findings": [], "separate_task_ids": ["task-follow-up"],
+                       "separated_findings": [{"finding": finding, "decision": "separate",
+                                                "reason": "Track independently.",
+                                                "evidence": ["vault://review"]}]}
+        review = {"acceptance": True, "findings": [finding], "criteria": [],
+                  "evidence_links": ["vault://review"]}
+        with mock.patch("harness.service.decide_findings", return_value=disposition), \
+             mock.patch.object(self.service, "verify", return_value={"state": "completed"}) as verify:
+            result = Scheduler(self.service, verification_executor=lambda _: review).run_once(
+                executor=lambda _: {"status": "completed"})
+        self.assertEqual(result["status"], "verified")
+        verify.assert_called_once()
+        self.assertEqual(verify.call_args.args[1]["findings"], [])
+        self.assertIn("task-follow-up", self.service.get_job(job["id"])["updates"][-1]["message"])
+
+    def test_incomplete_finding_disposition_does_not_adopt(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        finding = {"issue": "unresolved review", "severity": "high"}
+        review = {"acceptance": False, "findings": [finding], "evidence_links": ["vault://review"]}
+        with mock.patch("harness.service.decide_findings", return_value={
+            "status": "incomplete", "reason": "Astra decision unavailable",
+        }) as coordinator:
+            result = Scheduler(self.service, verification_executor=lambda _: review).run_once(
+                executor=lambda _: {"status": "completed"})
+        coordinator.assert_called_once()
+        self.assertEqual(result["status"], "needs_verification")
+        self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
+        self.assertFalse(any("adopted" in update["message"] for update in self.service.get_job(job["id"])["updates"]))
+
+    def test_malformed_finding_disposition_does_not_adopt(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        finding = {"issue": "malformed disposition", "severity": "high"}
+        review = {"acceptance": False, "findings": [finding], "evidence_links": ["vault://review"]}
+        with mock.patch("harness.service.decide_findings", return_value={
+            "status": "complete", "decisions": [], "adopted_findings": {"finding": finding},
+            "rejected_findings": [], "separate_task_ids": [],
+        }):
+            result = Scheduler(self.service, verification_executor=lambda _: review).run_once(
+                executor=lambda _: {"status": "completed"})
+        self.assertEqual(result["status"], "needs_verification")
+        self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
 
     def test_default_verifier_requires_codex_terminal_and_inspects_saved_context(self):
         task = self.tasks.create_task(purpose="verify actual", acceptance_evidence=["A test passes"])
@@ -502,11 +576,16 @@ class ServiceTests(unittest.TestCase):
 
     def test_default_executor_uses_run_mode_explicit_roots_and_stable_run_dir(self):
         from harness.service import default_executor
+        (self.root / "COMMON-AGENTS.md").write_text("COMMON POLICY MARKER")
+        (self.root / "policies").mkdir()
+        (self.root / "policies/repository-delivery.md").write_text("DELIVERY POLICY MARKER")
         spec = {"workspace": str(self.workspace), "agents_root": str(self.root), "vault_root": str(self.vault), "run_dir": str(self.vault / "run"), "prompt": "prompt", "context": "context", "model": "gpt-5.6-luna", "effort": "low", "timeout": 1, "updates": []}
         with mock.patch("harness.runner.run_job", return_value={"status": "completed"}) as run, mock.patch("harness.runner.resume_job") as resume:
             self.assertEqual(default_executor(spec)["status"], "completed")
             job = run.call_args.args[0]
             self.assertEqual(job.mode, "run"); self.assertEqual(job.provider, "codex"); self.assertEqual(job.vault, self.vault.resolve()); self.assertEqual(job.run_dir, Path(spec["run_dir"]))
+            self.assertIn("COMMON POLICY MARKER", job.prompt)
+            self.assertIn("DELIVERY POLICY MARKER", job.prompt)
             resume.assert_not_called()
 
     def test_service_subprocess_does_not_duplicate_live_lock(self):

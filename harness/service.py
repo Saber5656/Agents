@@ -29,6 +29,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Callable
 
 from .tasks import ConflictError, TaskStore
+from .service_review import decide_findings
 
 
 class AuthError(RuntimeError):
@@ -797,19 +798,57 @@ class ServiceStore:
         findings = result.get("findings", []) if isinstance(result, dict) else []
         if findings:
             links = tuple(item for item in (result.get("evidence_links", []) if isinstance(result, dict) else []) if isinstance(item, str))
-            for finding in findings:
-                message = finding if isinstance(finding, str) else json.dumps(finding, ensure_ascii=False, sort_keys=True)
-                self.record_update(job_id, "Verification finding adopted: " + message, links)
-            with self.tx() as conn:
-                conn.execute("UPDATE service_jobs SET state='retry',next_attempt_at=?,last_error=?,updated_at=? WHERE id=?", (now(), "verification findings require repair", now(), job_id))
-                conn.execute("UPDATE service_attempts SET status='repair_required' WHERE job_id=? AND attempt_number=(SELECT MAX(attempt_number) FROM service_attempts WHERE job_id=?)", (job_id, job_id))
-            task = self.tasks.get_task(job["task_id"])
-            if task is not None:
-                try:
-                    self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="running")
-                except ConflictError:
-                    pass
-            return {"status": "retry", "job_id": job_id, "verification": result, "repair_required": True}
+            review_spec = {"task": self.tasks.get_task(job["task_id"]), "job": job,
+                           "agents_root": str(self.tasks.agents_root),
+                           "vault_root": str(self.tasks.vault_root)}
+            try:
+                disposition = decide_findings(review_spec, result)
+            except Exception as exc:
+                self._reset_verification(job_id, "review finding disposition failed: " + str(exc))
+                return {"status": "needs_verification", "job_id": job_id, "verification": result,
+                        "review_disposition": {"status": "incomplete", "reason": str(exc)}}
+            if not isinstance(disposition, dict) or disposition.get("status") != "complete":
+                reason = disposition.get("reason", "finding disposition is incomplete") if isinstance(disposition, dict) else "finding disposition is malformed"
+                self._reset_verification(job_id, "review finding disposition incomplete: " + str(reason))
+                return {"status": "needs_verification", "job_id": job_id, "verification": result,
+                        "review_disposition": disposition}
+            decisions = disposition.get("decisions", [])
+            adopted = disposition.get("adopted_findings", [])
+            rejected = disposition.get("rejected_findings", [])
+            separated = disposition.get("separated_findings", [item for item in decisions if isinstance(item, dict) and item.get("decision") == "separate"])
+            if any(not isinstance(items, list) for items in (decisions, adopted, rejected, separated)):
+                self._reset_verification(job_id, "review finding disposition has invalid decision lists")
+                return {"status": "needs_verification", "job_id": job_id, "verification": result,
+                        "review_disposition": {"status": "incomplete", "reason": "invalid decision lists"}}
+            for label, items in (("adopted", adopted), ("rejected", rejected), ("separated", separated)):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    finding = item.get("finding", item)
+                    message = finding if isinstance(finding, str) else json.dumps(finding, ensure_ascii=False, sort_keys=True)
+                    reason = str(item.get("reason", "disposition recorded"))
+                    item_links = tuple(link for link in item.get("evidence", []) if isinstance(link, str)) if isinstance(item.get("evidence", []), list) else ()
+                    evidence = tuple(dict.fromkeys(links + item_links))
+                    follow_up = ""
+                    if label == "separated" and disposition.get("separate_task_ids"):
+                        follow_up = "; local follow-up: " + ", ".join(map(str, disposition["separate_task_ids"]))
+                    self.record_update(job_id, f"Verification finding {label}: {message}; rationale: {reason}{follow_up}", evidence)
+            if adopted:
+                with self.tx() as conn:
+                    conn.execute("UPDATE service_jobs SET state='retry',next_attempt_at=?,last_error=?,updated_at=? WHERE id=?", (now(), "verification findings require repair", now(), job_id))
+                    conn.execute("UPDATE service_attempts SET status='repair_required' WHERE job_id=? AND attempt_number=(SELECT MAX(attempt_number) FROM service_attempts WHERE job_id=?)", (job_id, job_id))
+                task = self.tasks.get_task(job["task_id"])
+                if task is not None:
+                    try:
+                        self.tasks.update_task(task["id"], expected_version=task["version"], execution_status="running")
+                    except ConflictError:
+                        pass
+                return {"status": "retry", "job_id": job_id, "verification": result,
+                        "review_disposition": disposition, "repair_required": True}
+            accepted_result = dict(result)
+            accepted_result["findings"] = []
+            accepted_result["review_disposition"] = disposition
+            result = accepted_result
         if not isinstance(result, dict) or result.get("acceptance") is not True:
             self._reset_verification(job_id, "verification criteria remain incomplete")
             return {"status": "needs_verification", "job_id": job_id, "verification": result or {}}
@@ -855,9 +894,10 @@ def default_executor(spec):
     prompt = spec["prompt"] + "\n\nContext:\n" + spec["context"]
     for update in spec.get("updates", []):
         prompt += f"\n\nUpdate: {update['message']}\nEvidence: {', '.join(update['evidence_links'])}"
-    common = agents_root / "COMMON-AGENTS.md"
-    if common.is_file():
-        prompt += "\n\nCurrent common policy:\n" + common.read_text()
+    for policy, label in ((agents_root / "COMMON-AGENTS.md", "Current common policy"),
+                          (agents_root / "policies" / "repository-delivery.md", "Repository delivery policy")):
+        if policy.is_file():
+            prompt += f"\n\n{label}:\n" + policy.read_text()
     job = Job(workspace=Path(spec["workspace"]), vault=vault, prompt=prompt,
               mode="run", provider="codex", codex_model=spec["model"], effort=spec["effort"],
               timeout=spec["timeout"], fallback=False, run_dir=Path(spec["run_dir"]))
