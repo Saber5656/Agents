@@ -15,27 +15,28 @@
 
 ```bash
 # アカウント一覧
-osascript ~/dev/skills/secretary-ai/scripts/mail-list-accounts.applescript
+osascript "$SKILLS_ROOT/secretary-ai/scripts/mail-list-accounts.applescript"
 
 # 未読を最大10件
-osascript ~/dev/skills/secretary-ai/scripts/mail-list-unread.applescript "" 10
+osascript "$SKILLS_ROOT/secretary-ai/scripts/mail-list-unread.applescript" "" 10
 
 # 指定アカウントだけ
-osascript ~/dev/skills/secretary-ai/scripts/mail-list-unread.applescript "<MAIL_ACCOUNT_NAME>" 20
+osascript "$SKILLS_ROOT/secretary-ai/scripts/mail-list-unread.applescript" "<MAIL_ACCOUNT_NAME>" 20
 
 # 本文取得
-osascript ~/dev/skills/secretary-ai/scripts/mail-get-message.applescript "<message-id@example.com>"
+osascript "$SKILLS_ROOT/secretary-ai/scripts/mail-get-message.applescript" "<message-id@example.com>"
 
 # 返信ドラフト作成
 echo "返信本文" > /tmp/secretary-reply.txt
-osascript ~/dev/skills/secretary-ai/scripts/mail-create-draft.applescript "<message-id@example.com>" /tmp/secretary-reply.txt
+osascript "$SKILLS_ROOT/secretary-ai/scripts/mail-create-draft.applescript" "<message-id@example.com>" /tmp/secretary-reply.txt
 rm /tmp/secretary-reply.txt
 ```
 
 ## セキュリティ・安全設計
 
 - **送信しない**: `mail-create-draft.applescript` は `save` のみ。`send` 命令は含まない
-- **権限**: 初回実行時に macOS が「Claude Code → Mail.app の操作許可」を求める。許可は `システム設定 → プライバシーとセキュリティ → オートメーション` で管理
+- **権限**: 初回実行時に macOS が現在の Codex host → Mail.app の操作許可を求める。許可は `システム設定 → プライバシーとセキュリティ → オートメーション` で管理
+- **宛先**: `mail-create-draft.applescript` は元メッセージの送信者への返信だけを作る。reply-all や追加宛先は別途明示確認が必要
 - **MCP不使用**: 第三者 MCP のサプライチェーン経由でのコード混入を避けるため、AppleScript は自前のみ
 - **本文は STDIN ではなくファイル経由**: 引数長制限と特殊文字エスケープ問題を避ける。一時ファイルは秘書AI ワークフロー側で `mktemp` → 使用後 `rm` する
 - **TSV 区切り**: 一覧出力は TAB 区切り。件名・送信者に含まれるタブ・改行は `sanitize()` で空白に置換

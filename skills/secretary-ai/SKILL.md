@@ -1,7 +1,7 @@
 ---
 name: secretary-ai
 description: >
-  パーソナル秘書AI。Google Calendar / Gmail（Claude Connectors 経由）と
+  パーソナル秘書AI。Google Calendar / Gmail（Codex Connectors 経由）と
   Apple Mail（AppleScript 経由）と Obsidian Vault を連携し、
   スケジュール管理・メール要約と返信ドラフト・個人ToDo管理を行う。
   ユーザーが「秘書」「秘書AI」「予定」「今日の予定」
@@ -10,8 +10,9 @@ description: >
   「ToDo追加」「ブリーフィング」「朝のまとめ」「/secretary」「/briefing」
   のいずれかに言及した場合は、明示的に「secretary-ai」と言われていなくても
   このスキルを必ず使うこと。
-  予定の追加・削除、メール送信のような外部に影響する操作は必ず
-  ユーザーに確認を取ってから実行する。Gmail / Apple Mail いずれも
+  予定の追加・削除、下書き保存のような外部に影響する操作は、現在の task
+  context に明示された authorization を再利用する。authorization が無い場合、
+  または対象が曖昧な場合だけユーザーに確認する。Gmail / Apple Mail いずれも
   下書き保存までに留め、実送信はしない。
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep
@@ -45,7 +46,7 @@ argument-hint: "[briefing|今日の予定|メール確認|タスク追加 ...]"
 |---|---|
 | コード修正、実装、レビュー、テスト | 元メール/予定の要約、期待成果物、期限、承認要否を含む task handoff draft を作る |
 | 調査、記事化、要約を超える成果物作成 | task handoff draft を作り、実行判断は呼び出し元または task context に委譲する |
-| 方針変更、権限変更、Vault ポリシー更新、スキル修正 | 人間承認が必要な変更として task handoff draft を作る |
+| 方針変更、権限変更、Vault ポリシー更新、スキル修正 | 既存依頼の目的・権限と照合できる task handoff draft を作り、実装担当へ返す |
 | メールや予定から生じた新しい作業依頼 | 要件、期限、元メール/予定の要約を保持した task handoff draft にする |
 
 task handoff draft には、元メール/予定の要約、期待成果物、期限、承認要否、添付やリンクの有無を含める。
@@ -57,7 +58,7 @@ secretary-ai は該当タスクの実作業を開始しない。
 
 ## 前提条件
 
-- Google MCP が Claude.ai Connectors 経由で接続済み（Calendar / Gmail）
+- Google MCP が現在の Codex Connectors 経由で接続済み（Calendar / Gmail）
 - 利用するスコープ：
   - Calendar: `calendar.readonly`, `calendar.events`
   - Gmail: `gmail.readonly`, `gmail.compose`, `gmail.modify`
@@ -77,14 +78,17 @@ secretary-ai は該当タスクの実作業を開始しない。
 トリガー例：「今日の予定教えて」「今週空いてる？」「金曜15時に会議追加」「来週月曜の朝の予定削除」
 
 **現在日付の認識ルール：**
-システムの `currentDate` は古くなっている場合がある。カレンダー操作を行う際は、Calendar MCP の最初のレスポンスに含まれる `created` / `updated` タイムスタンプ（UTC）から現在日時を逆算して「今日の日付」を確定すること。システム提供の日付より MCP タイムスタンプを優先する。
+日時ツールまたはホスト時計から現在時刻を取得し、利用者の指定タイムゾーンで対象日を確定する。event の `created` / `updated` は過去の作成・更新時刻なので現在日付の根拠にしない。タイムゾーンが未指定なら既存の利用者設定を用い、解決できない場合だけ確認する。
 
 手順：
-1. Calendar MCP で対象期間のイベントを取得（デフォルトは「今日」、明示があればその範囲）。最初のレスポンスの `created` タイムスタンプを JST に変換して今日の日付を確定する
+1. Calendar MCP で対象期間のイベントを取得（デフォルトは「今日」、明示があればその範囲）。取得前に現在時刻とタイムゾーンから検索期間を確定する
 2. 表形式で表示：時間 / タイトル / 参加者 / 場所 / 会議URL
 3. 追加・変更・削除のリクエスト時：
-   - **必ずユーザー確認を取ってから実行**（破壊的操作）
-   - 確認時に diff 形式で「変更前 → 変更後」を提示
+   - task context の既存 authorization を再利用し、authorization が無い場合だけ確認する
+   - 対象 calendar、event ID、変更 diff が曖昧な場合は実行せず確認する
+   - 対象 calendar と event ID を固定し、完了後に同じ event を読み戻して変更内容を照合する
+   - calendar ID と request token が空白なら adapter 呼出し前に拒否する
+   - 応答を失った場合は request token と元の event ID（update時）で検索して読み戻し、結果不明の create を再送しない
 4. 取得・操作の結果は `13_Secretary/briefings/YYYY-MM-DD.md` の「予定」セクションに追記
 
 出力テンプレ：
@@ -110,6 +114,7 @@ secretary-ai は該当タスクの実作業を開始しない。
 4. 返信指示時：
    - `references/mail-template.md` のトーンで起草
    - `gmail.drafts.create` で **下書き保存**（送信はしない）
+   - 返された draft ID で対象 draft を読み戻し、宛先、件名、本文、元 message ID が一致しなければ `pending_reconciliation` とする
    - Obsidian にもログを `13_Secretary/drafts/YYYY-MM-DD-<件名スラッグ>.md` として残す
 5. メールサマリは `13_Secretary/mail-summaries/YYYY-MM-DD.md` に保存
 
@@ -121,17 +126,18 @@ iCloud / その他プロバイダ。`scripts/` の AppleScript を `osascript` �
 1. アカウント絞り込みが必要なら `scripts/mail-list-accounts.applescript` で確認
 2. 未読一覧取得：
    ```bash
-   osascript ~/dev/skills/secretary-ai/scripts/mail-list-unread.applescript "<アカウント名 or 空文字>" 20
+   osascript "$SKILLS_ROOT/secretary-ai/scripts/mail-list-unread.applescript" "<アカウント名 or 空文字>" 20
    ```
    出力は TSV（date / sender / subject / account / mailbox / messageId）
 3. 必要なメールの本文取得：
    ```bash
-   osascript ~/dev/skills/secretary-ai/scripts/mail-get-message.applescript "<messageId>"
+   osascript "$SKILLS_ROOT/secretary-ai/scripts/mail-get-message.applescript" "<messageId>"
    ```
 4. 優先度付け＋要約は Gmail と同じロジック
 5. 返信指示時：
    - 本文を `mktemp` で一時ファイルに書き出し
    - `osascript scripts/mail-create-draft.applescript "<messageId>" "<tmpfile>"` でドラフト作成
+   - provider が返した実 draft ID を使って宛先、件名、本文、元 message ID、送信禁止状態を読み戻し、欠落や不一致は `pending_reconciliation` とする
    - 一時ファイルは即削除
    - Mail.app に下書きが現れる。送信はユーザーが手動で行う
    - Obsidian ログは Gmail と同じく `13_Secretary/drafts/` に保存
@@ -145,8 +151,15 @@ iCloud / その他プロバイダ。`scripts/` の AppleScript を `osascript` �
 
 **重要なルール（Gmail / Apple Mail 共通）**：
 - 送信系 API（`gmail.send`、Mail の `send` 命令）は絶対に呼ばない
-- 返信ドラフトを生成したら、対象アプリ上でユーザーが内容を確認・送信することを案内する
+- 宛先名が複数の address に一致する場合は候補を増やさず、必要な確認を一つだけ返す
+- connector が利用できない場合は provider を切り替えず、`pending_reconciliation` として保持する
+- 明示 authorization 済みの返信ドラフトは再確認を要求せず、対象アプリ上でユーザーが内容を確認・送信することを案内する。authorization が無い、または宛先が曖昧な場合だけ確認する
 - AppleScript の引数にユーザー入力をそのまま埋め込まない（インジェクション対策）。本文は必ずファイル経由で渡す
+- Apple Mail の標準ドラフトは元メッセージの送信者だけを宛先にし、reply-all を既定にしない
+
+`scripts/secretary_workflow.py` はこの境界を provider-neutral な契約として実装する。schedule の
+timezone 変換、宛先の一意性、明示確認、calendar の exact readback、lost response の照合を
+disposable adapter で検証できる。connector 固有の成功文字列だけでは完了扱いにしない。
 
 ### 3. 個人 ToDo 管理（Obsidian Vault）
 
@@ -206,14 +219,14 @@ tags: [secretary]
 
 ## 安全と確認のルール
 
-破壊的・外部影響のある操作は **必ず事前にユーザー確認を取る**：
+破壊的・外部影響のある操作は、明示 authorization が無い場合、または対象が曖昧な場合に確認する。既存の明示 authorization は再利用する：
 
 | 操作 | 確認要否 | 備考 |
 |------|---------|------|
 | Calendar 予定の参照 | 不要 | 読み取りのみ |
-| Calendar 予定の追加・変更・削除 | **必要** | diff 提示 → yes で実行 |
+| Calendar 予定の追加・変更・削除 | authorization 不在/対象曖昧時に必要 | diff と対象を提示して確認 |
 | Gmail / Apple Mail 参照 | 不要 | 読み取りのみ |
-| Gmail / Apple Mail 下書き作成 | **必要** | 内容を提示 → yes で保存 |
+| Gmail / Apple Mail 下書き作成 | authorization 不在/宛先曖昧時に必要 | 内容と宛先を提示して確認 |
 | メール送信（Gmail / Mail.app） | **やらない** | 下書き保存まで |
 | AppleScript の初回許可 | **必要** | macOS のオートメーション許可ダイアログ |
 | Obsidian Tasks 追加 | 不要 | 取り消しが容易 |
@@ -282,7 +295,7 @@ Gmail に下書き保存していい？（yes で保存・ユーザーが内容�
 **Works with sandboxing:** ⚠️ Partial
 
 - **Filesystem**: Vault 内（読み書き）と Skill references（読み取り）
-- **Network**: Google MCP 経由（Claude Connectors 側で処理）
+- **Network**: Google MCP 経由（Codex Connectors 側で処理）
 - **Configuration**: Google MCP の Connectors 接続が前提
 
 ## Best Practices

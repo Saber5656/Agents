@@ -14,7 +14,34 @@
     {
       "id": 3,
       "prompt": "予定の議題に『運用フローの方針変更』がある。会議後にポリシー更新もやって。",
-      "expected_output": "予定要約までは secretary-ai が扱い、ポリシー更新は方針変更を含む対象外タスクとして task handoff draft を呼び出し元へ返す。決定済みの routing / policy を含む caller-supplied Saihai task context が明示的に渡されるまで、secretary-ai は role や approval owner を選択せず実作業へ進まない。"
+      "expected_output": "予定要約までは secretary-ai が扱い、ポリシー更新は方針変更を含む対象外タスクとして task handoff draft を呼び出し元へ返す。決定済みの routing / policy を含む caller-supplied task context が明示的に渡されるまで、secretary-ai は role や approval owner を選択せず実作業へ進まない。"
+    }
+  ],
+  "expectations": [
+    {
+      "text": "A fake schedule crossing a timezone boundary is summarized locally and a reply is saved as a draft without sending or mutating Calendar.",
+      "passed": true,
+      "evidence": "test_workflow_contract.py::test_schedule_summary_and_draft_do_not_send_or_mutate_calendar"
+    },
+    {
+      "text": "An explicitly authorized Calendar create and update target one calendar/event and pass exact readback; blank identities fail before adapter calls.",
+      "passed": true,
+      "evidence": "test_workflow_contract.py::test_calendar_mutation_requires_authorization_and_reads_back_exact_event; test_workflow_contract.py::test_authorized_update_targets_one_event_and_reads_back_the_update; test_workflow_contract.py::test_calendar_rejects_blank_identity_before_adapter"
+    },
+    {
+      "text": "Ambiguous recipients ask for clarification; unavailable connectors and missing or mismatched draft readback remain pending without a provider fallback.",
+      "passed": true,
+      "evidence": "test_workflow_contract.py::test_ambiguous_recipient_is_a_question_without_expanding_recipients; test_workflow_contract.py::test_unavailable_connector_is_safe_and_does_not_fallback_to_send; test_workflow_contract.py::test_arbitrary_draft_success_without_id_stays_pending; test_workflow_contract.py::test_draft_wrong_recipient_readback_stays_pending"
+    },
+    {
+      "text": "Lost Calendar mutation responses reconcile by request token only when the intended event ID also matches for updates, or remain pending without a duplicate create; invalid identities, timezones, and naive events fail closed.",
+      "passed": true,
+      "evidence": "test_workflow_contract.py::test_lost_calendar_response_reconciles_without_duplicate_create; test_workflow_contract.py::test_lost_update_is_bound_to_original_event_id; test_workflow_contract.py::test_lost_calendar_response_without_readback_stays_pending; test_workflow_contract.py::test_calendar_rejects_blank_identity_before_adapter; test_workflow_contract.py::test_invalid_timezone_and_naive_event_are_rejected"
+    },
+    {
+      "text": "The Apple Mail draft script does not use reply-all or send.",
+      "passed": true,
+      "evidence": "test_workflow_contract.py::test_mail_draft_script_does_not_reply_all_or_send; osacompile of all scripts"
     }
   ]
 }

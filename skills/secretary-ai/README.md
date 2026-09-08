@@ -30,8 +30,8 @@
 
 ## 前提
 
-- Claude.ai Connectors で Google（Calendar / Gmail）が接続済み
+- Codex Connectors で Google（Calendar / Gmail）が接続済み
 - Apple Mail (Mail.app) が macOS にセットアップ済み（初回 osascript 実行時に自動化許可が必要）
-- Obsidian Vault: `${SECRETARY_AI_VAULT_ROOT:-<PERSONAL_VAULT_ROOT>}`
+- Obsidian Vault: `${USER_VAULT_ROOT}`
 
 See [SKILL.md](SKILL.md) for full documentation.

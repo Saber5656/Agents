@@ -56,7 +56,9 @@ on run argv
 		end if
 
 		-- reply は新しい outgoing message を作成。visible:true でウィンドウを開く
-		set replyMsg to reply found opening window yes with reply to all
+		-- Reply only to the selected message's sender. Adding recipients requires
+		-- a separate, explicitly confirmed draft flow.
+		set replyMsg to reply found opening window yes
 		delay 0.5
 		tell replyMsg
 			set content to bodyText & linefeed & (content as string)
