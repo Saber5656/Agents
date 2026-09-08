@@ -132,10 +132,14 @@ def _publication_evidence(task, completion):
                 or not re.fullmatch(r"[0-9a-fA-F]{40}", commit)):
             continue
         main = readback.get("main")
-        if main == commit:
+        main_is_sha = isinstance(main, str) and re.fullmatch(r"[0-9a-fA-F]{40}", main)
+        ancestor_proof = (readback.get("commit_is_ancestor") is True
+                          and readback.get("merge_base") == commit)
+        if main == commit or (main_is_sha and ancestor_proof):
+            # The service wrapper's ancestor readback includes canonical main;
+            # it proves synchronization even when main advanced past commit.
             state = "main_synced"
-        elif (readback.get("commit_is_ancestor") is True
-              and readback.get("merge_base") == commit):
+        elif main is None and readback.get("merged") is True:
             state = "merged"
         else:
             continue
@@ -159,7 +163,8 @@ def _publication_evidence(task, completion):
             receipt = json.loads(path.read_text())
         except (OSError, UnicodeError, TypeError, ValueError):
             continue
-        if not isinstance(receipt, dict) or not repository:
+        if (not isinstance(receipt, dict) or not repository
+                or receipt.get("repository") != repository):
             continue
         published = receipt.get("published_sha")
         main_sha = receipt.get("main_sha")
@@ -205,11 +210,17 @@ def _lifecycle(task, acceptance, completion, publication_state="unknown"):
     return raw or "unknown"
 
 
-def _next_action(lifecycle, issueization):
+def _issueization_next_action(issueization):
     if issueization["state"] == "reconcile_needed":
         return "reconcile the remote Issue outcome before retrying issueization"
     if issueization["state"] == "unknown" and issueization.get("raw_state") == "claimed":
         return "inspect the claimed Issue outcome and expiry before resuming issueization"
+    if issueization["state"] in {"unissued", "retry"}:
+        return "issueization batch may claim this task"
+    return None
+
+
+def _next_action(lifecycle, issueization):
     if lifecycle == "running":
         return "wait for the worker update or inspect the persisted attempt"
     if lifecycle == "auth_failed":
@@ -224,10 +235,8 @@ def _next_action(lifecycle, issueization):
         return "record verified acceptance and completion evidence"
     if lifecycle == "planned":
         return "start or resume the planned task before issueization"
-    if issueization["state"] in {"unissued", "retry"}:
-        return "issueization batch may claim this task"
     if lifecycle in {"complete", "published", "merged", "usable"}:
-        return None
+        return _issueization_next_action(issueization)
     return "inspect the task evidence and determine the next recovery action"
 
 
@@ -303,7 +312,9 @@ def _task_views(connection):
             "acceptance": acceptance_records, "completion_evidence": completion_records,
             "publication_evidence": publication,
             "attempts": task.get("issueization_attempts", 0),
-            "last_error": task.get("issueization_error"), "next_action": _next_action(lifecycle, issueization),
+            "last_error": task.get("issueization_error"),
+            "next_action": _next_action(lifecycle, issueization),
+            "issueization_next_action": _issueization_next_action(issueization),
             "version": task.get("version"), "updated_at": task.get("updated_at"),
         }
         views.append(view)
@@ -403,15 +414,15 @@ def _merge_service_progress(tasks, service):
         latest = jobs[-1]
         state = (latest.get("state") or "").lower()
         error = (latest.get("last_error") or "").lower()
-        if task["lifecycle"] == "planned" and state in {"running", "reconciling"}:
-            task["lifecycle"] = "running"
-            task["stages"]["execution"] = state
-            task["next_action"] = _next_action("running", task["issueization"])
-        elif task["lifecycle"] == "planned" and any(
-                token in error for token in ("auth", "login", "unauthorized", "not logged")):
+        auth_failure = any(token in error for token in ("auth", "login", "unauthorized", "not logged"))
+        if task["lifecycle"] in {"planned", "running"} and auth_failure:
             task["lifecycle"] = "auth_failed"
             task["stages"]["execution"] = state or "auth_error"
             task["next_action"] = _next_action("auth_failed", task["issueization"])
+        elif task["lifecycle"] == "planned" and state in {"running", "reconciling"}:
+            task["lifecycle"] = "running"
+            task["stages"]["execution"] = state
+            task["next_action"] = _next_action("running", task["issueization"])
         elif task["lifecycle"] == "planned" and state in {"failed", "needs_verification"}:
             task["lifecycle"] = "quality_failed" if state == "failed" else "awaiting_verification"
             task["stages"]["execution"] = state

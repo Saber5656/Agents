@@ -1,5 +1,4 @@
 import json
-import ast
 import os
 from pathlib import Path
 import sqlite3
@@ -8,6 +7,7 @@ import unittest
 from unittest import mock
 
 from harness.status import build_status
+from harness.service import SCHEMA
 from harness.tasks import TaskStore
 
 
@@ -119,7 +119,7 @@ class StatusTests(unittest.TestCase):
         for purpose in ("malformed claim", "naive claim"):
             self.assertEqual(views[purpose]["issueization"]["state"], "unknown")
             self.assertEqual(views[purpose]["issueization"]["timestamp_state"], "unknown")
-            self.assertIn("inspect", views[purpose]["next_action"])
+            self.assertIn("inspect", views[purpose]["issueization_next_action"])
 
     def test_explicit_publication_receipt_drives_publication_stage(self):
         receipt = self.root / "vault" / "publication-receipt.json"
@@ -154,13 +154,18 @@ class StatusTests(unittest.TestCase):
         commit = "b" * 40
         merged_receipt.write_text(json.dumps({
             "publication_readback": {
-                "repository": "org/repo", "commit": commit, "main": "c" * 40,
-                "commit_is_ancestor": True, "merge_base": commit,
+                "repository": "org/repo", "commit": commit, "merged": True,
             },
         }))
         pushed_receipt = self.root / "vault" / "pushed-receipt.json"
         pushed_receipt.write_text(json.dumps({
-            "stage": "pushed", "status": "published", "published_sha": "d" * 40,
+            "repository": "org/repo", "stage": "pushed", "status": "published",
+            "published_sha": "d" * 40,
+        }))
+        foreign_receipt = self.root / "vault" / "foreign-pushed-receipt.json"
+        foreign_receipt.write_text(json.dumps({
+            "repository": "other/repo", "stage": "pushed", "status": "published",
+            "published_sha": "e" * 40,
         }))
         with self.store() as store:
             merged = store.create_task(
@@ -169,26 +174,49 @@ class StatusTests(unittest.TestCase):
             pushed = store.create_task(
                 purpose="pushed with receipt", repository="org/repo", execution_status="completed",
                 acceptance_evidence=["acceptance"], completion_evidence=[str(pushed_receipt)])
-            for task in (merged, pushed):
+            foreign = store.create_task(
+                purpose="foreign receipt", repository="org/repo", execution_status="completed",
+                acceptance_evidence=["acceptance"], completion_evidence=[str(foreign_receipt)])
+            for task in (merged, pushed, foreign):
                 store.add_acceptance_evidence(task["id"], "acceptance", verified=True)
 
         views = {task["purpose"]: task for task in build_status(
             db_path=self.db, service_db_path=None)["tasks"]}
         self.assertEqual(views["merged with receipt"]["stages"]["publication"], "merged")
         self.assertEqual(views["pushed with receipt"]["stages"]["publication"], "published")
+        self.assertEqual(views["foreign receipt"]["stages"]["publication"], "unknown")
+
+    def test_expired_issueization_does_not_hide_running_work(self):
+        with self.store() as store:
+            task = store.create_task(purpose="running with expired claim", execution_status="running")
+            claim = store.claim_issueization(task["id"], "batch", lease_seconds=-1)
+            # Keep the claim expired and otherwise unrelated to the worker's state.
+            self.assertTrue(claim["claim_expires_at"])
+        view = build_status(db_path=self.db, service_db_path=None)["tasks"][0]
+        self.assertIn("wait for the worker", view["next_action"])
+        self.assertIn("reconcile", view["issueization_next_action"])
+
+    def test_service_auth_failure_overrides_running_task_state(self):
+        with self.store() as store:
+            task = store.create_task(purpose="runtime auth failure", execution_status="running")
+        service_db = self.root / ".local" / "service-auth.sqlite3"
+        service_db.parent.mkdir()
+        with sqlite3.connect(service_db) as conn:
+            conn.executescript(SCHEMA)
+            conn.execute("INSERT INTO service_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         ("job-auth", task["id"], str(self.root / "work"), str(self.root / "run"),
+                          "default", "prompt", "context", "gpt-5.6-luna", "low", 10, 1, 60,
+                          "failed", 1, None, "codex login is not authenticated", "2026-01-01", "2026-01-01"))
+            conn.commit()
+        view = build_status(db_path=self.db, service_db_path=service_db)["tasks"][0]
+        self.assertEqual(view["lifecycle"], "auth_failed")
+        self.assertIn("restore the subscription", view["next_action"])
 
     def test_reads_current_service_schema_read_only(self):
-        service_source = Path(__file__).parents[2] / "agents-service" / "harness" / "service.py"
-        tree = ast.parse(service_source.read_text())
-        schema_node = next(node.value for node in tree.body
-                           if isinstance(node, ast.Assign)
-                           and any(isinstance(target, ast.Name) and target.id == "SCHEMA"
-                                   for target in node.targets))
-        schema = ast.literal_eval(schema_node)
         service_db = self.root / ".local" / "service-current.sqlite3"
         service_db.parent.mkdir()
         with sqlite3.connect(service_db) as conn:
-            conn.executescript(schema)
+            conn.executescript(SCHEMA)
             conn.execute("INSERT INTO service_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          ("job-current", "task-x", str(self.root / "work"), str(self.root / "run"),
                           "default", "prompt", "context", "gpt-5.6-luna", "low", 10, 1, 60,
