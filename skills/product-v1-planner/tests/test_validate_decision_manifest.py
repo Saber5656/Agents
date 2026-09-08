@@ -7,6 +7,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
+
+pytestmark = pytest.mark.skip(
+    reason=(
+        "Retired Decision Manifest compatibility fixtures; current planner apply uses "
+        "an explicit caller request and current-contract tests cover that successor."
+    )
+)
+
 MODULE_PATH = Path(__file__).parents[1] / "scripts" / "validate_decision_manifest.py"
 SPEC = importlib.util.spec_from_file_location("manifest_validator", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)

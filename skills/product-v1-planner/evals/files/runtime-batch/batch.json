@@ -1,0 +1,47 @@
+{
+  "batch_id": "planning-writing-runtime-20260908",
+  "source_revision": "b0829fd",
+  "output_root": "<disposable-output-root>",
+  "cases": [
+    {
+      "id": "three-feature-decomposition",
+      "skill": "product-v1-planner",
+      "mode": "proposal",
+      "input": "three-feature-input.json",
+      "expected_artifacts": ["design.md", "issue-plan.md", "coverage.json", "decisions.md", "validation.md"],
+      "must_record": ["executor", "model", "source_revision", "evidence_binding"]
+    },
+    {
+      "id": "requirement-correction",
+      "skill": "product-v1-planner",
+      "mode": "audit",
+      "input": "requirement-correction-input.json",
+      "expected_artifacts": ["audit.md", "decision-ledger.md", "coverage.json"],
+      "must_record": ["old_statement", "rationale", "new_scope_entry", "owner", "status"]
+    },
+    {
+      "id": "ordinary-goal-nonactivation",
+      "skill": "goal-setter",
+      "mode": "ordinary-prompt",
+      "input": "ordinary-goal-input.md",
+      "expected_artifacts": ["goal-result.md"],
+      "must_record": ["goal_not_activated", "reason", "no_tool_or_write_action"]
+    },
+    {
+      "id": "bounded-critique",
+      "skill": "grill-me",
+      "mode": "critique",
+      "input": "critique-input.md",
+      "expected_artifacts": ["critique.md"],
+      "must_record": ["evidence", "impact", "option", "open_material_question", "no_mutation"]
+    },
+    {
+      "id": "explicit-article-rewrite",
+      "skill": "zenn-article-partner",
+      "mode": "rewrite",
+      "input": "article-rewrite-input.md",
+      "expected_artifacts": ["revised-draft.md", "fact-check-notes.md"],
+      "must_record": ["executor", "model", "source_material", "factual_todos", "not_published"]
+    }
+  ]
+}

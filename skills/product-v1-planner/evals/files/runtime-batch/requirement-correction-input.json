@@ -1,0 +1,21 @@
+{
+  "mode": "audit",
+  "repository": {
+    "root": "<runtime-batch-root>/fixture-repository",
+    "owner_repo": "fixture/planning-writing",
+    "base_sha": "<fixture-commit-sha>",
+    "issue_snapshot": {
+      "observed_at": "2026-09-08T09:00:00+09:00",
+      "digest": "fixture-issues-v1"
+    }
+  },
+  "product_goal": "Produce a reviewed research brief from captured sources.",
+  "expected_correction": {
+    "old_statement": "Export is local-only and may omit source provenance.",
+    "new_statement": "Export is local-only and must retain source URL, capture time, and correction history.",
+    "rationale": "A reviewer must be able to reconstruct why a claim changed.",
+    "owner": "caller",
+    "status": "accepted"
+  },
+  "fixture_files": ["DESIGN.md", "issues.json"]
+}
