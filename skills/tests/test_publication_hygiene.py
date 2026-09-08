@@ -97,6 +97,14 @@ class PublicationHygieneTest(unittest.TestCase):
                 self.assert_ignored(path)
         self.assert_local_symlink_boundary("kanary")
 
+    def test_root_source_names_are_not_silently_ignored(self) -> None:
+        for path in {
+            "../config.local.yaml",
+            "../docs/feature.private.test.ts",
+        }:
+            with self.subTest(path=path):
+                self.assert_publishable(path)
+
     @unittest.skip(RETIRED_FLAT_ROOT_CONTRACT)
     def test_local_setup_creates_parents_and_skill_links(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

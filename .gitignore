@@ -11,5 +11,3 @@ __pycache__/
 # Private task database, service state and isolated test environments
 .local/
 .venv/
-*.local.*
-*.private.*
