@@ -43,21 +43,25 @@ only after all task acceptance records have been explicitly verified.
 
 ```sh
 python3 -m harness.service run-once --json
-python3 -m harness.service verify JOB_ID --evidence 'vault://runs/verified.json; merge; main-sync'
+python3 -m harness.service verify JOB_ID --evidence /path/to/acceptance-review.json
 python3 -m harness.service run --poll 30
 ```
 
 The service only runs tasks whose dependencies are complete and verified with
 acceptance and completion evidence that includes a `main-sync` or `merged`
-stage marker. A worker success enters a separate read-only verification stage;
+stage marker, or a valid structured service acceptance receipt. A worker
+success enters a separate read-only verification stage;
 the task is complete only after every acceptance record is verified and the
 verification evidence proves merge and main synchronization. It never creates
 GitHub Issues. Pending UI operations remain in task context for a later
 supported UI reconciliation.
 
-The explicit `verify` evidence must identify both the merge and main
-synchronization stages; a provider success string or acceptance text alone is
-insufficient.
+The explicit `verify` evidence file must contain the structured acceptance
+review, one verified observation for every exact criterion, and a publication
+object. The service reads back the actual commit and synchronized main before
+completion; a provider success string or acceptance text alone is
+insufficient. The resulting private acceptance receipt is valid dependency
+completion evidence when the dependent task is later scheduled.
 
 ## Restart, locks, and idle work
 
@@ -84,7 +88,9 @@ The idle loop waits through a stop event rather than polling in a busy loop.
 The scheduler database retains attempts, updates, errors, verification and
 reconciliation states, and the next retry time across process restarts. Database
 busy timeout follows the configured `timeout`; an explicitly supplied database
-path whose file or immediate parent is a symlink is rejected.
+path whose file or immediate parent is a symlink is rejected, and all database
+ancestors are checked for trusted ownership and writable modes before SQLite
+opens the file.
 
 ## Authentication boundary
 
@@ -107,10 +113,11 @@ Agents root as working directory, `RunAtLoad`, and `KeepAlive`. It includes
 only a safe explicit `PATH` containing the resolved `codex` directory and
 system directories, so launchd does not depend on an interactive shell.
 Prompts, contexts, tokens, and API keys are never written into the plist. On
-macOS, `install` preserves a differing existing plist in a private timestamped
-backup and is idempotent; `start` checks status first. An operator can
-explicitly call these methods after review; this implementation does not
-activate a real LaunchAgent by itself.
+macOS, `install` rejects symlink targets, preserves the exact bytes of a
+differing existing plist in a private timestamped backup, and uses a synced
+atomic replacement with restoration on failure; it is idempotent. `start`
+checks status first. An operator can explicitly call these methods after
+review; this implementation does not activate a real LaunchAgent by itself.
 
 App-quit and host-reboot continuation still require a live acceptance run on
 the supported host. The subprocess and restart fixtures here prove durable
