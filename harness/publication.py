@@ -173,8 +173,10 @@ def _validate_review(review: Any) -> None:
     if not isinstance(review, dict) or review.get("status") not in {"complete", "completed", "approved"} or not review.get("reviewed"):
         raise PublicationError("review is not finalized")
     decisions = review.get("decisions")
-    if not isinstance(decisions, list) or not decisions:
-        raise PublicationError("review has no decisions")
+    if not isinstance(decisions, list):
+        raise PublicationError("review decisions are invalid")
+    if not decisions and review.get("findings") != []:
+        raise PublicationError("empty review decisions require an explicit empty findings list")
     if not isinstance(review.get("reviewed_diff_digest"), str) or not re.fullmatch(r"[0-9a-f]{64}", review["reviewed_diff_digest"]):
         raise PublicationError("review is not bound to a selected diff")
     if not isinstance(review.get("reviewed_head"), str) or not _OID.fullmatch(review["reviewed_head"]):

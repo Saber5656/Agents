@@ -103,6 +103,19 @@ def test_host_binds_paths_receipt_and_ignores_worker_ci_metadata(publication_job
     assert "ci_observer" not in spec
 
 
+def test_host_accepts_bound_zero_finding_review_before_publication(publication_job):
+    service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
+    proposal = _proposal(workspace, canonical, "git@github.com:Saber5656/Agents.git", base, vault)
+    review = _review(workspace, base, proposal["files"])
+    review.update({"findings": [], "decisions": []})
+    with mock.patch("harness.publication.publish_scoped",
+                    return_value={"status": "published", "published_sha": "a" * 40}) as publish:
+        result = service._publish_proposal(job, task, proposal, review)
+    assert result["commit"] == "a" * 40
+    assert publish.call_args.args[0]["review"]["findings"] == []
+    assert publish.call_args.args[0]["review"]["decisions"] == []
+
+
 def test_host_rejects_worker_selected_checkout(publication_job, tmp_path):
     service, tasks, task, job, canonical, workspace, remote, base, vault = publication_job
     proposal = _proposal(workspace, canonical, "git@github.com:Saber5656/Agents.git", base, vault)

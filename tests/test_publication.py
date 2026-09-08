@@ -151,6 +151,35 @@ def test_incomplete_review_blocks_before_git_mutation(fixture):
     assert git(canonical, "rev-parse", "HEAD") == base
 
 
+def test_zero_finding_review_can_publish_when_review_is_bound(fixture):
+    canonical, worktree, remote, vault, base = fixture
+    (worktree / "src" / "selected.txt").write_text("after\n")
+    spec = make_spec(canonical, worktree, remote, vault, base)
+    diff_digest = spec["diff_digest"]
+    spec["review"] = {
+        "status": "complete",
+        "reviewed": True,
+        "reviewed_diff_digest": diff_digest,
+        "reviewed_head": git(worktree, "rev-parse", "HEAD"),
+        "findings_complete": True,
+        "findings": [],
+        "decisions": [],
+    }
+    result = publish_scoped(spec)
+    assert result["status"] == "published"
+    assert git(canonical, "rev-parse", "HEAD") == result["published_sha"]
+
+
+def test_empty_decisions_without_explicit_zero_findings_remain_blocked(fixture):
+    canonical, worktree, remote, vault, base = fixture
+    (worktree / "src" / "selected.txt").write_text("after\n")
+    spec = make_spec(canonical, worktree, remote, vault, base)
+    spec["review"].update({"decisions": [], "findings_complete": True})
+    with pytest.raises(PublicationError, match="empty review decisions"):
+        publish_scoped(spec)
+    assert git(canonical, "rev-parse", "HEAD") == base
+
+
 def test_pending_ci_does_not_claim_published(fixture):
     canonical, worktree, remote, vault, base = fixture
     (worktree / "src" / "selected.txt").write_text("after\n")

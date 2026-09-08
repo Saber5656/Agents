@@ -960,6 +960,14 @@ class ServiceStore:
                 return {"status": "needs_verification", "job_id": job_id,
                         "verification": result or {},
                         "verification_error": "publication review is incomplete"}
+            # The verifier reports findings beside publication_review. Bind
+            # that observed list into the host publication review so an empty
+            # decisions list is accepted only for an explicit zero-finding
+            # review; hidden or unresolved findings cannot be erased by an
+            # empty decisions array.
+            review = dict(review)
+            if "findings" not in review and isinstance(result.get("findings"), list):
+                review["findings"] = result["findings"]
             if review.get("findings_complete") is not True:
                 self._reset_verification(job_id, "publication review findings remain incomplete")
                 return {"status": "needs_verification", "job_id": job_id,
@@ -1320,9 +1328,11 @@ def default_verifier(spec):
             "selected paths and immutable base); copy those values exactly. The host will recompute both and does "
             "not treat this schema as evidence. "
             "Do not edit files, run write commands, or infer completion from words alone. Return JSON only: "
-            "{acceptance:boolean, publication_readiness:boolean, findings:[objects], evidence:string, criteria:[{criterion:string, verified:boolean, evidence:string}], publication:{commit:string, mode:direct_main|pull_request, pr_number:integer}, publication_review:{status:complete, reviewed:true, reviewed_head:string, reviewed_diff_digest:string, findings_complete:true, decisions:[{finding_id:string, decision:adopt|reject|separate, reason:string, evidence:[string], applied:boolean, applied_evidence:[string]}]}, "
+            "{acceptance:boolean, publication_readiness:boolean, findings:[objects], evidence:string, criteria:[{criterion:string, verified:boolean, evidence:string}], publication:{commit:string, mode:direct_main|pull_request, pr_number:integer}, publication_review:{status:complete, reviewed:true, reviewed_head:string, reviewed_diff_digest:string, findings:[objects], findings_complete:true, decisions:[{finding_id:string, decision:adopt|reject|separate, reason:string, evidence:[string], applied:boolean, applied_evidence:[string]}]}, "
             "evidence_links:[strings]}. Copy every task acceptance criterion exactly and cite observed evidence for each. Saber5656/Agents uses direct main publication; other repositories require their PR delivery policy. "
-            "Use findings for any missing or incorrect implementation and explain the repair required."
+            "Use findings for any missing or incorrect implementation and explain the repair required. "
+            "When no findings exist, return findings:[] and publication_review.findings:[] with decisions:[]; "
+            "when findings exist, return exactly one explicit adopt/reject/separate decision for every finding."
         ),
     }, ensure_ascii=False)
     from .runner import execute, save
