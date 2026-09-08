@@ -28,5 +28,5 @@ or start the current service:
 - `[$orchestrator-start](...)`
 - `orchestrator-startして`
 
-See [SKILL.md](SKILL.md) for the current contract and
-[background-service.md](../../docs/background-service.md) for service operation.
+See [SKILL.md](SKILL.md) for the current contract. For service operation, read
+`$AGENTS_ROOT/docs/background-service.md` from the configured canonical root.
