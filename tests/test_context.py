@@ -170,6 +170,33 @@ def test_context_keeps_append_only_generations_and_stream_completion(tmp_path):
     assert "first" in contents and "second" in contents
 
 
+def test_repeated_source_events_are_not_written_twice(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    context = VaultContext(vault, "run-1")
+    first = [
+        {"source_event_id": "turn-1", "text": "initial objective"},
+        {"source_event_id": "turn-2", "text": "user correction"},
+    ]
+    context.save_records("conversation", first, complete=False, truncation="live")
+    context.save_records(
+        "conversation",
+        first + [{"source_event_id": "turn-3", "text": "recovered tool result"}],
+        complete=True,
+    )
+
+    reopened = VaultContext(vault, "run-1")
+    index = reopened.index()
+    paths = [reopened.run_dir / row["path"] for row in index["records"]]
+    raw = "".join(path.read_text() for path in paths)
+    assert raw.count('"source_event_id": "turn-1"') == 1
+    assert raw.count('"source_event_id": "turn-2"') == 1
+    assert raw.count('"source_event_id": "turn-3"') == 1
+    assert index["streams"]["conversation"]["complete"] is True
+    assert len(index["streams"]["conversation"]["records"]) == 2
+    assert len(index["streams"]["conversation"]["source_digests"]) == 3
+
+
 def test_serialized_tool_result_excludes_nested_reasoning(tmp_path):
     context = VaultContext(tmp_path, "run")
     payload = json.dumps({"events": [
@@ -265,3 +292,26 @@ def test_missing_or_unwritable_vault_never_uses_fallback(tmp_path):
             VaultContext(vault, "run")
     finally:
         vault.chmod(0o700)
+
+
+def test_source_event_revisions_preserve_new_visible_content(tmp_path):
+    context = VaultContext(tmp_path, "revisions")
+    first = {"id": "shared", "text": "partial result"}
+    revised = {"id": "shared", "text": "complete corrected result"}
+    context.save_records("tools", [first])
+    context.save_records("tools", [first, revised], complete=True)
+    context.save_records("tools", [revised], complete=True)
+    raw = "".join((context.run_dir / row["path"]).read_text()
+                  for row in context.index()["records"])
+    assert raw.count("partial result") == 1
+    assert raw.count("complete corrected result") == 1
+
+
+def test_filtered_event_does_not_suppress_later_visible_event(tmp_path):
+    context = VaultContext(tmp_path, "visibility")
+    context.save_records("conversation", [{"id": "message", "channel": "analysis", "text": "private"}])
+    context.save_records("conversation", [{"id": "message", "channel": "final", "text": "visible result"}])
+    raw = "".join((context.run_dir / row["path"]).read_text()
+                  for row in context.index()["records"])
+    assert "visible result" in raw
+    assert "private" not in raw

@@ -313,6 +313,28 @@ class VaultContext:
     def _index_path(self):
         return self.run_dir / "context-index.json"
 
+    @staticmethod
+    def _source_digest(record):
+        """Identify one visible, redacted revision of an externally sourced record."""
+        if not isinstance(record, dict):
+            return None
+        candidate = None
+        for key in ("source_event_id", "event_id", "id"):
+            if record.get(key) is not None:
+                candidate = (key, record[key])
+                break
+        if candidate is None and isinstance(record.get("payload"), dict):
+            payload = record["payload"]
+            if payload.get("id") is not None:
+                candidate = ("payload.id", payload["id"])
+        if candidate is None and record.get("ordinal") is not None:
+            candidate = ("ordinal", record["ordinal"])
+        if candidate is None:
+            return None
+        return hashlib.sha256(
+            json.dumps(["visible-revision-v2", candidate, record], ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
     def index(self):
         if not self._index_path().exists():
             return {"records": [], "complete": False, "truncation": "none"}
@@ -325,12 +347,6 @@ class VaultContext:
         if not isinstance(stream, str) or not stream or Path(stream).name != stream:
             raise ContextError("stream must be a simple name")
         env = dict(os.environ if env is None else env)
-        rendered = []
-        for record in records:
-            clean = self._visible(record)
-            if clean is not None:
-                rendered.append(redact(json.dumps(clean, ensure_ascii=False) + "\n", env))
-        text = "".join(rendered)
         with self._index_locked():
             old = self.index()
             streams = dict(old.get("streams", {}))
@@ -339,12 +355,33 @@ class VaultContext:
                 for item in old.get("records", []):
                     streams.setdefault(item.get("stream", "unknown"), {
                         "records": [], "complete": bool(old.get("complete")),
-                        "truncation": old.get("truncation", "none"),
+                        "truncation": old.get("truncation", "none"), "source_digests": [],
                     })["records"].append(item)
             generation = uuid.uuid4().hex
-            stream_records = list(streams.get(stream, {}).get("records", []))
+            stream_state = streams.get(stream, {})
+            stream_records = list(stream_state.get("records", []))
+            source_digests = list(stream_state.get("source_digests", []))
+            known_digests = set(source_digests)
+            fresh_records = []
+            fresh_digests = []
+            for record in records:
+                clean = self._visible(record)
+                if clean is None:
+                    continue
+                # Never fingerprint hidden content or raw secret values. A reused
+                # event ID can carry a corrected or completed visible revision.
+                clean = json.loads(redact(json.dumps(clean, ensure_ascii=False), env))
+                digest = self._source_digest(clean)
+                if digest is not None and digest in known_digests:
+                    continue
+                fresh_records.append(clean)
+                if digest is not None:
+                    known_digests.add(digest)
+                    fresh_digests.append(digest)
             records_index = list(old.get("records", []))
-            for offset in range(0, len(text) or 1, self.chunk_size):
+            text = "".join(json.dumps(record, ensure_ascii=False) + "\n"
+                           for record in fresh_records)
+            for offset in range(0, len(text), self.chunk_size):
                 part = text[offset:offset + self.chunk_size]
                 number = offset // self.chunk_size
                 path = self.run_dir / f"{stream}-{generation}-{number:04d}.jsonl"
@@ -356,7 +393,8 @@ class VaultContext:
                 stream_records.append(entry)
                 records_index.append(entry)
             streams[stream] = {"records": stream_records, "complete": bool(complete),
-                               "truncation": truncation or "none"}
+                               "truncation": truncation or "none",
+                               "source_digests": source_digests + fresh_digests}
             complete_all = bool(streams) and all(status.get("complete") is True for status in streams.values())
             truncations = {name: status.get("truncation", "none") for name, status in streams.items()
                            if status.get("truncation", "none") != "none"}
