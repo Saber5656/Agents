@@ -286,10 +286,18 @@ class ServiceStore:
         if not pid:
             return "unknown"
         try:
-            os.kill(int(pid), 0)
+            pid = int(pid)
+            if pid <= 0:
+                return "unknown"
+            os.kill(pid, 0)
             if recorded_identity:
                 current = self._process_identity(pid)
-                recorded = json.loads(recorded_identity) if isinstance(recorded_identity, str) else recorded_identity
+                try:
+                    recorded = json.loads(recorded_identity) if isinstance(recorded_identity, str) else recorded_identity
+                except (TypeError, ValueError):
+                    return "unknown"
+                if not isinstance(recorded, dict):
+                    return "unknown"
                 for key in ("start_ticks", "start_time"):
                     if recorded.get(key) and current.get(key) and recorded[key] != current[key]:
                         return "dead"
@@ -298,6 +306,8 @@ class ServiceStore:
                 if not any(recorded.get(key) and current.get(key) for key in ("start_ticks", "start_time")):
                     return "unknown"
             return "alive"
+        except (TypeError, ValueError):
+            return "unknown"
         except ProcessLookupError:
             return "dead"
         except PermissionError:
@@ -320,7 +330,10 @@ class ServiceStore:
                 return "unknown"
             if not isinstance(record, dict):
                 return "unknown"
-            for collector in record.get("collectors", []):
+            collectors = record.get("collectors", [])
+            if collectors is None or not isinstance(collectors, list):
+                return "unknown"
+            for collector in collectors:
                 if not isinstance(collector, dict):
                     return "unknown"
                 collector_state = self._pid_state(collector.get("pid"), collector.get("identity"))
@@ -350,14 +363,21 @@ class ServiceStore:
                 continue
             try:
                 with self.tx() as conn:
-                    current = conn.execute("SELECT * FROM service_jobs WHERE id=? AND state IN ('running','reconciling')", (row["id"],)).fetchone()
+                    current = conn.execute("""SELECT j.*,a.id AS attempt_id,a.pid,a.identity,
+                        a.run_dir AS attempt_run_dir,a.attempt_number,a.status AS attempt_status
+                        FROM service_jobs j JOIN service_attempts a ON a.job_id=j.id
+                        WHERE j.id=? AND j.state IN ('running','reconciling')
+                          AND a.id=? AND a.status IN ('running','reconciling')""",
+                        (row["id"], row["attempt_id"])).fetchone()
                     if current is None:
+                        continue
+                    if self._attempt_state(current) != "dead":
                         continue
                     stamp = now()
                     conn.execute("UPDATE service_jobs SET state='reconciling',last_error=?,updated_at=? WHERE id=?", ("worker died; read-only reconciliation in progress", stamp, row["id"]))
                     conn.execute("UPDATE service_attempts SET status='reconciling',ended_at=?,error=? WHERE id=? AND status IN ('running','reconciling')", (stamp, "worker process is definitely dead", row["attempt_id"]))
                 try:
-                    result = (reconciler or default_reconciler)(self._job(current), dict(row))
+                    result = (reconciler or default_reconciler)(self._job(current), dict(current))
                 except Exception as exc:
                     result = {"safe_to_resume": False, "reason": "receipt reconciliation failed", "error": str(exc)}
                 safe = isinstance(result, dict) and result.get("safe_to_resume") is True
@@ -365,14 +385,14 @@ class ServiceStore:
                 with self.tx() as conn:
                     conn.execute("UPDATE service_jobs SET state=?,next_attempt_at=?,last_error=?,updated_at=? WHERE id=?", (state, now() if safe else None, result.get("reason") if isinstance(result, dict) else "reconciliation requires verification", now(), row["id"]))
                     conn.execute("UPDATE service_attempts SET status=?,result_json=? WHERE id=?", (state, json.dumps(result or {}, ensure_ascii=False), row["attempt_id"]))
-                task = self.tasks.get_task(row["task_id"])
+                task = self.tasks.get_task(current["task_id"])
                 if task is not None:
                     try:
                         self.tasks.update_task(task["id"], expected_version=task["version"],
                                                execution_status="running" if state == "retry" else "needs_verification")
-                    except ConflictError:
+                    except Exception:
                         pass
-                recovered.append({"job_id": row["id"], "state": state})
+                recovered.append({"job_id": current["id"], "state": state})
             finally:
                 lock.release()
         return recovered
@@ -573,13 +593,26 @@ class ServiceStore:
             lock = WorkspaceLock(row["workspace"], self.tasks.agents_root / ".local" / "service-locks", row["resource"])
             if not lock.acquire(blocking=False):
                 continue
-            claimed = self._claim_job(row["id"])
+            try:
+                claimed = self._claim_job(row["id"])
+            except Exception:
+                lock.release()
+                raise
             if claimed is not None:
                 try:
                     current = self.tasks.get_task(claimed["task_id"])
                     self.tasks.update_task(claimed["task_id"], expected_version=current["version"], execution_status="running")
                 except ConflictError:
                     pass
+                except Exception as exc:
+                    try:
+                        result = self._finish_attempt(
+                            claimed, result={"status": "failed", "text": str(exc)}, error=str(exc))
+                    except Exception as finish_error:
+                        result = {"status": "retry", "job_id": claimed["id"],
+                                  "error": str(finish_error)}
+                    lock.release()
+                    return {"_claim_error": result}
                 claimed["_lock"] = lock
                 return claimed
             lock.release()
@@ -607,6 +640,13 @@ class ServiceStore:
                 self.tasks.update_task(job["task_id"], expected_version=current["version"], execution_status="needs_verification" if succeeded else "running")
             except ConflictError:
                 pass
+            except Exception as exc:
+                try:
+                    with self.tx() as conn:
+                        conn.execute("UPDATE service_jobs SET last_error=?,updated_at=? WHERE id=?",
+                                     (f"task status update failed: {exc}", now(), job["id"]))
+                except Exception:
+                    pass
         return {"status": terminal, "job_id": job["id"], "attempt": attempt_no}
 
     def run_once(self, executor: Callable | None = None, verifier: Callable | None = None):
@@ -614,6 +654,8 @@ class ServiceStore:
         if job is None:
             blocked = any(self.tasks.get_task(row["task_id"]) is not None and not self._dependencies_ready(self.tasks.get_task(row["task_id"])) for row in self._ready_rows())
             return {"status": "blocked" if blocked else "idle", **({"reason": "dependencies"} if blocked else {})}
+        if "_claim_error" in job:
+            return job["_claim_error"]
         lock = job.pop("_lock")
         try:
             if executor is None:
@@ -943,14 +985,29 @@ class Scheduler:
                 completed_results = []
                 for future in done:
                     workers.pop(future, None)
+                    verification_job_id = None
                     for job_id, verifier_future in list(verifiers.items()):
                         if verifier_future is future:
+                            verification_job_id = job_id
                             verifiers.pop(job_id, None)
                             break
                     try:
                         completed_results.append(future.result())
-                    except Exception:
-                        completed_results.append({"status": "retry"})
+                    except Exception as exc:
+                        if verification_job_id is not None:
+                            try:
+                                self.store._reset_verification(
+                                    verification_job_id, f"verification future failed: {exc}")
+                            except Exception:
+                                pass
+                            completed_results.append({"status": "needs_verification",
+                                                      "job_id": verification_job_id})
+                        else:
+                            # Without a job id there is no safe way to mark a
+                            # possibly claimed attempt.  Let launchd restart
+                            # the owner so its PID becomes definitely dead
+                            # and normal reconciliation can inspect the receipt.
+                            raise RuntimeError("worker future failed") from exc
                 if completed_results and all(result.get("status") in ("idle", "blocked", "retry", "needs_verification")
                                              for result in completed_results if isinstance(result, dict)):
                     self._wait(self.poll_interval)

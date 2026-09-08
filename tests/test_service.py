@@ -116,6 +116,15 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(detail["attempts"][0]["status"], "retry")
         self.assertIn("not logged in", detail["last_error"])
 
+    def test_task_store_failure_after_claim_is_persisted_retry_and_releases_lock(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)
+        with mock.patch.object(self.tasks, "update_task", side_effect=RuntimeError("task db unavailable")):
+            result = self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.assertEqual(result["status"], "retry")
+        self.assertEqual(self.service.get_job(job["id"])["state"], "retry")
+        lock = WorkspaceLock(self.workspace, self.root / ".local" / "service-locks")
+        self.assertTrue(lock.acquire(blocking=False)); lock.release()
+
     def test_safe_reconciliation_resumes_same_attempt_directory(self):
         job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
         claimed = self.service._claim_next(); claimed["_lock"].release()
@@ -173,6 +182,31 @@ class ServiceTests(unittest.TestCase):
         with self.service.tx() as conn:
             conn.execute("UPDATE service_attempts SET pid=?, identity=? WHERE job_id=?", (99999999, json.dumps({"pid": 99999999}), job["id"]))
         self.assertEqual(self.service.recover_stale_jobs(lambda *_: {"safe_to_resume": True}), [])
+        self.assertEqual(self.service.get_job(job["id"])["state"], "running")
+
+    def test_recovery_rechecks_ownership_after_lock(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        claimed = self.service._claim_next(); claimed["_lock"].release()
+        states = iter(("dead", "alive"))
+        with mock.patch.object(self.service, "_attempt_state", side_effect=lambda _: next(states)):
+            recovered = self.service.recover_stale_jobs(lambda *_: {"safe_to_resume": True})
+        self.assertEqual(recovered, [])
+        self.assertEqual(self.service.get_job(job["id"])["state"], "running")
+
+    def test_malformed_process_record_is_unknown_and_does_not_stop_other_recovery(self):
+        other = self.tasks.create_task(purpose="other stale")
+        other_workspace = self.root / "other-workspace"; other_workspace.mkdir()
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context")
+        other_job = self.service.enroll(other["id"], other_workspace, "prompt", "context")
+        claimed = self.service._claim_next(); claimed["_lock"].release()
+        claimed_other = self.service._claim_next(); claimed_other["_lock"].release()
+        bad_dir = Path(claimed["attempt_run_dir"]); bad_dir.mkdir(parents=True)
+        (bad_dir / "0-codex-state.json").write_text(json.dumps({"status": "running", "pid": "abc"}))
+        with self.service.tx() as conn:
+            conn.execute("UPDATE service_attempts SET pid=? WHERE id IN (?,?)",
+                         (99999999, claimed["attempt_id"], claimed_other["attempt_id"]))
+        recovered = self.service.recover_stale_jobs(lambda *_: {"safe_to_resume": True})
+        self.assertEqual(recovered, [{"job_id": other_job["id"], "state": "retry"}])
         self.assertEqual(self.service.get_job(job["id"])["state"], "running")
 
     def test_reconciling_job_is_recovered_after_service_interruption(self):
@@ -410,6 +444,26 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "needs_verification")
         self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
         self.assertEqual(self.service.get_job(job["id"])["attempts_count"], 1)
+
+    def test_scheduler_resets_verifying_job_when_verifier_future_escapes(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "prompt", "context", retry_base=0)
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        stop = threading.Event()
+        def escaped(_job_id, _verifier):
+            stop.set()
+            raise RuntimeError("unexpected verifier failure")
+        scheduler = Scheduler(self.service, poll_interval=0.01, stop_event=stop,
+                              verification_executor=lambda _: {"acceptance": False})
+        with mock.patch.object(self.service, "verify_with_agent", side_effect=escaped):
+            self.assertEqual(scheduler.run_forever(executor=lambda _: {"status": "failed"}), "stopped")
+        self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
+
+    def test_scheduler_surfaces_unattributed_worker_future_failure_for_restart(self):
+        stop = threading.Event()
+        scheduler = Scheduler(self.service, poll_interval=0.01, stop_event=stop)
+        with mock.patch.object(self.service, "run_once", side_effect=RuntimeError("worker escaped")):
+            with self.assertRaisesRegex(RuntimeError, "worker future failed"):
+                scheduler.run_forever(executor=lambda _: {"status": "failed"})
 
     def test_scheduler_reserves_coordinator_slot_and_runs_bounded_pool(self):
         workspace2 = self.root / "workspace-2"; workspace2.mkdir()
