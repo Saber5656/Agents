@@ -26,6 +26,9 @@ unit = store.register(
 )
 ```
 
+Projectless Codex tasks pass `project_id=None`; the value is retained as
+`None` and no project is inferred.
+
 The immutable portion includes the repository, project/host, full base OID,
 worktree, branch, and linked task/Issue/PR references. Registry updates are
 private, atomic replacements under a process-lifetime `flock`; a corrupt
@@ -62,8 +65,10 @@ Vault. The archive operation reads the actual ready thread, rejects a running
 turn or a different task scope, archives it, and reads it back as archived.
 An uncertain archive is recorded and can be retried through readback without
 blindly repeating a different operation. `unarchive()` restores the same ready
-thread reference and verifies the remote state. The local task and Issue/PR/
-commit/context references remain in the registry.
+thread reference and verifies the remote state. Its in-flight receipt is
+durable, so a lost response is reconciled from readback; message sends use the
+same durable handoff marker. The local task and Issue/PR/commit/context
+references remain in the registry.
 
 ## Worktree cleanup
 
@@ -72,14 +77,22 @@ save. It verifies the canonical checkout and target worktree from `git
 worktree list`, a clean status including ignored files, no local-only commits,
 no active writer, no other worktree using the branch, and no other unfinished
 work unit referencing the path or branch. It calls `git worktree remove` and
-then `git branch -d`; both operations are non-force operations.
+then `git branch -d`; both operations are non-force operations. Cleanup
+requires an injected writer guard to prove the process-lifetime writer lock is
+inactive; an absent or failed guard is unknown and stops deletion.
 
 Each step is recorded in a private receipt under
 `AGENTS_VAULT_ROOT/01-Projects/task-lifecycle/cleanup/`. If the process ends
 after worktree removal and before branch deletion, the receipt resumes at the
-branch step. A missing branch after a successful removal is accepted as an
-idempotent completed state. Dirty files, active locks, local-only commits,
-dependent use, or an unknown Git state stop cleanup while preserving data.
+branch step. A prepared receipt whose worktree is already absent is promoted
+to `worktree_removed`, covering interruption between Git removal and receipt
+update. Receipt identity includes repository, path, branch, and full HEAD; a
+changed branch HEAD stops cleanup. Main synchronization reads
+`git ls-remote origin refs/heads/main` and checks local reachability instead of
+trusting a stale `origin/main` tracking ref. A missing branch after a
+successful removal is accepted as an idempotent completed state. Dirty files,
+active locks, local-only commits, dependent use, or an unknown Git state stop
+cleanup while preserving data.
 
 The lifecycle lock is derived from the canonical worktree path and lives under
 the Vault's task-lifecycle lock directory. Writers that participate in cleanup
