@@ -1337,6 +1337,36 @@ def _status_overlaps_selected(raw_status, files):
     return False
 
 
+def _acceptance_catalog(task):
+    """Content identities avoid asking reviewers to retype long requirements."""
+    import hashlib
+    return [{"id": hashlib.sha256(row["evidence"].encode("utf-8")).hexdigest(),
+             "criterion": row["evidence"]} for row in task["acceptance_records"]]
+
+
+def _bind_acceptance_ids(task, verdict):
+    """Resolve exact identities only; never fuzzy-match a changed requirement."""
+    catalog = {row["id"]: row["criterion"] for row in _acceptance_catalog(task)}
+    result = dict(verdict)
+    criteria = result.get("criteria")
+    if not isinstance(criteria, list):
+        return result  # The completion boundary rejects absent/malformed criteria.
+    bound = []
+    for item in criteria:
+        if not isinstance(item, dict) or "criterion_id" not in item:
+            bound.append(item)  # Preserve support for existing exact-text verdicts.
+            continue
+        identifier = item["criterion_id"]
+        if not isinstance(identifier, str) or identifier not in catalog:
+            raise ValueError("unknown or stale acceptance criterion identity")
+        criterion = catalog[identifier]
+        if "criterion" in item and item["criterion"] != criterion:
+            raise ValueError("acceptance criterion identity and text disagree")
+        bound.append({**item, "criterion": criterion})
+    result["criteria"] = bound
+    return result
+
+
 def default_verifier(spec):
     """Use an actual read-only subscription Codex turn for acceptance review."""
     task = spec["task"]
@@ -1360,6 +1390,7 @@ def default_verifier(spec):
     )
     prompt = json.dumps({
         "phase": phase,
+        "acceptance_catalog": _acceptance_catalog(task),
         "phase_instructions": phase_instructions,
         "task": task,
         "job": spec["job"],
@@ -1375,8 +1406,8 @@ def default_verifier(spec):
             "selected paths and immutable base); copy those values exactly. The host will recompute both and does "
             "not treat this schema as evidence. "
             "Do not edit files, run write commands, or infer completion from words alone. Return JSON only: "
-            "{acceptance:boolean, publication_readiness:boolean, findings:[objects], evidence:string, criteria:[{criterion:string, verified:boolean, evidence:string}], publication:{commit:string, mode:direct_main|pull_request, pr_number:integer}, publication_review:{status:complete, reviewed:true, reviewed_head:string, reviewed_diff_digest:string, findings:[objects], findings_complete:true, decisions:[{finding_id:string, decision:adopt|reject|separate, reason:string, evidence:[string], applied:boolean, applied_evidence:[string]}]}, "
-            "evidence_links:[strings]}. Copy every task acceptance criterion exactly and cite observed evidence for each. Saber5656/Agents uses direct main publication; other repositories require their PR delivery policy. "
+            "{acceptance:boolean, publication_readiness:boolean, findings:[objects], evidence:string, criteria:[{criterion_id:string, verified:boolean, evidence:string}], publication:{commit:string, mode:direct_main|pull_request, pr_number:integer}, publication_review:{status:complete, reviewed:true, reviewed_head:string, reviewed_diff_digest:string, findings:[objects], findings_complete:true, decisions:[{finding_id:string, decision:adopt|reject|separate, reason:string, evidence:[string], applied:boolean, applied_evidence:[string]}]}, "
+            "evidence_links:[strings]}. Return every acceptance_catalog id exactly once as criterion_id and cite observed evidence for each. Do not retype or paraphrase the criterion text; the host binds each id to its exact requirement. Saber5656/Agents uses direct main publication; other repositories require their PR delivery policy. "
             "Use findings for any missing or incorrect implementation and explain the repair required. "
             "When no findings exist, return findings:[] and publication_review.findings:[] with decisions:[]; "
             "when findings exist, return exactly one explicit adopt/reject/separate decision for every finding."
@@ -1433,6 +1464,8 @@ def default_verifier(spec):
     if not isinstance(value.get("findings", []), list):
         raise ValueError("verification agent findings must be a list")
     save(record / "verdict.json", value, env)
+    value = _bind_acceptance_ids(task, value)
+    save(record / "bound-verdict.json", value, env)
     value.setdefault("evidence_links", []).append(str(record))
     return value
 

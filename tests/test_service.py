@@ -401,7 +401,7 @@ class ServiceTests(unittest.TestCase):
         events = "\n".join([
             json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({
                 "acceptance": True, "merge": True, "main_sync": True,
-                "findings": [], "evidence": "observed test and merged commit", "evidence_links": []})}}),
+                "findings": [], "criteria": [{"criterion_id": __import__("hashlib").sha256(b"A test passes").hexdigest(), "verified": True, "evidence": "test output"}], "evidence": "observed test and merged commit", "evidence_links": []})}}),
             json.dumps({"type": "turn.completed", "status": "completed", "usage": {"input_tokens": 3}}),
         ])
         from harness.runner import ProcessResult
@@ -410,6 +410,7 @@ class ServiceTests(unittest.TestCase):
                                       "agents_root": str(self.root), "vault_root": str(self.vault),
                                       "publication_snapshot": {"head": "a" * 40, "diff": "b" * 64}})
         self.assertTrue(value["acceptance"])
+        self.assertEqual(value["criteria"][0]["criterion"], "A test passes")
         command = run.call_args.args[0]
         self.assertIn("read-only", command)
         self.assertIn("plugins", command)
@@ -420,6 +421,26 @@ class ServiceTests(unittest.TestCase):
         prompt = json.loads(run.call_args.args[3])
         self.assertEqual(prompt["phase"], "pre_publication")
         self.assertIn("not a source defect", prompt["phase_instructions"])
+
+    def test_verifier_criterion_ids_bind_to_exact_current_requirements(self):
+        from harness.service import _acceptance_catalog, _bind_acceptance_ids
+        task = {"acceptance_records": [{"evidence": "A long exact criterion."},
+                                       {"evidence": "Another criterion."}]}
+        catalog = _acceptance_catalog(task)
+        self.assertEqual(catalog, _acceptance_catalog(task))
+        verdict = {"criteria": [{"criterion_id": row["id"], "verified": True,
+                                "evidence": "observed artifact"} for row in reversed(catalog)]}
+        result = _bind_acceptance_ids(task, verdict)
+        self.assertEqual([r["criterion"] for r in result["criteria"]],
+                         ["Another criterion.", "A long exact criterion."])
+        self.assertNotIn("criterion", verdict["criteria"][0])
+        for invalid in ("unknown", catalog[0]["id"]):
+            bad = {"criteria": [{"criterion_id": invalid, "criterion": "paraphrase"}]}
+            with self.assertRaises(ValueError):
+                _bind_acceptance_ids(task, bad)
+        changed = {"acceptance_records": [{"evidence": "Changed criterion."}]}
+        with self.assertRaises(ValueError):
+            _bind_acceptance_ids(changed, verdict)
 
     def test_verification_without_evidence_is_requeued(self):
         task = self.tasks.create_task(purpose="verify incomplete", acceptance_evidence=["accepted"])
