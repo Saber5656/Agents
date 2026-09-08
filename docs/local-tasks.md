@@ -44,7 +44,10 @@ value.
 
 `record_discovery` is idempotent for `(originating_task, discovery_key)`. A
 retry returns the same task and merges new evidence and acceptance records.
-It only captures a follow-up locally; it does not call GitHub or start work.
+`RequirementLedger.record_followup()` uses this same local discovery boundary,
+so a follow-up is visible to a later issueization batch as an `unissued` task
+even if its private sidecar write was interrupted. It does not call GitHub or
+start work.
 
 Execution is updated with optimistic concurrency:
 
@@ -120,6 +123,13 @@ tasks. Requirements are also durable records: use
 `create_requirement`, `link_requirement_task`, and `add_requirement_revision`
 to preserve all original requirements and later scope corrections through a
 partial completion or coordinator restart.
+
+For coordinator handoffs, `harness.context.RequirementLedger` wraps these
+TaskStore calls. Requirement dependencies are durable TaskStore rows and the
+sidecar retains the latest scope correction, selected unit, and a visible
+follow-up projection. A handoff always returns all requirements, so selecting
+one child cannot discard the remaining work. Follow-ups contain no Issue
+mutation path and are left for the separate issueization batch.
 
 The store keeps the SQLite file and sidecars private. An explicit database
 parent may be mode `0755`, but group- or world-writable parent directories are
