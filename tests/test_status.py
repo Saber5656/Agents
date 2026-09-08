@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import hashlib
 import tempfile
 import unittest
 from unittest import mock
@@ -12,6 +13,47 @@ from harness.tasks import TaskStore
 
 
 class StatusTests(unittest.TestCase):
+    def test_closed_wal_database_has_no_source_sidecar_creation(self):
+        with TaskStore(agents_root=self.root, vault_root=self.vault) as store:
+            store.create_task(purpose="closed database snapshot")
+        before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                  for p in (self.root / ".local").iterdir()}
+        report = build_status(agents_root=self.root)
+        after = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                 for p in (self.root / ".local").iterdir()}
+        self.assertEqual(before, after)
+        self.assertEqual(report["tasks"][0]["purpose"], "closed database snapshot")
+
+    def test_live_committed_wal_rows_are_visible_without_source_writes(self):
+        with TaskStore(agents_root=self.root, vault_root=self.vault) as store:
+            store.create_task(purpose="committed in live WAL")
+            before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                      for p in (self.root / ".local").iterdir()}
+            report = build_status(agents_root=self.root)
+            after = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                     for p in (self.root / ".local").iterdir()}
+            self.assertEqual(before, after)
+            self.assertEqual(report["tasks"][0]["purpose"], "committed in live WAL")
+
+    def test_concurrent_database_change_is_uncertain_not_a_mixed_snapshot(self):
+        original_read = Path.read_bytes
+        with TaskStore(agents_root=self.root, vault_root=self.vault) as store:
+            store.create_task(purpose="before concurrent update")
+            changed = []
+
+            def read_and_update(path):
+                data = original_read(path)
+                if path.resolve() == store.db_path.resolve() and not changed:
+                    changed.append(True)
+                    store.create_task(purpose="concurrent update")
+                return data
+
+            with mock.patch.object(Path, "read_bytes", read_and_update):
+                report = build_status(agents_root=self.root)
+            self.assertTrue(report["uncertain"])
+            self.assertEqual(report["sources"]["tasks"]["state"], "uncertain")
+            self.assertEqual(report["tasks"], [])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

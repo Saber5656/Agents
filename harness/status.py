@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import tempfile
 from urllib.parse import quote
 
 
@@ -25,22 +26,61 @@ def _parse_time(value):
         return None
 
 
+class _SnapshotConnection(sqlite3.Connection):
+    def close(self):
+        try:
+            super().close()
+        finally:
+            self.snapshot_directory.cleanup()
+
+
+def _file_identity(path):
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def _read_only(path):
-    """Open an existing SQLite file without allowing creation or writes."""
+    """Inspect a stable private snapshot, never opening source SQLite for writes.
+
+    SQLite mode=ro can still create WAL/SHM siblings. Copy a stable observed
+    DB/WAL pair and let SQLite build any reader sidecars only in temporary
+    storage. A concurrent source change makes this observation uncertain.
+    """
     path = Path(path) if path else None
     if path is None:
         return None, {"state": "not_configured", "path": None}
     if not path.is_file():
         return None, {"state": "missing", "path": str(path)}
+    snapshot = None
     try:
+        source_files = [path, Path(str(path) + "-wal")]
+        before = [_file_identity(source) for source in source_files]
+        content = [source.read_bytes() if identity is not None else None
+                   for source, identity in zip(source_files, before)]
+        if before != [_file_identity(source) for source in source_files]:
+            return None, {"state": "uncertain", "path": str(path),
+                          "reason": "database changed during snapshot; read again"}
+        snapshot = tempfile.TemporaryDirectory(prefix="agents-status-")
+        copy = Path(snapshot.name) / "snapshot.sqlite3"
+        for target, data in zip((copy, Path(str(copy) + "-wal")), content):
+            if data is not None:
+                with target.open("xb") as stream:
+                    target.chmod(0o600)
+                    stream.write(data)
         connection = sqlite3.connect(
-            f"file:{quote(str(path.resolve()))}?mode=ro", uri=True,
-            timeout=1.0,
+            f"file:{quote(str(copy))}?mode=ro", uri=True,
+            timeout=1.0, factory=_SnapshotConnection,
         )
+        connection.snapshot_directory = snapshot
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only=ON")
         return connection, {"state": "available", "path": str(path)}
     except (OSError, sqlite3.DatabaseError) as error:
+        if snapshot is not None:
+            snapshot.cleanup()
         return None, {"state": "corrupt", "path": str(path), "reason": str(error)}
 
 
@@ -448,7 +488,7 @@ def build_status(*, db_path=None, service_db_path=None, agents_root=None):
             uncertainties.append("task store schema or content is unreadable")
         finally:
             task_connection.close()
-    elif task_source["state"] in {"missing", "corrupt", "not_configured"}:
+    elif task_source["state"] in {"missing", "corrupt", "not_configured", "uncertain"}:
         uncertainties.append("task store is unavailable")
     service = {"state": service_source["state"], "jobs": [], "queued_resources": [],
                "retries": [], "holds": [], "usage": {}, "updates": [], "attempts": []}
@@ -461,7 +501,7 @@ def build_status(*, db_path=None, service_db_path=None, agents_root=None):
             uncertainties.append("service store schema or content is unreadable")
         finally:
             service_connection.close()
-    elif service_source["state"] == "corrupt":
+    elif service_source["state"] in {"corrupt", "uncertain"}:
         uncertainties.append("service store is unreadable")
 
     _merge_service_progress(tasks, service)
