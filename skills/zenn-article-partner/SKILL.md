@@ -142,7 +142,7 @@ Zenn か Qiita かで frontmatter や使いやすい記法が違う。必要に�
 例:
 
 - Next.js 初学者が hydration error の見分け方と最低限の対処順をつかめる
-- Claude Code を使い始めた人が、ログを Zenn 記事に落とすときの構成をそのまま使える
+- Codex を使い始めた人が、ログを Zenn 記事に落とすときの構成をそのまま使える
 
 ### ステップ2. 記事の材料を並べる
 
