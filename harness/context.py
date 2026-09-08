@@ -94,11 +94,16 @@ class RequirementLedger:
     def add(self, text, *, acceptance=(), source=None, depends_on=()):
         depends_on = list(depends_on)
         with self._locked():
-            existing = self._load()
-            unknown = [item for item in depends_on if item not in existing["requirements"]]
+            existing_ids = {row["id"] for row in self.store.list_requirements()}
+            unknown = [item for item in depends_on if item not in existing_ids]
             if unknown:
                 raise ContextError(f"unknown requirement dependency: {unknown[0]}")
-        row = self.store.create_requirement(text, source=source, acceptance=list(acceptance))
+        row = self.store.create_requirement(
+            text,
+            source=source,
+            acceptance=list(acceptance),
+            dependencies=depends_on,
+        )
         with self._locked():
             record = self._load()
             record["requirements"][row["id"]] = {
@@ -143,12 +148,25 @@ class RequirementLedger:
             "evidence": list(evidence),
             "status": "local_only",
         }
+        task = self.store.record_discovery(
+            originating_task=originating_task,
+            discovery_key=item["id"],
+            purpose=purpose,
+            evidence_links=list(evidence),
+        )
+        item["task_id"] = task["id"]
+        item["evidence"] = list(task.get("evidence_links") or [])
         with self._locked():
             record = self._load()
             existing = next((x for x in record["followups"] if x["id"] == item["id"]), None)
             if existing is None:
                 record["followups"].append(item)
             else:
+                existing.update({
+                    "task_id": task["id"],
+                    "evidence": item["evidence"],
+                    "status": "local_only",
+                })
                 item = existing
             self._save(record)
         return item
@@ -164,7 +182,7 @@ class RequirementLedger:
         result = dict(row)
         db_revisions = list(row.get("revisions") or [])
         result.update({
-            "depends_on": detail.get("depends_on", []),
+            "depends_on": detail.get("depends_on", row.get("dependencies", [])),
             # TaskStore is the source of truth when a sidecar write was
             # interrupted after the SQLite transaction committed.
             "latest_text": db_revisions[-1] if db_revisions else row.get("text"),
@@ -179,10 +197,30 @@ class RequirementLedger:
         rows = []
         for row in self.store.list_requirements():
             rows.append(self._with_sidecar(row, record["requirements"].get(row["id"], {})))
+        followups = list(record["followups"])
+        followup_by_id = {item.get("id"): item for item in followups}
+        for task in self.store.list_tasks():
+            event_key = task.get("source_event_key") or ""
+            if not event_key.startswith("followup_"):
+                continue
+            recovered = {
+                "id": event_key,
+                "task_id": task["id"],
+                "originating_task": task.get("source_task_id"),
+                "purpose": task["purpose"],
+                "evidence": list(task.get("evidence_links") or []),
+                "status": "local_only",
+            }
+            existing = followup_by_id.get(event_key)
+            if existing is None:
+                followups.append(recovered)
+                followup_by_id[event_key] = recovered
+            else:
+                existing.update(recovered)
         return {
             "requirements": rows,
             "selected": list(record["selected"]),
-            "followups": list(record["followups"]),
+            "followups": followups,
         }
 
     def completion_report(self):

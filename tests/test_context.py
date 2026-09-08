@@ -53,6 +53,75 @@ def test_unknown_requirement_dependency_is_rejected_before_store_mutation(tmp_pa
         store.close()
 
 
+def test_requirement_dependencies_survive_sidecar_interruption_and_reopen(tmp_path, monkeypatch):
+    store, agents, _ = make_store(tmp_path)
+    ledger = RequirementLedger(store, agents / ".local" / "requirements.json")
+    try:
+        prerequisite = ledger.add("prerequisite")
+        original_save = ledger._save
+
+        def fail_once(value):
+            monkeypatch.setattr(ledger, "_save", original_save)
+            raise OSError("simulated sidecar interruption")
+
+        monkeypatch.setattr(ledger, "_save", fail_once)
+        with pytest.raises(OSError):
+            ledger.add("dependent", depends_on=[prerequisite["id"]])
+
+        stored = store.list_requirements()
+        dependent = next(row for row in stored if row["text"] == "dependent")
+        assert dependent["dependencies"] == [prerequisite["id"]]
+        reopened = RequirementLedger(store, agents / ".local" / "requirements.json")
+        handoff = reopened.handoff()
+        visible = next(row for row in handoff["requirements"] if row["id"] == dependent["id"])
+        assert visible["depends_on"] == [prerequisite["id"]]
+    finally:
+        store.close()
+
+
+def test_followup_is_idempotently_registered_as_local_discovery(tmp_path):
+    store, agents, _ = make_store(tmp_path)
+    ledger = RequirementLedger(store, agents / ".local" / "requirements.json")
+    try:
+        origin = store.create_task(purpose="origin")
+        first = ledger.record_followup(origin["id"], "local improvement", evidence=["vault:first"])
+        second = ledger.record_followup(origin["id"], "local improvement", evidence=["vault:second"])
+
+        assert first["task_id"] == second["task_id"]
+        discoveries = [
+            row for row in store.list_tasks()
+            if row["source_task_id"] == origin["id"]
+            and row["source_event_key"] == first["id"]
+        ]
+        assert len(discoveries) == 1
+        assert discoveries[0]["issueization_state"] == "unissued"
+        assert discoveries[0]["evidence_links"] == ["vault:first", "vault:second"]
+    finally:
+        store.close()
+
+
+def test_followup_sidecar_interruption_is_recoverable_from_task_store(tmp_path, monkeypatch):
+    store, agents, _ = make_store(tmp_path)
+    ledger = RequirementLedger(store, agents / ".local" / "requirements.json")
+    try:
+        origin = store.create_task(purpose="origin")
+        def fail_save(value):
+            raise OSError("interrupted")
+
+        monkeypatch.setattr(ledger, "_save", fail_save)
+        with pytest.raises(OSError):
+            ledger.record_followup(origin["id"], "recoverable follow-up", evidence=["vault:followup"])
+
+        reopened = RequirementLedger(store, agents / ".local" / "requirements.json")
+        recovered = reopened.handoff()["followups"]
+        assert len(recovered) == 1
+        assert recovered[0]["purpose"] == "recoverable follow-up"
+        assert recovered[0]["evidence"] == ["vault:followup"]
+        assert recovered[0]["status"] == "local_only"
+    finally:
+        store.close()
+
+
 def test_visible_context_chunks_redacts_and_excludes_reasoning(tmp_path, monkeypatch):
     vault = tmp_path / "vault"
     vault.mkdir()

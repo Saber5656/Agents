@@ -4,12 +4,20 @@
 providers or contact GitHub.
 
 `RequirementLedger` uses the existing `TaskStore` requirement, revision,
-acceptance, and completion APIs. Its explicitly selected sidecar adds
-requirement dependencies and local-only follow-ups. `handoff()` returns every
-requirement with its latest text and revisions, even when only one child was
-selected. A scope correction is therefore visible after a coordinator restart.
-Follow-ups are recorded locally with evidence and are intentionally not turned
-into an Issue or added to the assigned implementation.
+acceptance, and completion APIs. Requirement dependencies are stored in the
+same SQLite transaction as the requirement, while the sidecar keeps the
+selection and presentation details. If the sidecar write is interrupted after
+the SQLite commit, `handoff()` restores dependencies from the TaskStore.
+`handoff()` returns every requirement with its latest text and revisions, even
+when only one child was selected. A scope correction is therefore visible
+after a coordinator restart.
+
+`record_followup()` registers a deterministic local discovery through the
+TaskStore and mirrors it in the sidecar. Repeating the call for the same
+originating task and purpose reuses the same discovery task and merges
+evidence. A sidecar interruption remains recoverable from the TaskStore, and
+the issueization batch can see the task as `unissued`; no GitHub call or Issue
+creation occurs here.
 
 `VaultContext` requires an existing Vault root and an explicit run id. It writes
 private JSONL chunks and an atomic `context-index.json`. The index points to all

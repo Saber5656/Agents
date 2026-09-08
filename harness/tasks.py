@@ -186,6 +186,11 @@ CREATE TABLE IF NOT EXISTS requirements (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS requirement_dependencies (
+  requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE,
+  depends_on TEXT NOT NULL REFERENCES requirements(id),
+  PRIMARY KEY(requirement_id, depends_on)
+);
 CREATE TABLE IF NOT EXISTS requirement_revisions (
   requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE,
   revision INTEGER NOT NULL,
@@ -726,12 +731,25 @@ class TaskStore:
             prs = [dict(r) for r in self._conn.execute("SELECT p.* FROM prs p JOIN work_unit_prs w ON w.repository=p.repository AND w.pr_id=p.pr_id WHERE w.work_unit_id=?", (work_unit,))]
             return {"id": row["id"], "purpose": row["purpose"], "created_at": row["created_at"], "tasks": tasks, "issues": issues, "prs": prs}
 
-    def create_requirement(self, text, *, source=None, acceptance=None, requirement_id=None):
+    def create_requirement(self, text, *, source=None, acceptance=None, dependencies=None,
+                           requirement_id=None, depends_on=None):
         acceptance = _list_input(acceptance, "acceptance")
+        if dependencies is not None and depends_on is not None:
+            raise TypeError("pass either dependencies or depends_on, not both")
+        if dependencies is None:
+            dependencies = depends_on
+        dependencies = list(dict.fromkeys(_list_input(dependencies, "dependencies")))
         now, requirement_id = _now(), requirement_id or _id("req")
         with self._tx() as conn:
             conn.execute("INSERT INTO requirements VALUES (?,?,?,?,?,?,?,?)",
                          (requirement_id, text, source, json.dumps(acceptance), "open", 0, now, now))
+            for dependency in dependencies:
+                if not conn.execute("SELECT 1 FROM requirements WHERE id=?", (dependency,)).fetchone():
+                    raise KeyError(f"unknown requirement dependency: {dependency}")
+                conn.execute(
+                    "INSERT INTO requirement_dependencies VALUES (?,?)",
+                    (requirement_id, dependency),
+                )
         return self.get_requirement(requirement_id)
 
     def get_requirement(self, requirement_id):
@@ -742,6 +760,10 @@ class TaskStore:
             result = dict(row); result["acceptance"] = _json(result["acceptance"], [])
             result["revisions"] = [r[0] for r in self._conn.execute("SELECT text FROM requirement_revisions WHERE requirement_id=? ORDER BY revision", (requirement_id,))]
             result["task_ids"] = [r[0] for r in self._conn.execute("SELECT task_id FROM requirement_tasks WHERE requirement_id=?", (requirement_id,))]
+            result["dependencies"] = [r[0] for r in self._conn.execute(
+                "SELECT depends_on FROM requirement_dependencies WHERE requirement_id=? ORDER BY rowid",
+                (requirement_id,),
+            )]
             return result
 
     def list_requirements(self):
