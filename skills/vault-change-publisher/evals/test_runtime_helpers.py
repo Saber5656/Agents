@@ -12106,6 +12106,13 @@ def load_environment(*, checkout_root, environ, require_catalog):
                 "own_only",
             )
 
+    def test_daily_runner_lock_does_not_require_bsd_shlock(self) -> None:
+        """The Bash runner must also acquire its lock on Linux images."""
+        runner = SKILL_ROOT / "assets" / "run-daily-it-news-vulnerability-check.sh"
+        source = runner.read_text(encoding="utf-8")
+        self.assertIn("acquire_publication_lock()", source)
+        self.assertNotIn("/usr/bin/shlock", source)
+
     def test_dedicated_runner_completes_separated_publication(self) -> None:
         """Complete collection, two reviews, local commits, and fixed pushes."""
         runtime = self.root / "runtime"
