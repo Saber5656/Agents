@@ -199,11 +199,22 @@ class PortfolioScannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             self.make_skill(root, "alpha")
-            text = (root / "alpha/SKILL.md").read_text().replace("purpose: One responsibility\n", "")
+            text = (root / "alpha/SKILL.md").read_text().replace("description: Test skill\n", "description:\n")
             (root / "alpha/SKILL.md").write_text(text)
             report = MODULE.scan(root, "audit-1", "upstream_compatible", profiles={"alpha": "repo_native"})
             finding = next(item for item in report["findings"] if item["rule_id"] == "required_metadata")
             self.assertEqual("high", finding["severity"])
+
+    def test_repo_native_accepts_current_codex_minimal_frontmatter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / "alpha"
+            directory.mkdir()
+            (directory / "SKILL.md").write_text(
+                "---\nname: alpha\ndescription: Current Codex skill\n---\n# Skill\n"
+            )
+            report = MODULE.scan(root, "audit-1", "repo_native")
+            self.assertFalse(any(item["rule_id"] == "required_metadata" for item in report["findings"]))
 
     def test_verified_benchmark_rate_uses_contract_digest(self):
         with tempfile.TemporaryDirectory() as temp:

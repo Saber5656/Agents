@@ -70,7 +70,12 @@ Scopeやsource rootが不明なときは、`.system/`、plugin cache、`.workspa
 
 Profiles matter:
 
-- `repo_native`: enforce the repository TEMPLATE and local policy.
+- `repo_native`: enforce the current repository policy. The portable `name` and
+  `description` routing fields are required; local fields such as
+  `allowed-tools`, `created`, and `purpose` are optional unless a future
+  manifest explicitly defines them as required. When present, repository
+  metadata is still checked for valid status/category values and read-only
+  tool boundaries.
 - `upstream_compatible`: enforce only the portable Codex skill contract; local metadata gaps are informational.
 - `unclassified`: report provenance uncertainty instead of misclassifying it as noncompliance.
 

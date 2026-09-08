@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import Any
 
 PORTABLE_REQUIRED = {"name", "description"}
-REPO_REQUIRED = {"name", "description", "user-invocable", "allowed-tools", "category", "created", "status", "purpose"}
+# Codex routes skills from the portable ``name``/``description`` contract.
+# Repository-specific fields remain useful optional metadata and are validated
+# when present; this profile must not resurrect the retired local template as
+# a universal requirement for current or upstream-compatible skills.
+REPO_REQUIRED = PORTABLE_REQUIRED
 VALID_STATUS = {"active", "draft", "deprecated"}
 VALID_CATEGORY = {"Dev", "News-Data", "Obsidian", "Operation", "Review", "Security", "Utility"}
 LINK_RE = re.compile(r"\[[^\]]+\]\((?!#)([^)]+)\)")
