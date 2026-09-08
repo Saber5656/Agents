@@ -35,3 +35,19 @@ def test_evidence_writer_copies_reports_without_overwriting(tmp_path: Path) -> N
     assert saved == evidence / "portfolio-audit.1.json"
     assert (evidence / "portfolio-audit.json").read_text(encoding="utf-8") == "kept\n"
     assert saved.read_text(encoding="utf-8") == '{"status": "complete"}\n'
+
+
+def test_concurrent_evidence_writers_preserve_both_results(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    barrier = threading.Barrier(2)
+    original = validate.EvidenceWriter._reserve
+    def reserve(writer, name):
+        target = original(writer, name)
+        barrier.wait(timeout=3)
+        return target
+    monkeypatch.setattr(validate.EvidenceWriter, "_reserve", reserve)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        paths = list(pool.map(lambda text: validate.EvidenceWriter(tmp_path).save_text("result.txt", text), ["first", "second"]))
+    assert len(set(paths)) == 2
+    assert {path.read_text() for path in paths} == {"first", "second"}

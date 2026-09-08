@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -31,17 +32,17 @@ class EvidenceWriter:
         if self.directory is None:
             return None
         self.directory.mkdir(parents=True, exist_ok=True)
-        candidate = self.directory / name
-        if not candidate.exists():
-            return candidate
-        stem = candidate.stem
-        suffix = candidate.suffix
-        index = 1
+        original = self.directory / name
+        index = 0
         while True:
-            candidate = self.directory / f"{stem}.{index}{suffix}"
-            if not candidate.exists():
-                return candidate
-            index += 1
+            candidate = original if index == 0 else original.with_name(f"{original.stem}.{index}{original.suffix}")
+            try:
+                descriptor = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                index += 1
+                continue
+            os.close(descriptor)
+            return candidate
 
     def save_text(self, name: str, content: str) -> Path | None:
         path = self._reserve(name)
