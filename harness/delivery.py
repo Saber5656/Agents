@@ -366,7 +366,10 @@ class GitHub:
             if not data['pageInfo']['hasNextPage']:return rows
             cursor=data['pageInfo']['endCursor']
 
-    def merge(self,number,head,base,branch='main'):
+    def merge(self,number,head,base,branch='main',*,merge_method='merge'):
+        merge_flags={'merge':'--merge','squash':'--squash','rebase':'--rebase'}
+        if merge_method not in merge_flags:
+            raise DeliveryError('Unknown merge strategy')
         oid(head);oid(base)
         first=self.pr(number)
         if first.get('baseRefName')!=branch:raise DeliveryError('PR targets a different branch')
@@ -386,7 +389,8 @@ class GitHub:
         # GitHub enforces native protection and the expected head. The API has no
         # compare-and-swap for base; do not claim an atomic base pin/queue guarantee.
         try:
-            command(['gh','pr','merge',str(number),'--repo',self.repo,'--merge','--match-head-commit',head])
+            command(['gh','pr','merge',str(number),'--repo',self.repo,merge_flags[merge_method],
+                     '--match-head-commit',head])
         except DeliveryError as exc:
             try:
                 result = self.pr(number)
@@ -413,13 +417,14 @@ def main(argv=None):
     sync.add_argument('--branch',default='main');sync.add_argument('--merge-sha',required=True)
     merge=p.add_parser('merge');merge.add_argument('--repo',required=True);merge.add_argument('--pr',type=int,required=True)
     merge.add_argument('--head',required=True);merge.add_argument('--base',required=True);merge.add_argument('--branch',default='main')
+    merge.add_argument('--merge-method',choices=('merge','squash','rebase'),default='merge')
     args=parser.parse_args(argv)
     try:
         if args.command=='check-public':public_text(args.path.read_text(),english=args.english);result={'status':'checked'}
         elif args.command=='check-public-revision':
             public_git_changes(args.repo,args.base,args.head);result={'status':'checked'}
         elif args.command=='sync':result={'main':sync_main(args.repo,args.branch,args.merge_sha,args.remote)}
-        else:result=GitHub(args.repo).merge(args.pr,args.head,args.base,args.branch)
+        else:result=GitHub(args.repo).merge(args.pr,args.head,args.base,args.branch,merge_method=args.merge_method)
         print(json.dumps(result,indent=2));return 0
     except (DeliveryError,OSError,KeyError) as exc:
         print(json.dumps({'status':'incomplete','error':str(exc)}));return 2

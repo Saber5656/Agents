@@ -235,6 +235,21 @@ class DeliveryTests(unittest.TestCase):
             client.merge(1, 'a' * 40, 'b' * 40)
         sent.assert_not_called()
 
+    def test_merge_uses_selected_strategy_and_rejects_unknown_strategy(self):
+        client = GitHub('fixture/repository'); state = self.state()
+        merged = state | {'state': 'MERGED', 'mergeCommit': {'oid': 'd' * 40}}
+        sent = []
+        with patch.object(client, 'pr', side_effect=[state, state, merged]), \
+             patch.object(client, 'required_checks', return_value=[]), \
+             patch.object(client, 'threads', return_value=[]), \
+             patch('harness.delivery.command', side_effect=lambda argv, cwd=None: sent.append(argv) or ''):
+            self.assertEqual(merged, client.merge(1, 'a' * 40, 'b' * 40, merge_method='squash'))
+        self.assertIn('--squash', sent[0])
+        with patch('harness.delivery.command') as blocked:
+            with self.assertRaisesRegex(DeliveryError, 'merge strategy'):
+                client.merge(1, 'a' * 40, 'b' * 40, merge_method='octopus')
+            blocked.assert_not_called()
+
     def test_issue_marker_is_stable_and_english(self):
         body=issue_body('task-1','Expected result',['Run the fixture'])
         self.assertIn('<!-- agents-local-task:task-1 -->',body)

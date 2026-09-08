@@ -28,6 +28,7 @@ through the same check. Full private evidence belongs in Agents Vault.
 ```sh
 python3 -m harness.delivery check-public pr-body.md --english
 python3 -m harness.delivery merge --repo owner/repository --pr 123 \
+  --branch <observed-base-branch> --merge-method merge \
   --head <reviewed-head-oid> --base <observed-base-oid>
 python3 -m harness.delivery sync --repo "$AGENTS_ROOT" \
   --remote <verified-origin-url> --merge-sha <verified-merge-oid>
@@ -42,6 +43,8 @@ check producer IDs are retained and matched against paginated authenticated
 check-run metadata for the reviewed head. A previously merged matching PR is
 read back without another mutation.
 The GitHub operation pins the expected head and respects native protection;
+select `merge`, `squash` or `rebase` only when that method is enabled by the
+repository policy.
 GitHub has no atomic base-OID condition on this operation. Do not claim a merge
 queue, atomic base pin or atomic review-thread lock. Native conversation
 resolution protection is necessary for server-side enforcement against a review
