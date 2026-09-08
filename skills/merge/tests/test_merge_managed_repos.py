@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from skills.merge.scripts.merge_managed_repos import parse_managed_repositories, process_repo
+from skills.merge.scripts.merge_managed_repos import parse_managed_repositories, process_repo, select_repositories
 
 
 def git(repo: Path, *args: str) -> str:
@@ -75,6 +75,38 @@ class MergeManagedReposTest(unittest.TestCase):
         self.assertEqual(result.merge_status, "merged")
         self.assertEqual(result.local_change, "none")
         self.assertTrue((local / "remote.txt").exists())
+        head = git(local, "rev-parse", "HEAD")
+        repeated = process_repo(self.repo_from(local), execute=True)
+        self.assertEqual(repeated.merge_status, "not_needed")
+        self.assertEqual(head, git(local, "rev-parse", "HEAD"))
+
+    def test_detached_head_blocks_before_fetch(self) -> None:
+        remote, local = self.init_repo_pair()
+        self.commit_remote_update(remote)
+        git(local, "switch", "--detach", "HEAD")
+        result = process_repo(self.repo_from(local), execute=True)
+        self.assertEqual(result.merge_status, "blocked")
+        self.assertEqual(result.reason, "detached_head")
+        self.assertFalse((local / "remote.txt").exists())
+
+    def test_remote_failure_is_blocked_without_local_merge(self) -> None:
+        remote, local = self.init_repo_pair()
+        self.commit_remote_update(remote)
+        subprocess.run(["git", "-C", str(local), "remote", "set-url", "origin", str(self.root / "missing.git")], check=True)
+        before = git(local, "rev-parse", "HEAD")
+        result = process_repo(self.repo_from(local), execute=True)
+        self.assertEqual(result.merge_status, "blocked")
+        self.assertTrue(result.reason.startswith("fetch_failed:"))
+        self.assertEqual(before, git(local, "rev-parse", "HEAD"))
+
+    def test_named_repository_selection_is_explicit(self) -> None:
+        _, local = self.init_repo_pair()
+        other = self.root / "other"
+        subprocess.check_call(["git", "clone", str(self.root / "remote.git"), str(other)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        table = self.root / "two-repos.md"
+        write(table, self.make_repo(local) + self.make_repo(other).replace("| local |", "| second |"))
+        selected = select_repositories(parse_managed_repositories(table), ["local"])
+        self.assertEqual(["local"], [item.name for item in selected])
 
     def test_behind_zero_is_not_needed(self) -> None:
         _, local = self.init_repo_pair()
@@ -116,6 +148,16 @@ class MergeManagedReposTest(unittest.TestCase):
         self.assertIn("README.md", result.conflict_files)
         # Aborted: no in-progress merge, no unmerged paths left behind.
         self.assertEqual(git(local, "diff", "--name-only", "--diff-filter=U"), "")
+
+        # Both intended sides remain available for an explicit, task-context
+        # resolution; the helper never mechanically discards either side.
+        self.assertIn("local side", git(local, "show", "HEAD:README.md"))
+        self.assertIn("remote side", git(local, "show", "origin/main:README.md"))
+        write(local / "README.md", "local side\nremote side\n")
+        git(local, "add", "README.md")
+        git(local, "commit", "-m", "resolve semantic conflict")
+        self.assertEqual(git(local, "status", "--porcelain"), "")
+        self.assertEqual(git(local, "show", "HEAD:README.md"), "local side\nremote side")
 
     def test_dry_run_does_not_commit_or_merge(self) -> None:
         remote, local = self.init_repo_pair()

@@ -52,23 +52,47 @@
     {
       "id": 9,
       "prompt": "https://github.com/acme/app/pull/42 をマージして",
-      "expected_output": "Routes the bare GitHub PR URL to pr-merge-gate, performs no local git merge or unrelated repository update, and does not require a retired Saihai envelope.",
+      "expected_output": "Routes the bare GitHub PR URL to pr-merge-gate, performs no local git merge or unrelated repository update, and keeps the PR request separate from local repository synchronization.",
       "files": [],
-      "expectations": ["Routes a bare PR URL to pr-merge-gate", "Does not run local merge", "Does not update unrelated repositories", "Does not require a retired Saihai envelope"]
+      "expectations": [
+        "Routes a bare PR URL to pr-merge-gate",
+        "Does not run local merge",
+        "Does not update unrelated repositories",
+        "Keeps PR and local requests separate"
+      ]
     },
     {
       "id": 10,
       "prompt": "PR #12とpullが止めたdirty repoをまとめてmergeして",
-      "expected_output": "Returns mixed_context and performs no fetch, commit, stash, local git merge, or PR handoff; it requires separately authorized local and Saihai PR-merge processes.",
+      "expected_output": "Rejects the mixed local/PR request as ambiguous; performs no fetch, commit, stash, local merge, or PR handoff. The caller must issue separate local and GitHub PR requests.",
       "files": [],
-      "expectations": ["Rejects mixed context as one ambiguous request", "Performs no local mutation", "Performs no PR handoff", "Requires separate authorization"]
+      "expectations": [
+        "Rejects mixed context as one ambiguous request",
+        "Performs no local mutation",
+        "Performs no PR handoff",
+        "Requires separate requests"
+      ]
     },
     {
       "id": 11,
       "prompt": "cleanなworking branchで通常リスクのlocal mergeをして。agent reviewやbot reviewは待たなくてよい。",
       "expected_output": "The merge skill confirms task context, runs focused validation for the local integration and one integrated full validation as applicable, and performs the safe local merge without waiting for an agent or bot review. It does not push or invoke the GitHub PR merge gate.",
       "files": [],
-      "expectations": ["Does not add a normal-risk review wait", "Runs the local validation gate", "Keeps the no-push and local-only boundary"]
+      "expectations": [
+        "Does not add a normal-risk review wait",
+        "Runs the local validation gate",
+        "Keeps the no-push and local-only boundary"
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "この managed repository 名だけを merge して。別repoには触れないで。",
+      "expected_output": "Passes --repo-name for the named repository, processes only that entry, and reports the selected scope. A repeat after synchronization returns not_needed without another merge commit or unrelated repository update.",
+      "expectations": [
+        "Named repository is the only selected scope",
+        "No unrelated repository operation",
+        "Repeat has no extra commit"
+      ]
     }
   ]
 }

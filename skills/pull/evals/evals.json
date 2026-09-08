@@ -48,6 +48,16 @@
       "prompt": "プルして。dirty な repo があれば止めて",
       "expected_output": "Uses the pull skill and blocks dirty repositories that have remote updates.",
       "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "この managed repository 名だけを pull して。",
+      "expected_output": "Passes --repo-name for the named repository, fetches and safely updates only that checkout, and leaves all other configured repositories untouched. Detached, dirty, divergent, or remote-failure state is reported as a blocker.",
+      "expectations": [
+        "Named repository is the only selected scope",
+        "Other repositories are unchanged",
+        "Unsafe states remain explicit blockers"
+      ]
     }
   ]
 }

@@ -13,6 +13,12 @@ the matching path/branch whose HEAD descends from that base. An existing branch
 without a matching worktree requires explicit reconciliation. This helper is not
 a scheduler or a writer lock; the task service owns concurrent worker exclusion.
 
+For a mixed same-file change, preserve the primary index by creating an alternate
+index from `HEAD`, applying the reviewed patch with
+`skills/commit/scripts/stage_approved_patch.py --index-file`, and running the
+commit with that same `GIT_INDEX_FILE`. This lets one purpose be committed while
+the other staged/unstaged purpose remains byte-for-byte in the original checkout.
+
 `public_text` rejects detected secrets and personal home paths before public
 transmission. With `english=True`, Japanese/CJK text requires English rewriting.
 This is a conservative language check, not a complete language/secret classifier.
@@ -43,6 +49,8 @@ arriving after the last read; local reobservation alone cannot eliminate that ra
 
 Main sync verifies origin, requires the intended clean attached branch, fetches
 and checks that remote main contains the merge, then fast-forwards. Dirty,
-divergent, detached and wrong-branch checkouts are retained. Dependents must wait
-for this observed synchronization; independent work can continue. Archival is a
-separate supported App action after durable context save and actual merge/sync.
+divergent, detached and wrong-branch checkouts are retained with a specific
+blocker. Repeating sync after the same readback is a no-op and creates no extra
+commit. Dependents must wait for this observed synchronization; independent work
+can continue. Archival is a separate supported App action after durable context
+save and actual merge/sync.

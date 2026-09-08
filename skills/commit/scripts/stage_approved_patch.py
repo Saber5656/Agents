@@ -4,12 +4,15 @@
 This helper is intentionally small: it validates patch paths against an
 approved scope, then applies the patch to the index only. It exists to avoid
 interactive `git add -p` sessions and Task-Index/Kanban line-delete hacks.
+With ``--index-file`` callers can preinitialize an alternate index from HEAD
+to split a reviewed hunk from an unrelated staged hunk in the same file.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import posixpath
 import shlex
 import subprocess
@@ -81,13 +84,24 @@ def validate_patch_paths(paths: list[str], owned_paths: list[str], excluded_path
     return errors
 
 
-def run_git(repo: Path, args: list[str], *, patch_path: Path) -> subprocess.CompletedProcess[str]:
+def run_git(
+    repo: Path,
+    args: list[str],
+    *,
+    patch_path: Path,
+    index_file: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = None
+    if index_file is not None:
+        env = dict(os.environ)
+        env['GIT_INDEX_FILE'] = str(index_file)
     return subprocess.run(
         ["git", "-C", str(repo), *args, str(patch_path)],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        env=env,
     )
 
 
@@ -103,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--excluded-path", action="append", default=[], help="Forbidden path scope; repeatable")
     parser.add_argument("--check", action="store_true", help="Validate only; do not stage")
     parser.add_argument("--unidiff-zero", action="store_true", help="Allow zero-context hunks")
+    parser.add_argument(
+        "--index-file",
+        help="Use this preinitialized alternate index, preserving the repository's primary index",
+    )
     args = parser.parse_args(argv)
 
     repo = Path(args.repo).expanduser().resolve()
@@ -123,7 +141,8 @@ def main(argv: list[str] | None = None) -> int:
     git_args = ["apply", "--cached", "--check"]
     if args.unidiff_zero:
         git_args.append("--unidiff-zero")
-    check = run_git(repo, git_args, patch_path=patch_path)
+    index_file = Path(args.index_file).expanduser().absolute() if args.index_file else None
+    check = run_git(repo, git_args, patch_path=patch_path, index_file=index_file)
     if check.returncode != 0:
         emit(
             {
@@ -142,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     git_args = ["apply", "--cached"]
     if args.unidiff_zero:
         git_args.append("--unidiff-zero")
-    apply = run_git(repo, git_args, patch_path=patch_path)
+    apply = run_git(repo, git_args, patch_path=patch_path, index_file=index_file)
     if apply.returncode != 0:
         emit(
             {

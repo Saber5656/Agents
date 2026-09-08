@@ -42,10 +42,31 @@ def public_text(text,env=None,english=False):
     return text
 
 
+def public_git_changes(repo, base, head, env=None):
+    """Validate the complete unpublished commit messages and diff before export.
+
+    This is deliberately a read-only check.  It binds both revisions to full
+    commit IDs and scans the bytes that would be exposed, including commit
+    messages that are not present in the rendered patch.
+    """
+    repo = Path(repo).resolve()
+    oid(base); oid(head)
+    git(repo, 'cat-file', '-e', base + '^{commit}')
+    git(repo, 'cat-file', '-e', head + '^{commit}')
+    history = git(repo, 'log', '--format=%H%n%B', base + '..' + head, '--')
+    diff = git(repo, 'diff', '--no-ext-diff', '--binary', base + '..' + head, '--')
+    public_text(history, env)
+    public_text(diff, env)
+    return history + ('\n' if history and diff else '') + diff
+
+
 def prepare_worktree(repo,path,branch,base):
     """Reuse only a matching identity; do not reset, stash or clean other work."""
     repo=Path(repo).resolve();path=Path(path).absolute();oid(base)
-    git(repo,'cat-file','-e',base+'^{commit}')
+    try:
+        git(repo,'cat-file','-e',base+'^{commit}')
+    except DeliveryError as exc:
+        raise DeliveryError('Selected immutable base is unavailable') from exc
     if branch in ('main','master') or branch.startswith('-'):
         raise DeliveryError('Select a task branch')
     git(repo,'check-ref-format','--branch',branch)
@@ -58,7 +79,21 @@ def prepare_worktree(repo,path,branch,base):
             raise DeliveryError('Existing workspace does not descend from selected base')
     else:
         # Existing refs are deliberately not repurposed without their workspace identity.
-        git(repo,'worktree','add','-b',branch,str(path),base)
+        try:
+            branch_probe=subprocess.run(
+                ['git','show-ref','--verify','--quiet','refs/heads/'+branch],
+                cwd=repo, capture_output=True, text=True, timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DeliveryError('Cannot determine whether task branch exists') from exc
+        if branch_probe.returncode == 0:
+            raise DeliveryError('Existing branch has no matching worktree; explicit reconciliation required')
+        if branch_probe.returncode != 1:
+            raise DeliveryError('Cannot determine whether task branch exists')
+        try:
+            git(repo,'worktree','add','-b',branch,str(path),base)
+        except DeliveryError as exc:
+            raise DeliveryError('Worktree creation failed; preserve existing repository state') from exc
     return {'worktree':str(path.resolve()),'branch':branch,'base':base,
             'head':git(path,'rev-parse','HEAD')}
 
@@ -70,7 +105,11 @@ def verify_remote(repo,expected):
 
 def sync_main(repo,branch,merge_sha,remote):
     oid(merge_sha);verify_remote(repo,remote)
-    if git(repo,'symbolic-ref','--short','HEAD')!=branch:
+    try:
+        current_branch=git(repo,'symbolic-ref','--short','HEAD')
+    except DeliveryError as exc:
+        raise DeliveryError('Canonical checkout is detached or on another branch') from exc
+    if current_branch!=branch:
         raise DeliveryError('Canonical checkout is detached or on another branch')
     if git(repo,'status','--porcelain=v1','-uall'):
         raise DeliveryError('Canonical checkout is dirty; preserve local state')
@@ -83,6 +122,23 @@ def sync_main(repo,branch,merge_sha,remote):
     git(repo,'merge','--ff-only',target)
     if git(repo,'rev-parse','HEAD')!=target:raise DeliveryError('Main read-back mismatch')
     return target
+
+
+def _check_successful(check):
+    """Accept only an unambiguous completed success from a check object.
+
+    Check runs report ``status=COMPLETED`` and ``conclusion=SUCCESS`` while
+    status contexts report ``state=SUCCESS``.  A mixed or incomplete object is
+    deliberately rejected so one field cannot mask a contradictory result.
+    """
+    conclusion = check.get('conclusion')
+    state = check.get('state')
+    status = check.get('status')
+    if conclusion is not None:
+        if str(conclusion).upper() != 'SUCCESS' or state is not None:
+            return False
+        return status is None or str(status).upper() == 'COMPLETED'
+    return state is not None and str(state).upper() == 'SUCCESS' and status is None
 
 
 def merge_ready(state,head,base,required,threads):
@@ -105,11 +161,11 @@ def merge_ready(state,head,base,required,threads):
             matches=[c for c in checks if (c.get('name') or c.get('context'))==name]
         if not matches:raise DeliveryError('Missing required check: '+name)
         for check in matches:
-            if str(check.get('conclusion','')).upper() not in ('SUCCESS','NEUTRAL','SKIPPED') and str(check.get('state','')).upper()!='SUCCESS':
+            if not _check_successful(check):
                 raise DeliveryError('Required check not successful: '+name)
     # A reported failed/pending check is not silently ignored even if unprotected.
     for check in checks:
-        if str(check.get('conclusion','')).upper() not in ('SUCCESS','NEUTRAL','SKIPPED') and str(check.get('state','')).upper()!='SUCCESS':
+        if not _check_successful(check):
             raise DeliveryError('Observed check not successful')
 
 
@@ -129,7 +185,142 @@ class GitHub:
 
     def pr(self,number):
         return json.loads(command(['gh','pr','view',str(number),'--repo',self.repo,'--json',
-            'number,state,isDraft,headRefOid,baseRefOid,baseRefName,reviewDecision,mergeable,statusCheckRollup,mergeCommit']))
+            'number,url,state,isDraft,headRefName,headRefOid,baseRefOid,baseRefName,reviewDecision,mergeable,statusCheckRollup,mergeCommit,title,body,assignees,labels']))
+
+    def list_prs(self, head, base):
+        """List candidate PRs without treating an empty eventual page as proof.
+
+        The caller uses a second read after a failed create.  A zero-result
+        second read is returned as zero and is handled as an uncertain outcome,
+        so it can never trigger a blind duplicate create.
+        """
+        try:
+            value = json.loads(command(['gh', 'pr', 'list', '--repo', self.repo,
+                '--state', 'all', '--head', head, '--base', base, '--json',
+                'number,url,state,headRefName,headRefOid,baseRefName,baseRefOid,title,body,assignees,labels']))
+        except (json.JSONDecodeError, DeliveryError) as exc:
+            raise DeliveryError('PR listing incomplete') from exc
+        if not isinstance(value, list):
+            raise DeliveryError('PR listing incomplete')
+        return value
+
+    @staticmethod
+    def _matching_prs(rows, head, base):
+        owners = {head, head.split(':', 1)[-1]}
+        return [row for row in rows
+                if row.get('baseRefName') == base and row.get('headRefName') in owners]
+
+    def push_branch(self, repo, branch, head, remote='origin', *, expected_remote,
+                    base, allowed_paths=None, env=None):
+        """Push one reviewed commit bound to its remote and immutable base."""
+        repo = Path(repo).resolve(); oid(head)
+        if branch in ('main', 'master') or branch.startswith('-'):
+            raise DeliveryError('A task branch is required for PR publication')
+        try:
+            if git(repo, 'symbolic-ref', '--short', 'HEAD') != branch:
+                raise DeliveryError('Selected task branch is not checked out')
+        except DeliveryError as exc:
+            if str(exc) == 'Selected task branch is not checked out':
+                raise
+            raise DeliveryError('Selected task branch is detached') from exc
+        if git(repo, 'rev-parse', 'HEAD') != head:
+            raise DeliveryError('Selected commit is not the current HEAD')
+        dirty = git(repo, 'status', '--porcelain=v1', '-uall').splitlines()
+        oid(base)
+        try:
+            if git(repo, 'merge-base', base, head) != base:
+                raise DeliveryError('Selected commit does not descend from the reviewed base')
+        except DeliveryError as exc:
+            if str(exc) == 'Selected commit does not descend from the reviewed base':
+                raise
+            raise DeliveryError('Reviewed base is unavailable') from exc
+        public_git_changes(repo, base, head, env)
+        if allowed_paths is not None:
+            dirty_names = [line[3:] for line in dirty if len(line) >= 4]
+            allowed = tuple(str(path).rstrip('/') for path in allowed_paths)
+            if any(name == path or name.startswith(path + '/')
+                   for name in dirty_names for path in allowed):
+                raise DeliveryError('Task-owned unpublished changes must be committed first')
+            names = git(repo, 'diff', '--name-only', base + '..' + head, '--').splitlines()
+            if any(not any(name == path or name.startswith(path + '/') for path in allowed)
+                   for name in names):
+                raise DeliveryError('Selected commit contains an out-of-scope path')
+        urls = [git(repo, 'remote', 'get-url', remote),
+                git(repo, 'remote', 'get-url', '--push', remote)]
+        if urls[0] != urls[1]:
+            raise DeliveryError('Remote fetch and push destinations differ')
+        if urls[0] != expected_remote:
+            raise DeliveryError('Remote destination changed')
+        before = git(repo, 'ls-remote', '--heads', remote, branch)
+        before_oid = before.split()[0] if before else None
+        if before_oid and before_oid != head:
+            raise DeliveryError('Remote branch diverged; preserve it')
+        try:
+            command(['git', 'push', remote,
+                     f'refs/heads/{branch}:refs/heads/{branch}'], cwd=repo)
+        except DeliveryError as exc:
+            # A lost response is reconciled by the remote readback.  It is
+            # never retried as a second push when the result is unknown.
+            after = git(repo, 'ls-remote', '--heads', remote, branch)
+            after_oid = after.split()[0] if after else None
+            if after_oid != head:
+                raise DeliveryError('Push outcome unknown; reconcile before retry') from exc
+        after = git(repo, 'ls-remote', '--heads', remote, branch)
+        remote_head = after.split()[0] if after else None
+        if remote_head != head:
+            raise DeliveryError('Remote branch readback mismatch')
+        return {'remote': remote, 'branch': branch, 'remote_head': remote_head,
+                'unrelated_dirty': dirty}
+
+    def create_or_reuse_pr(self, head, base, title, body, *, assignees=(), labels=(),
+                           head_oid, env=None):
+        """Create/reconcile one PR whose readback is bound to reviewed ``head_oid``."""
+        if not head or not base or head == base or head in ('main', 'master'):
+            raise DeliveryError('A task branch and distinct base are required')
+        oid(head_oid)
+        public_text(title, env, english=True); public_text(body, env, english=True)
+        rows = self.list_prs(head, base)
+        matches = self._matching_prs(rows, head, base)
+        if len(matches) > 1:
+            raise DeliveryError('Multiple matching PRs require reconciliation')
+        if matches:
+            result = matches[0]
+        else:
+            argv = ['gh', 'pr', 'create', '--repo', self.repo, '--base', base,
+                    '--head', head, '--title', title, '--body', body]
+            for login in assignees: argv += ['--assignee', login]
+            for label in labels: argv += ['--label', label]
+            try:
+                command(argv)
+            except DeliveryError as exc:
+                # A failed response is ambiguous.  Reconcile the same exact
+                # branch/base pair; an empty page is not definitive.
+                try:
+                    rows = self.list_prs(head, base)
+                except DeliveryError as read_exc:
+                    raise DeliveryError('PR create outcome unknown; reconcile before retry') from read_exc
+                matches = self._matching_prs(rows, head, base)
+                if len(matches) != 1:
+                    raise DeliveryError('PR create outcome unknown; reconcile before retry') from exc
+                result = matches[0]
+            else:
+                rows = self.list_prs(head, base)
+                matches = self._matching_prs(rows, head, base)
+                if len(matches) != 1:
+                    raise DeliveryError('PR create outcome unknown; reconcile before retry')
+                result = matches[0]
+        if str(result.get('state', '')).upper() != 'OPEN':
+            raise DeliveryError('Matching PR is not open')
+        if result.get('title') != title or result.get('body') != body:
+            raise DeliveryError('PR readback public content differs from draft')
+        if result.get('headRefOid') != head_oid:
+            raise DeliveryError('PR head readback mismatch')
+        if assignees:
+            observed = {item.get('login') if isinstance(item, dict) else item
+                        for item in (result.get('assignees') or [])}
+            if observed != set(assignees):
+                raise DeliveryError('PR assignees readback mismatch')
+        return result
 
     def required_checks(self,branch):
         # Both modern rules and legacy branch protection must be observed.
@@ -190,7 +381,18 @@ class GitHub:
         merge_ready(current,head,base,required,fresh_threads)
         # GitHub enforces native protection and the expected head. The API has no
         # compare-and-swap for base; do not claim an atomic base pin/queue guarantee.
-        command(['gh','pr','merge',str(number),'--repo',self.repo,'--merge','--match-head-commit',head])
+        try:
+            command(['gh','pr','merge',str(number),'--repo',self.repo,'--merge','--match-head-commit',head])
+        except DeliveryError as exc:
+            try:
+                result = self.pr(number)
+            except DeliveryError as read_exc:
+                raise DeliveryError('Merge outcome unknown; reconcile before retry') from read_exc
+            if result.get('state') != 'MERGED' or result.get('headRefOid') != head:
+                raise DeliveryError('Merge outcome unknown; reconcile before retry') from exc
+            if result.get('baseRefName') != branch or not result.get('mergeCommit'):
+                raise DeliveryError('Merge outcome unknown; reconcile before retry') from exc
+            return result
         result=self.pr(number)
         if result['state']!='MERGED' or not result.get('mergeCommit') or result.get('baseRefName')!=branch or result.get('headRefOid')!=head:
             raise DeliveryError('Merge pending; reconcile before retry')
@@ -201,6 +403,8 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     p=parser.add_subparsers(dest='command',required=True)
     check=p.add_parser('check-public');check.add_argument('path',type=Path);check.add_argument('--english',action='store_true')
+    revision=p.add_parser('check-public-revision');revision.add_argument('--repo',type=Path,required=True)
+    revision.add_argument('--base',required=True);revision.add_argument('--head',required=True)
     sync=p.add_parser('sync');sync.add_argument('--repo',type=Path,required=True);sync.add_argument('--remote',required=True)
     sync.add_argument('--branch',default='main');sync.add_argument('--merge-sha',required=True)
     merge=p.add_parser('merge');merge.add_argument('--repo',required=True);merge.add_argument('--pr',type=int,required=True)
@@ -208,6 +412,8 @@ def main(argv=None):
     args=parser.parse_args(argv)
     try:
         if args.command=='check-public':public_text(args.path.read_text(),english=args.english);result={'status':'checked'}
+        elif args.command=='check-public-revision':
+            public_git_changes(args.repo,args.base,args.head);result={'status':'checked'}
         elif args.command=='sync':result={'main':sync_main(args.repo,args.branch,args.merge_sha,args.remote)}
         else:result=GitHub(args.repo).merge(args.pr,args.head,args.base,args.branch)
         print(json.dumps(result,indent=2));return 0

@@ -11,6 +11,8 @@ updates; `merge` resolves them.
 python3 skills/merge/scripts/merge_managed_repos.py --dry-run
 python3 skills/merge/scripts/merge_managed_repos.py --execute
 python3 skills/merge/scripts/merge_managed_repos.py --execute --stash
+# Limit the operation to one configured repository.
+python3 skills/merge/scripts/merge_managed_repos.py --execute --repo-name skills-repo
 ```
 
 ## Trigger
@@ -40,5 +42,8 @@ python3 skills/merge/scripts/merge_managed_repos.py --execute --stash
   the required repository, base/head and PR identity. A bare PR URL/number is
   inspected for missing identity and remains pending until the request scope is
   clear; no legacy envelope is required.
+- A dependent local unit waits for an observed synchronization result; independent
+  units may continue. Repeating a completed local merge is a readback-only
+  `not_needed` result and does not create another commit.
 
 See [SKILL.md](SKILL.md) for full workflow details.
