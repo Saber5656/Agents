@@ -504,6 +504,10 @@ def find_existing_ruleset(args: argparse.Namespace) -> dict[str, Any] | None:
         fail("matched ruleset did not contain a stable id.")
     if "rules" not in existing or "conditions" not in existing:
         existing = fetch_ruleset(args.repo, str(existing["id"]))
+    if (existing.get("inherited") is True
+            or existing.get("source_type") not in (None, "Repository")
+            or existing.get("source") not in (None, args.repo)):
+        fail("ruleset ownership is inherited or differs from the target repository; no repository mutation is allowed.")
     return existing
 
 

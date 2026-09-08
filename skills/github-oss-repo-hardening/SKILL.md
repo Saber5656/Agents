@@ -359,7 +359,9 @@ preimage. `merge_existing_ruleset` preserves existing enforcement, bypass
 actors, conditions, unknown rule types, unknown rule parameters, and existing
 status-check identities; it adds requested managed checks without discarding
 their integration metadata. Server-owned `source`, `source_type`, and
-`inherited` metadata is used for drift detection and is never sent in the
+`inherited` metadata is used for drift detection. Inherited/organization-owned or
+other-repository rulesets are rejected before planning or mutation; repository
+read access does not authorize writing their upstream owner. Metadata is never sent in the
 repository write body.
 
 The reviewed context stores a hash of the complete observed preimage (apart
