@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import secrets
@@ -465,8 +466,8 @@ def run_command(
     receipt_dir: str | Path | None = None,
     request_id: str | None = None,
 ) -> int:
-    if timeout is None or timeout <= 0:
-        raise ValueError("timeout must be positive")
+    if timeout is None or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be positive and finite")
     environment = dict(os.environ)
     request_id = request_id or secrets.token_hex(16)
     safe_args = _redact_value(args, environment)
@@ -602,8 +603,18 @@ def run_command(
     return 124 if timed_out else returncode
 
 
+def _positive_finite_timeout(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be positive and finite") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("timeout must be positive and finite")
+    return parsed
+
+
 def _add_execution_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--timeout", type=_positive_finite_timeout, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--receipt-dir", help="Private directory for durable request/result artifacts.")
     parser.add_argument("--request-id", help="Stable id for a resumable receipt.")
 

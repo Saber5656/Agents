@@ -44,6 +44,7 @@ def _run_cli(tmp_path, *args, extra_env=None):
         text=True,
         capture_output=True,
         env=env,
+        timeout=10,
     )
 
 
@@ -362,3 +363,15 @@ def test_receipt_classifies_auth_quota_and_missing_usage(tmp_path, body, exit_co
     assert payload["usage"] is None
     assert payload["usage_source"] == "provider_did_not_report"
     assert Path(payload["receipt_path"]).exists()
+
+
+@pytest.mark.parametrize("timeout", ["nan", "inf", "-inf"])
+def test_nonfinite_timeout_is_rejected_before_process(tmp_path, timeout):
+    marker = tmp_path / "called"
+    fake = tmp_path / "hermes"
+    fake.write_text(f"#!/bin/sh\necho called > {str(marker)!r}\n")
+    fake.chmod(0o755)
+    result = _run_cli(tmp_path, "oneshot", "--prompt", "fixture", "--timeout=" + timeout)
+    assert result.returncode == 2
+    assert "finite" in result.stderr
+    assert not marker.exists()
