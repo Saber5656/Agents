@@ -77,11 +77,22 @@ def _events(value: Any) -> set[str] | None:
 
 
 def _workflow_identity(workflow: Mapping[str, Any]) -> str | None:
-    for key in ("check_name", "name", "path"):
-        value = workflow.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
+    """Return only the observed job/check-run name.
+
+    A workflow display name or path identifies a producer configuration, not a
+    status check identity. Accepting either as a fallback can produce a false
+    queue-readiness result.
+    """
+    value = workflow.get("check_name")
+    return value if isinstance(value, str) and value else None
+
+
+def _pending(required_check: str, missing: list[str], reason: str) -> dict[str, Any]:
+    return {"required_check": required_check, "missing": missing, "reason": reason}
+
+
+def _global_pending(missing: list[str], reason: str) -> dict[str, Any]:
+    return {"missing": missing, "reason": reason}
 
 
 def evaluate_workflow_requirements(
@@ -95,37 +106,162 @@ def evaluate_workflow_requirements(
     incomplete and cannot produce an activation proposal.
     """
     if workflows is None or required_checks is None:
-        return _result(UNKNOWN, "required-check or workflow evidence is missing", required_checks=[], missing_workflows=[], missing_merge_group=[])
+        checks = list(required_checks) if isinstance(required_checks, Sequence) and not isinstance(required_checks, (str, bytes, bytearray)) else []
+        missing = []
+        if required_checks is None:
+            missing.append("required_checks")
+        if workflows is None:
+            missing.append("workflows")
+        return _result(
+            UNKNOWN,
+            "required-check or workflow evidence is missing",
+            required_checks=checks,
+            missing_workflows=checks,
+            missing_merge_group=[],
+            observed_checks=[],
+            pending_evidence=[
+                _global_pending(missing, "required-check or workflow evidence is missing")
+            ] + [
+                _pending(
+                    check,
+                    ["check_name", "producer", "head", "on"],
+                    "observed job/check-run evidence is missing",
+                )
+                for check in checks
+                if isinstance(check, str)
+            ],
+        )
     if not isinstance(workflows, Sequence) or isinstance(workflows, (str, bytes, bytearray)):
-        return _result(UNKNOWN, "workflow evidence is malformed", required_checks=[], missing_workflows=[], missing_merge_group=[])
+        return _result(
+            UNKNOWN,
+            "workflow evidence is malformed",
+            required_checks=[],
+            missing_workflows=[],
+            missing_merge_group=[],
+            observed_checks=[],
+            pending_evidence=[_global_pending(["workflows"], "workflow evidence is malformed")],
+        )
     if not isinstance(required_checks, Sequence) or isinstance(required_checks, (str, bytes, bytearray)):
-        return _result(UNKNOWN, "required-check evidence is malformed", required_checks=[], missing_workflows=[], missing_merge_group=[])
+        return _result(
+            UNKNOWN,
+            "required-check evidence is malformed",
+            required_checks=[],
+            missing_workflows=[],
+            missing_merge_group=[],
+            observed_checks=[],
+            pending_evidence=[_global_pending(["required_checks"], "required-check evidence is malformed")],
+        )
     checks = [check for check in required_checks if isinstance(check, str) and check]
     if len(checks) != len(required_checks):
-        return _result(UNKNOWN, "required-check identities are missing or malformed", required_checks=checks, missing_workflows=[], missing_merge_group=[])
+        return _result(
+            UNKNOWN,
+            "required-check identities are missing or malformed",
+            required_checks=checks,
+            missing_workflows=[],
+            missing_merge_group=[],
+            observed_checks=[],
+            pending_evidence=[_global_pending(["exact_required_check_identity"], "required-check identities are missing or malformed")],
+        )
     if not checks:
-        return _result(INCOMPLETE, "at least one exact required check is needed before queue activation", required_checks=[], missing_workflows=[], missing_merge_group=[])
+        return _result(
+            INCOMPLETE,
+            "at least one exact required check is needed before queue activation",
+            required_checks=[],
+            missing_workflows=[],
+            missing_merge_group=[],
+            observed_checks=[],
+            pending_evidence=[_global_pending(["required_checks"], "at least one exact required check is needed")],
+        )
+    if len(set(checks)) != len(checks):
+        return _result(
+            UNKNOWN,
+            "required-check identities are duplicated",
+            required_checks=checks,
+            missing_workflows=[],
+            missing_merge_group=[],
+            observed_checks=[],
+            pending_evidence=[_global_pending(["unique_required_checks"], "required checks must be unique")],
+        )
 
-    by_identity: dict[str, Mapping[str, Any]] = {}
+    by_identity: dict[str, list[Mapping[str, Any]]] = {}
     for workflow in workflows:
         if not isinstance(workflow, Mapping):
-            return _result(UNKNOWN, "workflow evidence is malformed", required_checks=checks, missing_workflows=[], missing_merge_group=[])
+            return _result(
+                UNKNOWN,
+                "workflow evidence is malformed",
+                required_checks=checks,
+                missing_workflows=[],
+                missing_merge_group=[],
+                observed_checks=[],
+                pending_evidence=[
+                    _global_pending(
+                        ["check_name", "producer", "head", "on"],
+                        "workflow item is not a job/check-run observation",
+                    )
+                ],
+            )
         identity = _workflow_identity(workflow)
         if identity is not None:
-            if identity in by_identity:
-                return _result(UNKNOWN, f"workflow identity is ambiguous for required check {identity}", required_checks=checks, missing_workflows=[], missing_merge_group=[])
-            by_identity[identity] = workflow
+            by_identity.setdefault(identity, []).append(workflow)
     missing_workflows = [check for check in checks if check not in by_identity]
     missing_merge_group: list[str] = []
+    observed_checks: list[dict[str, Any]] = []
+    pending_evidence: list[dict[str, Any]] = [
+        _pending(check, ["check_name", "producer", "head", "on"], "no observed job/check-run has this exact check_name")
+        for check in missing_workflows
+    ]
+    malformed = False
     for check in checks:
-        workflow = by_identity.get(check)
-        if workflow is None:
+        observations = by_identity.get(check, [])
+        if not observations:
             continue
+        if len(observations) != 1:
+            malformed = True
+            pending_evidence.append(
+                _pending(
+                    check,
+                    ["unique_observation"],
+                    "multiple job/check-run observations have this exact check_name",
+                )
+            )
+            continue
+        workflow = observations[0]
+        missing: list[str] = []
+        for field in ("producer", "head"):
+            value = workflow.get(field)
+            if not isinstance(value, str) or not value:
+                missing.append(field)
         events = _events(workflow.get("on"))
         if events is None:
-            return _result(UNKNOWN, f"workflow trigger evidence is malformed for required check {check}", required_checks=checks, missing_workflows=missing_workflows, missing_merge_group=[])
+            missing.append("on")
+        if missing:
+            malformed = True
+            pending_evidence.append(
+                _pending(check, missing, "job/check-run evidence is incomplete")
+            )
+            continue
         if "merge_group" not in events:
             missing_merge_group.append(check)
+            pending_evidence.append(_pending(check, ["merge_group"], "required check does not report on merge_group"))
+        observed_checks.append(
+            {
+                "required_check": check,
+                "check_name": workflow["check_name"],
+                "producer": workflow["producer"],
+                "head": workflow["head"],
+                "merge_group": "merge_group" in events,
+            }
+        )
+    if malformed:
+        return _result(
+            UNKNOWN,
+            "required job/check-run evidence is missing or ambiguous",
+            required_checks=checks,
+            missing_workflows=missing_workflows,
+            missing_merge_group=missing_merge_group,
+            observed_checks=observed_checks,
+            pending_evidence=pending_evidence,
+        )
     if missing_workflows or missing_merge_group:
         return _result(
             INCOMPLETE,
@@ -133,6 +269,8 @@ def evaluate_workflow_requirements(
             required_checks=checks,
             missing_workflows=missing_workflows,
             missing_merge_group=missing_merge_group,
+            observed_checks=observed_checks,
+            pending_evidence=pending_evidence,
         )
     return _result(
         "complete",
@@ -141,6 +279,8 @@ def evaluate_workflow_requirements(
         required_checks=checks,
         missing_workflows=[],
         missing_merge_group=[],
+        observed_checks=observed_checks,
+        pending_evidence=[],
     )
 
 
