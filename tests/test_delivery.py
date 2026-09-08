@@ -35,6 +35,37 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaisesRegex(DeliveryError,'immutable'):
             prepare_worktree(self.repo,self.root/'task','task/demo','main')
 
+    def test_existing_branch_without_matching_worktree_requires_reconciliation(self):
+        git(self.repo, 'branch', 'task/demo')
+        with self.assertRaisesRegex(DeliveryError, 'explicit reconciliation'):
+            prepare_worktree(self.repo, self.root/'task', 'task/demo', self.base)
+
+    def test_detached_or_unrelated_existing_directory_is_not_adopted(self):
+        path = self.root/'task'; path.mkdir()
+        with self.assertRaisesRegex(DeliveryError, 'conflicting ownership'):
+            prepare_worktree(self.repo, path, 'task/demo', self.base)
+        detached = self.root/'detached'
+        git(self.repo, 'worktree', 'add', '--detach', str(detached), self.base)
+        self.addCleanup(lambda: git(self.repo, 'worktree', 'remove', str(detached)))
+        with self.assertRaisesRegex(DeliveryError, 'conflicting ownership'):
+            prepare_worktree(self.repo, detached, 'task/detached', self.base)
+
+    def test_missing_immutable_base_has_explicit_incomplete_state(self):
+        with self.assertRaisesRegex(DeliveryError, 'base is unavailable'):
+            prepare_worktree(self.repo, self.root/'task', 'task/demo', 'f'*40)
+
+    def test_worker_readback_matches_actual_cwd_branch_and_base(self):
+        path = self.root/'task'
+        prepared = prepare_worktree(self.repo, path, 'task/demo', self.base)
+        observed = {
+            'cwd': subprocess.check_output(['pwd'], cwd=path, text=True).strip(),
+            'branch': git(path, 'symbolic-ref', '--short', 'HEAD'),
+            'base': git(path, 'merge-base', self.base, 'HEAD'),
+        }
+        self.assertEqual(prepared['worktree'], observed['cwd'])
+        self.assertEqual('task/demo', observed['branch'])
+        self.assertEqual(self.base, observed['base'])
+
     def test_sync_only_clean_main_and_contains_merge(self):
         remote=self.root/'remote.git';git(self.root,'init','--bare',str(remote))
         git(self.repo,'remote','add','origin',str(remote));git(self.repo,'push','origin','main')
@@ -43,6 +74,12 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaisesRegex(DeliveryError,'dirty'):
             sync_main(self.repo,'main',self.base,remote=str(remote))
         self.assertEqual('local',(self.repo/'a').read_text())
+
+    def test_sync_remote_failure_preserves_primary_state(self):
+        (self.repo/'a').write_text('keep dirty')
+        with self.assertRaises(DeliveryError):
+            sync_main(self.repo, 'main', self.base, remote=str(self.root/'missing-remote'))
+        self.assertEqual('keep dirty', (self.repo/'a').read_text())
 
     def test_privacy_before_transmission(self):
         for text in ['fixture '+'/'.join(['','Users','example','private']), 'token '+('ghp_'+'x'*30), '日本語公開本文']:

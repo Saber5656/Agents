@@ -45,7 +45,10 @@ def public_text(text,env=None,english=False):
 def prepare_worktree(repo,path,branch,base):
     """Reuse only a matching identity; do not reset, stash or clean other work."""
     repo=Path(repo).resolve();path=Path(path).absolute();oid(base)
-    git(repo,'cat-file','-e',base+'^{commit}')
+    try:
+        git(repo,'cat-file','-e',base+'^{commit}')
+    except DeliveryError as exc:
+        raise DeliveryError('Selected immutable base is unavailable') from exc
     if branch in ('main','master') or branch.startswith('-'):
         raise DeliveryError('Select a task branch')
     git(repo,'check-ref-format','--branch',branch)
@@ -58,7 +61,21 @@ def prepare_worktree(repo,path,branch,base):
             raise DeliveryError('Existing workspace does not descend from selected base')
     else:
         # Existing refs are deliberately not repurposed without their workspace identity.
-        git(repo,'worktree','add','-b',branch,str(path),base)
+        try:
+            branch_probe=subprocess.run(
+                ['git','show-ref','--verify','--quiet','refs/heads/'+branch],
+                cwd=repo, capture_output=True, text=True, timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DeliveryError('Cannot determine whether task branch exists') from exc
+        if branch_probe.returncode == 0:
+            raise DeliveryError('Existing branch has no matching worktree; explicit reconciliation required')
+        if branch_probe.returncode != 1:
+            raise DeliveryError('Cannot determine whether task branch exists')
+        try:
+            git(repo,'worktree','add','-b',branch,str(path),base)
+        except DeliveryError as exc:
+            raise DeliveryError('Worktree creation failed; preserve existing repository state') from exc
     return {'worktree':str(path.resolve()),'branch':branch,'base':base,
             'head':git(path,'rev-parse','HEAD')}
 
