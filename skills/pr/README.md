@@ -52,3 +52,10 @@ It never equates GitHub mergeability with policy readiness and never merges a PR
 
 See [SKILL.md](SKILL.md) for the full workflow.
 Detailed postconditions are in [references/publication-safety-contract.md](references/publication-safety-contract.md).
+
+The local CLI keeps the executable part small and inspectable: `harness.delivery.public_git_changes`
+checks commit messages and diffs before transmission, `GitHub.push_branch` performs a non-force push
+with exact branch/commit and remote readback, and `GitHub.create_or_reuse_pr` searches the exact
+head/base pair before creating and reconciles a lost response. An empty or stale listing never
+authorizes a second create. These helpers do not claim GitHub exactly-once semantics; an uncertain
+external result remains pending until the same remote object is observed.
