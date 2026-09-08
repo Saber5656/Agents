@@ -743,7 +743,7 @@ class ServiceStore:
             next_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat(timespec="seconds")
         stamp = now()
         with self.tx() as conn:
-            conn.execute("UPDATE service_jobs SET state=?,next_attempt_at=?,last_error=?,updated_at=? WHERE id=?", (terminal, next_at, error or (result.get("text") if isinstance(result, dict) else None), stamp, job["id"]))
+            conn.execute("UPDATE service_jobs SET state=?,next_attempt_at=?,last_error=?,updated_at=? WHERE id=?", (terminal, next_at, error or (result.get("text") if not succeeded and isinstance(result, dict) else None), stamp, job["id"]))
             conn.execute("UPDATE service_attempts SET status=?,ended_at=?,result_json=?,error=? WHERE job_id=? AND attempt_number=?", (attempt_status, stamp, json.dumps(result or {}, ensure_ascii=False), error, job["id"], attempt_no))
         task = self.tasks.get_task(job["task_id"])
         if task is not None:
@@ -1012,8 +1012,7 @@ class ServiceStore:
         result = attempts[-1].get("result") if isinstance(attempts[-1], dict) else None
         if not isinstance(result, dict):
             return None
-        proposal = result.get("publication_proposal")
-        return proposal
+        return _worker_publication_proposal(result)
 
     def _publication_snapshot(self, job, proposal):
         """Capture the host's pre-review publication inputs for later binding."""
@@ -1171,6 +1170,36 @@ class ServiceStore:
         return True
 
 
+def _worker_publication_proposal(result):
+    """Recover the final proposal from persisted multi-message CLI output.
+
+    Progress messages are preserved by the runner before its final JSON. This
+    extracts data only; host snapshot, scope and review checks still authorize
+    every publication independently.
+    """
+    if "publication_proposal" in result:
+        return result["publication_proposal"]
+    text = result.get("text")
+    if not isinstance(text, str):
+        return None
+    decoder = json.JSONDecoder()
+    proposal = None
+    offset = 0
+    while offset < len(text):
+        start = text.find("{", offset)
+        if start < 0:
+            break
+        try:
+            value, consumed = decoder.raw_decode(text, start)
+        except ValueError:
+            offset = start + 1
+            continue
+        offset = consumed
+        if isinstance(value, dict) and "publication_proposal" in value:
+            proposal = value["publication_proposal"]
+    return proposal
+
+
 def default_executor(spec):
     from .runner import Job, run_job, resume_job
     agents_root = Path(spec["agents_root"]).resolve()
@@ -1211,14 +1240,7 @@ def default_executor(spec):
     else:
         result = run_job(job, env, run_dir=run_dir)
     if isinstance(result, dict):
-        proposal = result.get("publication_proposal")
-        if proposal is None and isinstance(result.get("text"), str):
-            try:
-                decoded = json.loads(result["text"])
-            except (TypeError, ValueError):
-                decoded = None
-            if isinstance(decoded, dict):
-                proposal = decoded.get("publication_proposal")
+        proposal = _worker_publication_proposal(result)
         if proposal is not None:
             if not isinstance(proposal, dict):
                 invalid = dict(result)

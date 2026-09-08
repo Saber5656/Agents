@@ -642,6 +642,28 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertNotIn("publication_proposal", result)
 
+    def test_progress_before_final_json_retains_publication_and_recovers_receipt(self):
+        from harness.service import default_executor
+        spec = {"workspace": str(self.workspace), "agents_root": str(self.root),
+                "vault_root": str(self.vault), "run_dir": str(self.vault / "run"),
+                "prompt": "prompt", "context": "context", "model": "gpt-5.6-luna",
+                "effort": "low", "timeout": 1, "updates": []}
+        proposal = {"files": ["harness/README.md"]}
+        completed = {"status": "completed", "text": "Inspecting source and links.\n" +
+                     json.dumps({"publication_proposal": proposal,
+                                 "agents_worker_capture": {"discoveries": []}})}
+        with mock.patch("harness.runner.run_job", return_value=completed):
+            result = default_executor(spec)
+        self.assertEqual(result["publication_proposal"], proposal)
+        # A pre-fix attempt already persisted only the concatenated text.
+        recovered = self.service._latest_publication_proposal({"attempts": [{"result": completed}]})
+        self.assertEqual(recovered, proposal)
+
+    def test_successful_worker_text_is_not_recorded_as_last_error(self):
+        job = self.service.enroll(self.task["id"], self.workspace, "p", "c")
+        self.service.run_once(executor=lambda _: {"status": "completed", "text": "Finished successfully"})
+        self.assertIsNone(self.service.get_job(job["id"])["last_error"])
+
     def test_verification_publishes_worker_proposal_before_publication_readback(self):
         task = self.tasks.create_task(purpose="publish proposal", repository="Saber5656/Agents",
                                       acceptance_evidence=["publication is read back"])
