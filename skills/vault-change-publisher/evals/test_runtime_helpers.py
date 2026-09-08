@@ -6582,16 +6582,14 @@ def load_environment(*, checkout_root, environ, require_catalog):
             os.close(descriptor)
         self.assertTrue(fsynced_workdir)
 
-    def test_evidence_review_contract_allows_only_sanitized_notification(self) -> None:
-        """Authorize bounded notification states while rejecting raw backend text."""
-        prompt = (
-            SKILL_ROOT / "assets" / "daily-it-news.evidence-review.prompt.md"
-        ).read_text(encoding="utf-8")
-        for value in ("delivered", "already_delivered", "failed", "ambiguous"):
-            self.assertIn(f"`{value}`", prompt)
-        self.assertIn("raw Hermes", prompt)
-        self.assertIn("summary body", prompt)
-        self.assertIn("model text", prompt)
+    def test_evidence_review_keeps_notifications_outside_publication_scope(self) -> None:
+        """Current scoped evidence review cannot authorize another message send."""
+        prompt = (SKILL_ROOT / "assets" / "daily-it-news.evidence-review.prompt.md").read_text()
+        flat = " ".join(prompt.split())
+        self.assertIn("does not collect the web, edit ordinary Vault notes, send email or Discord messages", flat)
+        self.assertIn("raw backend response, or model output", flat)
+        self.assertIn("A `save` operation must have no push claim", flat)
+        self.assertIn("bound to that exact published commit", flat)
 
     def test_discord_notification_retries_only_definite_backend_failure(self) -> None:
         """Retry explicit rejection without persisting raw backend details."""
@@ -11581,26 +11579,24 @@ def load_environment(*, checkout_root, environ, require_catalog):
                 {"required_mode": "sweep"},
             )
 
-    def test_review_prompt_selects_authorization_task_for_both_manifests(self) -> None:
-        """Expose the validator's identity contract to the read-only reviewer."""
-        prompt = (SKILL_ROOT / "assets" / "daily-it-news.review.prompt.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("publication_context.authorization_task_id", prompt)
-        self.assertIn("both manifests", prompt)
-        self.assertIn("must not replace the authorization identity", prompt)
+    def test_review_prompt_uses_current_authorization_and_selected_scope(self) -> None:
+        """Keep retired handoff artifacts out of the current review entry."""
+        prompt = (SKILL_ROOT / "assets" / "daily-it-news.review.prompt.md").read_text()
+        current = " ".join(prompt.split("## Historical compatibility reference", 1)[0].split())
+        self.assertIn("user-authorized `save` or `publish`", current)
+        self.assertIn("every selected path belongs to the task", current)
+        self.assertIn("does not construct an internal manifest or choose a review role", current)
+        self.assertNotIn("publication_context.authorization_task_id", current)
+        self.assertNotIn("both manifests", current)
 
-    def test_review_prompt_distinguishes_diff_and_mode_hint_digests(self) -> None:
-        """Tell the reviewer which sealed digest belongs in typed evidence."""
-        prompt = (SKILL_ROOT / "assets" / "daily-it-news.review.prompt.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(
-            "pre_collection_state.<vault>.diff_snapshot_sha256", prompt
-        )
-        self.assertIn("review_state_sha256", prompt)
-        self.assertIn("never copy it", prompt)
-        self.assertIn("never changes the reviewer-owned `file_guard`", prompt)
+    def test_review_prompt_binds_head_preimage_and_selected_tree(self) -> None:
+        """Bind actual scoped review evidence instead of a retired mode hint."""
+        prompt = (SKILL_ROOT / "assets" / "daily-it-news.review.prompt.md").read_text()
+        current = " ".join(prompt.split("## Historical compatibility reference", 1)[0].split())
+        self.assertIn("same task head, preimage, and selected tree", current)
+        self.assertIn("exact staged diff", current)
+        self.assertIn("Git control files still match the captured identities", current)
+        self.assertIn("unresolved review finding, or incomplete history scan", current)
 
     def test_review_canonicalizes_both_containment_paths(self) -> None:
         """Accept a target expressed through a symlinked Vault path."""
