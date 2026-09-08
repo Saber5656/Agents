@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -82,6 +83,78 @@ def test_visible_context_chunks_redacts_and_excludes_reasoning(tmp_path, monkeyp
     for stream in ("stderr", "diff"):
         paths = [row["path"] for row in context.index()["records"] if row["stream"] == stream]
         assert paths and all("fixture-secret-value" not in (vault / "run-1" / path).read_text() for path in paths)
+
+
+def test_context_keeps_append_only_generations_and_stream_completion(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    context = VaultContext(vault, "run-1", chunk_size=64)
+    context.save_records("stdout", [{"text": "first"}], complete=False, truncation="live")
+    context.save_records("stdout", [{"text": "second"}], complete=True)
+    context.save_records("stderr", [{"text": "error"}], complete=False, truncation="live")
+    index = context.index()
+    assert index["complete"] is False
+    assert index["streams"]["stdout"]["complete"] is True
+    assert index["streams"]["stderr"]["complete"] is False
+    assert len([row for row in index["records"] if row["stream"] == "stdout"]) == 2
+    contents = "".join((context.run_dir / row["path"]).read_text() for row in index["records"])
+    assert "first" in contents and "second" in contents
+
+
+def test_context_serializes_concurrent_stream_index_updates(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    context = VaultContext(vault, "run-1")
+    barrier = threading.Barrier(2)
+
+    def write(stream):
+        barrier.wait()
+        context.save_records(stream, [{"stream": stream}], complete=True)
+
+    threads = [threading.Thread(target=write, args=(stream,)) for stream in ("stdout", "stderr")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    index = context.index()
+    assert set(index["streams"]) == {"stdout", "stderr"}
+    assert {row["stream"] for row in index["records"]} == {"stdout", "stderr"}
+
+
+def test_revision_handoff_uses_task_store_after_sidecar_save_failure(tmp_path, monkeypatch):
+    store, agents, _ = make_store(tmp_path)
+    ledger = RequirementLedger(store, agents / ".local" / "requirements.json")
+    try:
+        requirement = ledger.add("before")
+        original_save = ledger._save
+        calls = {"count": 0}
+
+        def fail_once(value):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise OSError("simulated sidecar interruption")
+            return original_save(value)
+
+        monkeypatch.setattr(ledger, "_save", fail_once)
+        with pytest.raises(OSError):
+            ledger.revise(requirement["id"], "after")
+        by_id = {row["id"]: row for row in ledger.handoff()["requirements"]}
+        assert by_id[requirement["id"]]["latest_text"] == "after"
+        assert by_id[requirement["id"]]["revisions"] == ["after"]
+    finally:
+        store.close()
+
+
+def test_run_id_cannot_escape_or_follow_symlink(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    with pytest.raises(ContextError):
+        VaultContext(vault, "..")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (vault / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ContextError):
+        VaultContext(vault, "link")
 
 
 def test_missing_or_unwritable_vault_never_uses_fallback(tmp_path):

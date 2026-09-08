@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import uuid
 
 from .runner import redact
 
@@ -63,12 +64,15 @@ class RequirementLedger:
     @contextmanager
     def _locked(self):
         try:
-            with self.lock_path.open("a+") as lock:
-                self.lock_path.chmod(0o600)
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                yield
+            lock = self.lock_path.open("a+")
         except OSError as exc:
             raise ContextError(f"cannot lock requirement record: {exc}") from exc
+        try:
+            self.lock_path.chmod(0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+        finally:
+            lock.close()
 
     def _load(self):
         if not self.path.exists():
@@ -158,10 +162,15 @@ class RequirementLedger:
     @staticmethod
     def _with_sidecar(row, detail):
         result = dict(row)
-        result.update({key: detail.get(key, default) for key, default in (
-            ("depends_on", []), ("latest_text", row.get("text")),
-            ("revisions", []), ("selected", False),
-        )})
+        db_revisions = list(row.get("revisions") or [])
+        result.update({
+            "depends_on": detail.get("depends_on", []),
+            # TaskStore is the source of truth when a sidecar write was
+            # interrupted after the SQLite transaction committed.
+            "latest_text": db_revisions[-1] if db_revisions else row.get("text"),
+            "revisions": db_revisions,
+            "selected": detail.get("selected", False),
+        })
         return result
 
     def handoff(self):
@@ -203,20 +212,42 @@ class VaultContext:
         root = Path(vault_root).expanduser()
         if not root.is_dir():
             raise ContextError(f"Vault does not exist: {root}")
-        if not isinstance(run_id, str) or not run_id or Path(run_id).name != run_id:
+        root = root.resolve()
+        if (not isinstance(run_id, str) or not run_id or run_id in {".", ".."}
+                or Path(run_id).name != run_id):
             raise ContextError("run_id must be a single path component")
         if not isinstance(chunk_size, int) or chunk_size < 1:
             raise ContextError("chunk_size must be positive")
         self.root = root
         self.run_dir = root / run_id
         try:
+            if self.run_dir.is_symlink():
+                raise ContextError("run directory must not be a symlink")
             self.run_dir.mkdir(mode=0o700, exist_ok=True)
+            if not self.run_dir.resolve().is_relative_to(root):
+                raise ContextError("run directory escapes the Vault")
             probe = self.run_dir / ".write-probe"
             probe.touch(mode=0o600, exist_ok=False)
             probe.unlink()
         except OSError as exc:
             raise ContextError(f"Vault is not writable: {self.run_dir}") from exc
         self.chunk_size = chunk_size
+
+    @contextmanager
+    def _index_locked(self):
+        lock_path = self.run_dir / ".context-index.lock"
+        if lock_path.is_symlink():
+            raise ContextError("context index lock must not be a symlink")
+        try:
+            lock = lock_path.open("a+")
+        except OSError as exc:
+            raise ContextError(f"context index is not lockable: {exc}") from exc
+        try:
+            lock_path.chmod(0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+        finally:
+            lock.close()
 
     @staticmethod
     def _visible(value):
@@ -256,19 +287,37 @@ class VaultContext:
             if clean is not None:
                 rendered.append(redact(json.dumps(clean, ensure_ascii=False) + "\n", env))
         text = "".join(rendered)
-        old = self.index()
-        records_index = [item for item in old.get("records", []) if item.get("stream") != stream]
-        for offset in range(0, len(text) or 1, self.chunk_size):
-            part = text[offset:offset + self.chunk_size]
-            number = offset // self.chunk_size
-            path = self.run_dir / f"{stream}-{number:04d}.jsonl"
-            _atomic_write(path, part)
-            records_index.append({"stream": stream, "path": path.name,
-                                  "size": len(part.encode()), "availability": "complete" if complete else "available"})
-        value = {"records": sorted(records_index, key=lambda item: item["path"]),
-                 "complete": bool(complete), "truncation": truncation or "none"}
-        _atomic_write(self._index_path(), json.dumps(value, ensure_ascii=False, indent=2) + "\n")
-        return {"status": "saved", **value}
+        with self._index_locked():
+            old = self.index()
+            streams = dict(old.get("streams", {}))
+            # Migrate an older index without discarding already indexed chunks.
+            if not streams:
+                for item in old.get("records", []):
+                    streams.setdefault(item.get("stream", "unknown"), {
+                        "records": [], "complete": bool(old.get("complete")),
+                        "truncation": old.get("truncation", "none"),
+                    })["records"].append(item)
+            generation = uuid.uuid4().hex
+            stream_records = list(streams.get(stream, {}).get("records", []))
+            for offset in range(0, len(text) or 1, self.chunk_size):
+                part = text[offset:offset + self.chunk_size]
+                number = offset // self.chunk_size
+                path = self.run_dir / f"{stream}-{generation}-{number:04d}.jsonl"
+                _atomic_write(path, part)
+                stream_records.append({"stream": stream, "path": path.name,
+                                       "size": len(part.encode()),
+                                       "availability": "complete" if complete else "available"})
+            streams[stream] = {"records": stream_records, "complete": bool(complete),
+                               "truncation": truncation or "none"}
+            records_index = [item for status in streams.values() for item in status.get("records", [])]
+            complete_all = bool(streams) and all(status.get("complete") is True for status in streams.values())
+            truncations = {name: status.get("truncation", "none") for name, status in streams.items()
+                           if status.get("truncation", "none") != "none"}
+            value = {"streams": streams, "records": sorted(records_index, key=lambda item: item["path"]),
+                     "complete": complete_all,
+                     "truncation": (next(iter(truncations.values())) if len(truncations) == 1 else truncations or "none")}
+            _atomic_write(self._index_path(), json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+            return {"status": "saved", **value}
 
 
 def export_visible_jsonl(source, destination, *, env=None):
