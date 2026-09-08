@@ -266,6 +266,41 @@ class JobTests(unittest.TestCase):
         self.assertGreaterEqual(attempts[1]['elapsed_seconds'], .01)
         self.assertLess(attempts[1]['elapsed_seconds'], attempts[0]['elapsed_seconds'] + .1)
 
+    def test_usage_summary_aggregates_duration_once_and_keeps_missing_fields_explicit(self):
+        attempts = [
+            {'attempt_id': 'a', 'usage': {'input_tokens': 10, 'cached_input_tokens': 2},
+             'elapsed_seconds': 1.5},
+            {'attempt_id': 'b', 'usage': None, 'elapsed_seconds': None},
+            # A resume read can contain the same durable attempt twice.  It is
+            # one provider execution and must not inflate the totals.
+            {'attempt_id': 'a', 'usage': {'input_tokens': 10, 'cached_input_tokens': 2},
+             'elapsed_seconds': 1.5},
+        ]
+        summary = h._usage_summary(attempts)
+        self.assertEqual(summary['totals'], {'input_tokens': 10, 'cached_input_tokens': 2})
+        self.assertEqual(summary['attempts_reported'], 1)
+        self.assertEqual(summary['attempts_missing'], 1)
+        self.assertEqual(summary['elapsed_seconds'], 1.5)
+        self.assertEqual(summary['elapsed_attempts_reported'], 1)
+        self.assertEqual(summary['elapsed_attempts_missing'], 1)
+
+    def test_provider_model_mismatch_is_not_verified_requested_model(self):
+        job = h.Job(self.root/'work', self.root/'vault', 'Review', provider='codex',
+                    codex_model='gpt-5.6-luna')
+        output = (event(type='item.completed', item={'type': 'agent_message', 'text': 'done'})
+                  + event(type='turn.completed', usage={'input_tokens': 3},
+                          model='gpt-5.6-astra'))
+        result = h.run_job(job, self.env,
+                           lambda *args: h.ProcessResult(0, output))
+        attempt = json.loads((Path(result['run_dir'])/'result.json').read_text())['attempts'][0]
+        self.assertEqual(attempt['requested_model'], 'gpt-5.6-luna')
+        self.assertEqual(attempt['actual_model'], 'gpt-5.6-astra')
+        self.assertFalse(attempt['model_verified'])
+        self.assertTrue(attempt['model_mismatch'])
+        self.assertEqual(result['model_observation']['model_verified'], False)
+        self.assertFalse(result['model_verified'])
+        self.assertTrue(result['model_mismatch'])
+
     def test_auth_failure_never_falls_back(self):
         run=self.executor([h.ProcessResult(1,claude_result('Please run /login',True))])
         result=h.run_job(self.job,self.env,run)
