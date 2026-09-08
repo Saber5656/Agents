@@ -44,8 +44,19 @@ local follow-up while the original verification continues. Call `verify` with
 completion evidence only after all task acceptance records have been explicitly
 verified.
 
+A concrete cost or security boundary moves a job to `held`, which is excluded
+from ready work. An operator must call `resume_held(job_id, checker)` with an
+explicit read-only checker returning a result bound to the exact `job_id` and
+current `hold_reason`, with `{"safe": true}`, after the held operation has
+been addressed. A generic safety acknowledgement is rejected. A failed or
+unavailable checker keeps the job held; the original attempt and all recheck
+diagnostics remain in the service history. An `inference_api_route` hold also
+runs the configured subscription authentication guard again before the job is
+made runnable.
+
 ```sh
 python3 -m harness.service run-once --json
+python3 -m harness.service resume-held JOB_ID --recheck /path/to/safety-recheck.json --json
 python3 -m harness.service verify JOB_ID --evidence /path/to/acceptance-review.json
 python3 -m harness.service run --poll 30
 ```

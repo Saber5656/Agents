@@ -36,6 +36,12 @@ from .service_review import decide_findings
 class AuthError(RuntimeError):
     """Subscription authentication is absent or an API route was requested."""
 
+    def __init__(self, message, *, hold=False, action=None, source=None):
+        super().__init__(message)
+        self.hold = bool(hold)
+        self.action = action
+        self.source = source
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -605,6 +611,92 @@ class ServiceStore:
             conn.execute("UPDATE service_jobs SET next_attempt_at=NULL,verification_count=0,updated_at=? WHERE id=?", (now(), job_id))
         return self.get_job(job_id)
 
+    def recheck_held(self, job_id, checker):
+        """Run an explicit, read-only safety check for a held job.
+
+        A hold is durable by design.  The checker must return ``{"job_id":
+        job_id, "hold_reason": current_last_error, "safe": True}`` before a
+        caller may resume it; a missing, false, or failed check leaves the job
+        held and appends the diagnostic to its history.
+        No provider or worker is started here.
+        """
+        if not callable(checker):
+            raise TypeError("an explicit held-job checker is required")
+        job = self.get_job(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job["state"] != "held":
+            raise ValueError(f"job state {job['state']} is not held")
+        try:
+            result = checker(dict(job))
+        except Exception as exc:
+            diagnostic = f"held recheck failed: {type(exc).__name__}: {exc}"
+            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-failed"])
+            return {"status": "held", "safe": False, "reason": diagnostic}
+        if not isinstance(result, dict) or result.get("job_id") != job_id or result.get("hold_reason") != job.get("last_error"):
+            diagnostic = "held recheck was not bound to this job and current hold reason"
+            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-unbound"])
+            return {"status": "held", "safe": False, "reason": diagnostic}
+        if result.get("safe") is not True:
+            reason = result.get("reason", "explicit safety recheck did not pass") if isinstance(result, dict) else "explicit safety recheck was malformed"
+            diagnostic = f"held recheck blocked resume: {reason}"
+            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-blocked"])
+            return {"status": "held", "safe": False, "reason": diagnostic}
+        attempts = job.get("attempts", [])
+        latest = attempts[-1].get("result", {}) if attempts else {}
+        if isinstance(latest, dict) and latest.get("action") == "inference_api_route":
+            try:
+                self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"))
+            except Exception as exc:
+                diagnostic = f"held inference route remains blocked: {type(exc).__name__}: {exc}"
+                self.record_update(job_id, diagnostic, ["local://cost-security/recheck-auth-failed"])
+                return {"status": "held", "safe": False, "reason": diagnostic}
+        return {"status": "ready", "safe": True, "hold_reason": job.get("last_error"),
+                "reason": result.get("reason", "explicit safety recheck passed"),
+                "evidence": list(result.get("evidence", [])) if isinstance(result.get("evidence", []), list) else []}
+
+    def resume_held(self, job_id, checker):
+        """Resume a held job only after an explicit safe recheck.
+
+        The held attempt remains immutable history.  If dependencies or task
+        state are still unsafe, the job stays held and no worker is claimed.
+        """
+        result = self.recheck_held(job_id, checker)
+        if result.get("safe") is not True:
+            return result
+        job = self.get_job(job_id)
+        task = self.tasks.get_task(job["task_id"])
+        if task is None or not self._dependencies_ready(task):
+            diagnostic = "held recheck passed but dependencies are not ready"
+            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-dependencies"])
+            return {"status": "held", "safe": False, "reason": diagnostic}
+        self.record_update(job_id, "Held job recheck passed; attempting bound resume: " + str(result.get("reason", "passed")),
+                           result.get("evidence", []) or ["local://cost-security/recheck-passed"])
+        try:
+            # Serialize competing resumers/claimers while both databases are
+            # updated. A crash after the task CAS leaves the job held, so no
+            # worker starts until another explicit recheck completes.
+            with self.tx() as conn:
+                current_job = conn.execute(
+                    "SELECT state,last_error FROM service_jobs WHERE id=?", (job_id,)).fetchone()
+                if (current_job is None or current_job["state"] != "held"
+                        or current_job["last_error"] != result["hold_reason"]):
+                    return {"status": current_job["state"] if current_job else "missing",
+                            "safe": False, "reason": "held job changed during recheck"}
+                current = self.tasks.get_task(job["task_id"])
+                if current is None or current["execution_status"] not in ("held", "planned"):
+                    return {"status": "held", "safe": False,
+                            "reason": "task state changed during recheck"}
+                self.tasks.update_task(job["task_id"], expected_version=current["version"], execution_status="planned")
+                conn.execute(
+                    "UPDATE service_jobs SET state='retry',next_attempt_at=NULL,last_error=NULL,updated_at=? WHERE id=?",
+                    (now(), job_id))
+        except Exception as exc:
+            diagnostic = f"held resume task update failed: {type(exc).__name__}: {exc}"
+            self.record_update(job_id, diagnostic, ["local://cost-security/recheck-task-update-failed"])
+            return {"status": "held", "safe": False, "reason": diagnostic}
+        return {"status": "retry", "safe": True, "job_id": job_id}
+
     def _dependencies_ready(self, task):
         for dependency_id in task.get("dependencies", []):
             dependency = self.tasks.get_task(dependency_id)
@@ -732,11 +824,12 @@ class ServiceStore:
 
     def _finish_attempt(self, job, result=None, error=None):
         status = result.get("status") if isinstance(result, dict) else "failed"
+        held = status == "held"
         succeeded = status in ("completed", "success")
-        terminal = "needs_verification" if succeeded else "retry"
-        attempt_status = "needs_verification" if succeeded else "retry"
+        terminal = "needs_verification" if succeeded else ("held" if held else "retry")
+        attempt_status = "needs_verification" if succeeded else ("held" if held else "retry")
         attempt_no = job["attempts_count"]
-        if succeeded:
+        if succeeded or held:
             next_at = None
         else:
             delay = retry_delay(job["retry_base"], job["retry_max"], attempt_no)
@@ -749,7 +842,8 @@ class ServiceStore:
         if task is not None:
             try:
                 current = self.tasks.get_task(job["task_id"])
-                self.tasks.update_task(job["task_id"], expected_version=current["version"], execution_status="needs_verification" if succeeded else "running")
+                self.tasks.update_task(job["task_id"], expected_version=current["version"],
+                                       execution_status="needs_verification" if succeeded else ("held" if held else "running"))
             except ConflictError:
                 pass
             except Exception as exc:
@@ -759,6 +853,20 @@ class ServiceStore:
                                      (f"task status update failed: {exc}", now(), job["id"]))
                 except Exception:
                     pass
+        if held:
+            action = result.get("action") if isinstance(result, dict) else None
+            source = result.get("source") if isinstance(result, dict) else None
+            diagnostic = error or (result.get("text") if isinstance(result, dict) else None) or "operation held"
+            evidence = f"local://cost-security/{source}/{action}" if source and action else "local://cost-security/hold"
+            self.record_update(job["id"],
+                               f"Cost/security hold: {diagnostic}",
+                               [evidence])
+            try:
+                self.tasks.add_evidence(job["task_id"], [evidence], kind="cost_security_hold")
+            except Exception:
+                # The service/job receipt above remains the source of truth if
+                # a concurrent task update cannot be appended here.
+                pass
         return {"status": terminal, "job_id": job["id"], "attempt": attempt_no}
 
     def run_once(self, executor: Callable | None = None, verifier: Callable | None = None):
@@ -774,7 +882,15 @@ class ServiceStore:
                 try:
                     self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"))
                 except Exception as exc:
-                    return self._finish_attempt(job, result={"status": "failed", "text": str(exc)}, error=str(exc))
+                    held = isinstance(exc, AuthError) and exc.hold
+                    diagnostic = str(exc)
+                    if held:
+                        diagnostic += f" [source={exc.source or 'unknown'}; action={exc.action or 'unknown'}]"
+                    result = {"status": "held" if held else "failed", "text": diagnostic}
+                    if held:
+                        result.update({"action": exc.action, "source": exc.source,
+                                       "hold_category": "cost_or_security"})
+                    return self._finish_attempt(job, result=result, error=diagnostic)
                 executor = default_executor
             try:
                 latest = self.get_job(job["id"])
@@ -1168,8 +1284,12 @@ class ServiceStore:
     @staticmethod
     def auth_guard(env, login_check=None):
         blocked = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CODEX_API_KEY")
-        if any(env.get(key) for key in blocked):
-            raise AuthError("API inference routes are forbidden; use ChatGPT subscription login")
+        configured = next((key for key in blocked if env.get(key)), None)
+        if configured:
+            raise AuthError(
+                f"API inference routes are forbidden; use ChatGPT subscription login "
+                f"(extra billing blocked: source={configured}; action=inference_api_route)",
+                hold=True, action="inference_api_route", source=configured)
         if login_check is None:
             def login_check(actual):
                 try:
@@ -1640,6 +1760,7 @@ def main(argv=None):
     sh = sub.add_parser("show"); sh.add_argument("--db", default=argparse.SUPPRESS); sh.add_argument("job_id"); sh.add_argument("--json", action="store_true")
     run = sub.add_parser("run"); run.add_argument("--db", default=argparse.SUPPRESS); run.add_argument("--poll", type=float, default=30)
     once = sub.add_parser("run-once"); once.add_argument("--db", default=argparse.SUPPRESS); once.add_argument("--json", action="store_true")
+    resume = sub.add_parser("resume-held"); resume.add_argument("--db", default=argparse.SUPPRESS); resume.add_argument("job_id"); resume.add_argument("--recheck", required=True, help="path to a read-only safety recheck JSON object"); resume.add_argument("--json", action="store_true")
     ver = sub.add_parser("verify"); ver.add_argument("--db", default=argparse.SUPPRESS); ver.add_argument("job_id"); ver.add_argument("--evidence", required=True, help="path to structured acceptance review JSON"); ver.add_argument("--json", action="store_true")
     ld = sub.add_parser("launchd"); ld.add_argument("--db", default=argparse.SUPPRESS); ld.add_argument("action", choices=["generate", "install", "start", "status"]); ld.add_argument("--label", default="com.agents.service"); ld.add_argument("--path"); ld.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
@@ -1655,6 +1776,9 @@ def main(argv=None):
         elif args.command == "list": value = store.list_jobs(args.state)
         elif args.command == "show": value = store.get_job(args.job_id)
         elif args.command == "verify": value = store.verify(args.job_id, json.loads(Path(args.evidence).read_text()))
+        elif args.command == "resume-held":
+            recheck = json.loads(Path(args.recheck).read_text())
+            value = store.resume_held(args.job_id, lambda _: recheck)
         elif args.command == "run-once": value = Scheduler(store, verification_executor=default_verifier).run_once()
         elif args.command == "run": value = Scheduler(store, poll_interval=args.poll, verification_executor=default_verifier).run_forever()
         else:

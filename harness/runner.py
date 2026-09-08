@@ -6,6 +6,7 @@ import fcntl
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -679,7 +680,38 @@ def _usage_summary(attempts):
     totals = {}
     reported = 0
     missing = 0
+    elapsed = 0.0
+    elapsed_reported = 0
+    elapsed_missing = 0
+    selected = []
+    positions = {}
+
+    def quality(attempt):
+        usage = _usage_record(attempt.get('usage'))
+        elapsed_value = attempt.get('elapsed_seconds')
+        elapsed_ok = (isinstance(elapsed_value, (int, float))
+                      and not isinstance(elapsed_value, bool)
+                      and math.isfinite(elapsed_value) and elapsed_value >= 0)
+        return (int(usage['available']), len(usage.get('values', {})),
+                int(elapsed_ok), int(attempt.get('actual_model') is not None),
+                int(attempt.get('status') not in (None, 'running')))
+
     for attempt in attempts:
+        # A reconciliation can expose the same durable attempt more than
+        # once. Keep the most complete observation (and never add it twice),
+        # so a later provider usage record replaces an earlier missing one.
+        identity = attempt.get('attempt_id', attempt.get('attempt_number'))
+        if identity is None:
+            selected.append(attempt)
+            continue
+        position = positions.get(identity)
+        if position is None:
+            positions[identity] = len(selected)
+            selected.append(attempt)
+        elif quality(attempt) >= quality(selected[position]):
+            selected[position] = attempt
+
+    for attempt in selected:
         usage = attempt.get('usage')
         record = _usage_record(usage)
         if record['available']:
@@ -688,8 +720,31 @@ def _usage_summary(attempts):
                 totals[key] = totals.get(key, 0) + value
         else:
             missing += 1
+        value = attempt.get('elapsed_seconds')
+        if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value >= 0):
+            elapsed += value
+            elapsed_reported += 1
+        else:
+            elapsed_missing += 1
     return {'attempts_reported': reported, 'attempts_missing': missing,
-            'totals': totals, 'totals_are_provider_reported_only': True}
+            'totals': totals, 'totals_are_provider_reported_only': True,
+            'elapsed_seconds': elapsed,
+            'elapsed_attempts_reported': elapsed_reported,
+            'elapsed_attempts_missing': elapsed_missing,
+            'elapsed_is_observed_wall_time_sum': True}
+
+
+def _model_observation(requested_model, actual_model, provider_reported):
+    """Bind provider identity to the model requested for this attempt."""
+    matches = (actual_model is not None and actual_model == requested_model)
+    return {
+        'requested_model': requested_model,
+        'actual_model': actual_model,
+        'provider_reported': bool(provider_reported),
+        'model_verified': bool(provider_reported and matches),
+        'model_mismatch': bool(actual_model is not None and not matches),
+    }
 
 
 def _context_index(run_dir, env, complete=False):
@@ -736,10 +791,17 @@ def _reconcile_captured_attempt(run_dir, summary, state_record, env):
         return False
     attempt = summary['attempts'][attempt_no]
     final_status = review_verdict(parsed.text) if parsed.status == 'completed' and summary.get('mode') == 'review' else parsed.status
+    observation = _model_observation(attempt.get('requested_model'), parsed.actual_model,
+                                     parsed.model_verified)
     attempt.update({'status': final_status, 'exit_code': state_record.get('exit_code', 0),
                     'usage': parsed.usage, 'usage_info': _usage_record(parsed.usage),
-                    'actual_model': parsed.actual_model, 'model_verified': parsed.model_verified,
+                    'actual_model': parsed.actual_model, 'model_verified': observation['model_verified'],
+                    'model_mismatch': observation['model_mismatch'],
                     'reconciled_from_output': True})
+    summary.setdefault('model_observations', []).append(observation)
+    summary['model_observation'] = observation
+    summary['model_verified'] = observation['model_verified']
+    summary['model_mismatch'] = observation['model_mismatch']
     state_record.update({'status': final_status, 'finished_at': state_record.get('finished_at') or
                          datetime.now(timezone.utc).isoformat(), 'reconciled_from_output': True, 'output_pending': False})
     save(Path(run_dir) / f'{attempt_no}-{provider}-state.json', state_record, env)
@@ -882,11 +944,18 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
     if not (run_dir/'before.json').exists():
         save(run_dir/'before.json', snapshot(job.workspace), env)
     summary = old_summary or {'run_dir':str(run_dir), 'workspace':str(job.workspace), 'mode':job.mode,
-                              'status':'running','attempts':[]}
+                              'status':'running','attempts':[], 'model_observations': []}
     summary.setdefault('attempts', [])
+    summary.setdefault('model_observations', [])
     summary['status'] = 'running'
     summary['startup'] = {'workspace': str(job.workspace), 'vault': str(job.vault),
                           'environment_keys': {key: bool(env.get(key)) for key in AUTH_KEYS}}
+    summary['configured_limits'] = {
+        'timeout_seconds': job.timeout,
+        'provider': job.provider,
+        'effort': job.effort,
+        'fallback_enabled': bool(job.fallback),
+    }
     if capture_config:
         summary['capture_config'] = capture_config
     save(run_dir/'result.json', summary, env)
@@ -931,7 +1000,10 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         save(stderr_path, '', env)
         save(run_dir/f'{stem}-prompt.md', prompt, env)
         save(run_dir/f'{stem}-command.json', argv, env)
-        attempt = {'provider':provider, 'requested_model':model, 'status':'running',
+        attempt = {'attempt_number': attempt_no, 'attempt_id': f'{run_dir.name}:{attempt_no}',
+                   'provider':provider, 'requested_model':model,
+                   'requested_effort':job.effort, 'timeout_seconds':remaining,
+                   'status':'running',
                    'started_at':datetime.now(timezone.utc).isoformat(),
                    'state_record':state_path.name}
         summary['attempts'].append(attempt)
@@ -961,11 +1033,17 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
             parsed = Result('interrupted', actual_model=parsed.actual_model, model_verified=parsed.model_verified)
         elif result.code == 127:
             parsed = Result('executable_missing', parsed.text, parsed.usage, parsed.actual_model, parsed.model_verified)
+        observation = _model_observation(model, parsed.actual_model, parsed.model_verified)
         attempt.update({'status':parsed.status,'exit_code':result.code,'usage':parsed.usage,
                         'usage_info': _usage_record(parsed.usage),
                         'actual_model': parsed.actual_model,
-                        'model_verified': parsed.model_verified,
+                        'model_verified': observation['model_verified'],
+                        'model_mismatch': observation['model_mismatch'],
                         'elapsed_seconds': max(0, time.monotonic() - attempt_started)})
+        summary.setdefault('model_observations', []).append(observation)
+        summary['model_observation'] = observation
+        summary['model_verified'] = observation['model_verified']
+        summary['model_mismatch'] = observation['model_mismatch']
         state_record = _load_record(state_path) or {}
         final_status = review_verdict(parsed.text) if parsed.status == 'completed' and job.mode == 'review' else parsed.status
         attempt['status'] = final_status

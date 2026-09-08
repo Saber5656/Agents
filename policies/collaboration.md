@@ -9,3 +9,10 @@
 - 利用者が決める要件は、選択肢・影響・推奨とともに示す。それ以外は目的の範囲で自律的に進める。
 - 計画したモデルや担当と、実際に使ったモデルや担当を区別し、取得できた使用量や実行結果を残す。
 - 作業と判断の全コンテキストは Vault に保存し、担当間には必要な情報と原記録への参照を渡す。
+
+## 使用量と安全なアクション境界
+
+- 使用量、実測 elapsed time、provider が返した実モデル、設定済みの実行上限は観測値として記録する。これらの数値だけでワークフロー全体を停止したり、未指定の高コストモデルへ切り替えたりしない。
+- 推測した `actual_model` や使用量を補完しない。provider が値を返さない場合は missing として残し、要求モデルと実モデルが異なる場合は `model_verified=false` として完了記録にも不一致を明示する。
+- ChatGPT subscription の認証済み CLI 経路だけを使う。API key、API base URL、購入・従量課金の provision/inference など別課金経路は実行前に遮断し、具体的な source/action と非秘密の証拠をローカル task/service record に残して hold とする。
+- 保護回避、秘密の外部送信、対象外のアクセス拡大も具体的な操作単位で hold とする。通常のテスト失敗、review finding、worker timeout、provider window 枯渇は修復・再試行・reschedule し、抽象的な承認待ちや恒久停止に変換しない。
