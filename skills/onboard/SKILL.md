@@ -36,8 +36,9 @@ fixed-choice goal and route selections; no other tool is part of this flow.
 
 The onboarding input surface returns answers; it is not a profile database. Do
 not save answers to a file or silently replace a profile. If a supported
-profile writer is unavailable, say that the answers will not be remembered and
-continue with the handoff. Preserve existing preferences, plugins, tasks, and
+profile writer is unavailable, explain that no separate profile is being saved
+and continue with the handoff. Conversation retention and common Agents Vault
+context recording remain governed by the current common instructions. Preserve existing preferences, plugins, tasks, and
 settings by making no mutation calls.
 
 ## Hard boundaries
