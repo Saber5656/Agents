@@ -153,6 +153,51 @@ def test_unrelated_dirty_canonical_is_preserved_and_published(fixture):
     assert git(canonical, "status", "--porcelain") == before_status
 
 
+def test_review_evidence_is_invalidated_when_affected_file_changes_after_review(fixture):
+    canonical, worktree, remote, vault, base = fixture
+    selected = worktree / "src" / "selected.txt"
+    selected.write_text("reviewed change\n")
+    spec = make_spec(canonical, worktree, remote, vault, base)
+    reviewed_digest = spec["review"]["reviewed_diff_digest"]
+    # The source changed after the review/test evidence was captured.  The
+    # stale review must not authorize a publication of the new selected bytes.
+    selected.write_text("changed after review\n")
+    with pytest.raises(PublicationError, match="selected-file diff changed"):
+        publish_scoped(spec)
+    assert spec["review"]["reviewed_diff_digest"] == reviewed_digest
+    assert git(canonical, "rev-parse", "HEAD") == base
+    assert git(worktree, "diff", "--cached") == ""
+
+
+def test_unrelated_document_change_reuses_selected_review_evidence(fixture):
+    canonical, worktree, remote, vault, base = fixture
+    selected = worktree / "src" / "selected.txt"
+    selected.write_text("reviewed change\n")
+    spec = make_spec(canonical, worktree, remote, vault, base,
+                     ci={"expected_sha": "not-observed", "status": "pending"})
+    unrelated = canonical / "docs" / "local-note.md"
+    unrelated.parent.mkdir()
+    unrelated.write_text("local documentation edit\n")
+    before_digest = spec["review"]["reviewed_diff_digest"]
+    result = publish_scoped(spec)
+    assert result["status"] == "pending"
+    assert result["review"]["reviewed_diff_digest"] == before_digest
+    assert unrelated.read_text() == "local documentation edit\n"
+    assert git(canonical, "rev-parse", "HEAD") == result["published_sha"]
+
+
+def test_skipped_ci_observation_is_not_success(fixture):
+    canonical, worktree, remote, vault, base = fixture
+    (worktree / "src" / "selected.txt").write_text("reviewed change\n")
+    result = publish_scoped(make_spec(canonical, worktree, remote, vault, base,
+                                      ci={"provider": "fixture"}) | {
+                                          "ci_observer": lambda sha: {
+                                              "head_sha": sha, "status": "skipped"
+                                          }
+                                      })
+    assert result["status"] == "pending"
+
+
 def test_selected_dirty_canonical_is_rejected_before_publication(fixture):
     canonical, worktree, remote, vault, base = fixture
     (worktree / "src" / "selected.txt").write_text("after\n")
