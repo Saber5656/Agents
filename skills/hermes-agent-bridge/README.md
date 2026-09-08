@@ -5,7 +5,7 @@
 ## Quick Examples
 
 ```bash
-python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/hermes_bridge.py" \
+python3 "$SKILLS_ROOT/hermes-agent-bridge/scripts/hermes_bridge.py" \
   oneshot \
   --prompt "XでOpenAI Codexの最新動向を検索して要点を3つにして" \
   --toolsets "x-search" \
@@ -13,7 +13,7 @@ python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/herme
 ```
 
 ```bash
-python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/hermes_bridge.py" \
+python3 "$SKILLS_ROOT/hermes-agent-bridge/scripts/hermes_bridge.py" \
   send \
   --target "discord:#secretary" \
   --message "確認待ち: 明日15:00の予定を作成してよいですか？" \
@@ -31,7 +31,7 @@ python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/herme
 - `oneshot --timeout SECONDS` で呼び出しをboundedにし、timeout・実行ファイル欠落を構造化結果で返す
 - `oneshot`、`send`、`list-targets` は既定30秒で終了し、`--timeout`で調整できる
 - `--receipt-dir DIR` を指定すると、request/state/result/stdout/stderrをprivate receiptへ保存する
-- 実行時はHermes configのprimary/fallbackを読み取り検証し、実コマンドへ`--provider openai-codex`を束縛する。未確認configは停止する
+- 実行時はHermes configのprimary/fallbackを読み取り検証し、`oneshot`実コマンドへ`--provider openai-codex`を束縛する。未確認configは停止する
 - receiptのprompt・stdout・stderrはredactし、同じ`--request-id`の再実行も既存attemptを保持する
 
 ## Triggers

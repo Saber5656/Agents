@@ -89,6 +89,22 @@ Hermesへ渡す前に、呼び出し元はこの形に整理する。
 
 Do not include tokens, passwords, OAuth secrets, or private config values in the envelope.
 
+## Runtime prerequisites
+
+Load the established `$AGENTS_ROOT` / `$SKILLS_ROOT` / `$AGENTS_VAULT_ROOT`
+from the trusted local environment. Use a Python interpreter with PyYAML
+installed from `requirements.txt` beside this skill. The existing Agents
+skill-tools virtual environment can be reused when available; verify its
+interpreter and dependency before invocation. Missing PyYAML or an unreadable
+Hermes route configuration is a concrete incomplete prerequisite, never proof
+of subscription routing. Do not replace the user's Python environment.
+
+A verified subscription inference route does not authorize extra-billed tools
+or message delivery. The caller must check the specific tool's charge source
+and existing user authorization before invocation; ordinary subscribed token
+usage is permitted. Record all available context and redacted receipts in
+Agents Vault. A `safe_to_run` field alone is not an authorization or safety check.
+
 ## Pattern: Oneshot Hermes Tool Call
 
 Use this when the caller needs Hermes to execute a tool and return the result immediately.
@@ -96,14 +112,14 @@ Use this when the caller needs Hermes to execute a tool and return the result im
 Preferred command:
 
 ```bash
-python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/hermes_bridge.py" \
+python3 "$SKILLS_ROOT/hermes-agent-bridge/scripts/hermes_bridge.py" \
   oneshot \
   --prompt "XでOpenAI Codexの最新動向を検索して要点を3つにして" \
   --toolsets "x-search" \
   --timeout 30
 ```
 
-Equivalent raw command:
+Underlying command reference (not a substitute for the wrapper route check, timeout or receipt):
 
 ```bash
 hermes -z "XでOpenAI Codexの最新動向を検索して要点を3つにして" --toolsets "x-search"
@@ -125,7 +141,7 @@ Rules:
 Use this when the caller only needs to announce something.
 
 ```bash
-python3 "${SKILLS_REPO_ROOT:-$HOME/dev/skills}/hermes-agent-bridge/scripts/hermes_bridge.py" \
+python3 "$SKILLS_ROOT/hermes-agent-bridge/scripts/hermes_bridge.py" \
   send \
   --target "discord:#secretary" \
   --message "予定確認待ち: 明日15:00のMTGを作成してよいですか？"
@@ -194,7 +210,7 @@ When used by `secretary-ai`:
 ## Safety Rules
 
 - Never print or copy Hermes OAuth tokens, bot tokens, `.env` values, or credential files.
-- Do not modify Hermes gateway, Discord, OAuth, or token settings unless the user explicitly asks and the task is formally approved.
+- Do not modify Hermes gateway, Discord, OAuth, or token settings unless the user explicitly asks within the already authorized task scope.
 - Do not use `--yolo` from this skill.
 - For external side effects, separate "prepare message" from "send message" when user confirmation is required.
 - If the caller asks for a long-running listener, explain that an automation/MCP runtime is required.
