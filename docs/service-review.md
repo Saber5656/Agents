@@ -40,10 +40,12 @@ runner must return JSON with exactly one decision for every ID:
 
 Missing, duplicate, unknown, or malformed decisions return `status:
 incomplete` and preserve the request, provider output, usage, and process
-identity under `AGENTS_VAULT_ROOT/service-review/<input-digest>/`. The same
-completed input returns the saved result without calling the provider again;
-an incomplete result can be retried with the same input. The stored result
-contains `adopted_findings`, `rejected_findings`, and `separate_task_ids`, so
+identity under `AGENTS_VAULT_ROOT/service-review/<input-digest>/`. A provider
+turn that reached a terminal response, including malformed decision JSON, is
+reused for the same input without calling the provider again. Provider or
+process failures that did not reach a terminal response remain retryable after
+reconciliation. Changed evidence produces a new input digest and a targeted
+review. The stored result contains `adopted_findings`, `rejected_findings`, and `separate_task_ids`, so
 the parent work unit can pass only adopted findings to its correction step.
 
 `separate` creates a local TaskStore follow-up using

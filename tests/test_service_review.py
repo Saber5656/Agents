@@ -113,24 +113,45 @@ def test_incomplete_model_output_never_creates_partial_separate_tasks(roots):
         assert len(store.list_tasks()) == 1
 
 
-def test_invalid_json_is_saved_and_can_resume_with_a_later_provider_result(roots):
+def test_terminal_invalid_json_is_reused_for_unchanged_input(roots):
     agents, vault = roots
     findings = [finding()]
-    first = decide_findings(spec(agents, vault, "task-root"), review(findings),
-                            runner=lambda _: {"status": "completed", "text": "not json", "usage": {"input": 1},
-                                               "process_identity": {"pid": 42}})
+    calls = []
+
+    def malformed(_):
+        calls.append(1)
+        return {"status": "completed", "text": "not json", "usage": {"input": 1},
+                "process_identity": {"pid": 42}}
+
+    first = decide_findings(spec(agents, vault, "task-root"), review(findings), runner=malformed)
     assert first["status"] == "incomplete"
+    assert first["retryable"] is False
     digest = first["input_digest"]
     run_dir = vault / "service-review" / digest
     assert (run_dir / "request.json").exists()
     assert (run_dir / "provider-output.json").exists()
 
-    resumed = decide_findings(spec(agents, vault, "task-root"), review(findings),
-                              runner=lambda _: {"status": "completed", "text": response_for(findings),
-                                                 "usage": {"input": 2}, "process_identity": {"pid": 43}})
-    assert resumed["status"] == "complete"
-    assert resumed["usage"] == {"input": 2}
-    assert resumed["process_identity"] == {"pid": 43}
+    resumed = decide_findings(
+        spec(agents, vault, "task-root"), review(findings),
+        runner=lambda _: (_ for _ in ()).throw(AssertionError("unchanged malformed review must be reused")))
+    assert resumed == first
+    assert calls == [1]
+
+
+def test_changed_review_evidence_requests_a_new_provider_turn(roots):
+    agents, vault = roots
+    findings = [finding()]
+    calls = []
+
+    def runner(_):
+        calls.append(1)
+        return {"status": "completed", "text": "not json"}
+
+    first = decide_findings(spec(agents, vault, "task-root"), review(findings), runner=runner)
+    changed = {"findings": findings, "evidence_links": ["vault://review/updated.json"]}
+    second = decide_findings(spec(agents, vault, "task-root"), changed, runner=runner)
+    assert first["input_digest"] != second["input_digest"]
+    assert calls == [1, 1]
 
 
 def test_provider_failure_is_incomplete(roots):

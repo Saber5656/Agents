@@ -369,11 +369,18 @@ def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner
     cached = _load_json(directory / "result.json")
     if cached and cached.get("status") == "complete":
         return cached
+    # A provider turn that reached a terminal response but violated the
+    # decision schema is still a review result.  Reuse it for the same input
+    # instead of paying for an identical model turn; provider/process failures
+    # remain retryable after reconciliation.
+    if cached and cached.get("status") == "incomplete" and cached.get("retryable") is False:
+        return cached
     recovered = _recover_provider(directory)
     if recovered and recovered.get("status") == "incomplete":
         return {**recovered, "input_digest": digest}
     attempt_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=directory))
     env = dict(os.environ)
+    provider_completed = False
     try:
         normalized_spec, normalized_review, findings, evidence_links = _validate(spec, review)
         prompt = _prompt(normalized_spec, findings, evidence_links)
@@ -397,6 +404,7 @@ def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner
         text, provider_meta = _result_text(provider_result)
         if provider_meta.get("status") not in (None, "completed", "complete", "success"):
             raise ReviewInputError(_redact(str(provider_meta.get("reason", "review provider did not complete")), env))
+        provider_completed = True
         decisions = _parse_decisions(text, findings)
         separate_task_ids = _register_separate(normalized_spec, normalized_review, decisions, digest)
         result = {"status": "complete", "input_digest": digest, "decisions": decisions,
@@ -407,7 +415,9 @@ def _decide_locked(spec: Mapping[str, Any], review: Mapping[str, Any], *, runner
                              "read_only": True, "disabled_features": list(DISABLED_FEATURES)},
                   "usage": provider_meta.get("usage"), "process_identity": provider_meta.get("process_identity")}
     except (ReviewInputError, OSError, ValueError) as exc:
-        result = {"status": "incomplete", "input_digest": digest, "reason": str(exc) or type(exc).__name__}
+        result = {"status": "incomplete", "input_digest": digest,
+                  "reason": str(exc) or type(exc).__name__,
+                  "retryable": not provider_completed}
     result = _redact_value(result, env)
     _save_json(directory / "result.json", result, env)
     if recovered and recovered.get("recovered_from"):

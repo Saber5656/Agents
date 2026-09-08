@@ -865,6 +865,31 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("previous review output contained an invalid criterion_id", prompt["phase_instructions"])
         self.assertIn("criterion:string", prompt["instructions"])
 
+    def test_terminal_malformed_default_verdict_is_reused_after_restart(self):
+        task = self.tasks.create_task(purpose="malformed default review", acceptance_evidence=["accepted"])
+        self.tasks.add_acceptance_evidence(task["id"], "accepted", verified=True)
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context", retry_base=0)
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        events = "\n".join([
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "not json"}}),
+            json.dumps({"type": "turn.completed", "status": "completed"}),
+        ])
+        from harness.runner import ProcessResult
+        with mock.patch("harness.service.subprocess.run",
+                        return_value=mock.Mock(returncode=0, stdout="Logged in using ChatGPT", stderr="")), \
+             mock.patch("harness.runner.execute", return_value=ProcessResult(0, events, "")) as execute:
+            first = self.service.verify_with_agent(job["id"], default_verifier)
+        self.assertEqual(first["status"], "needs_verification")
+        self.service.close()
+        reopened = ServiceStore(self.db, self.tasks)
+        self.service = reopened
+        self.assertTrue(reopened._start_verification(job["id"]))
+        second = reopened.verify_with_agent(
+            job["id"], lambda _: (_ for _ in ()).throw(AssertionError("terminal malformed review must be reused")))
+        self.assertEqual(second["status"], "needs_verification")
+        self.assertEqual(execute.call_count, 1)
+
     def test_verifier_criterion_ids_bind_to_exact_current_requirements(self):
         from harness.service import _acceptance_catalog, _bind_acceptance_ids
         task = {"acceptance_records": [{"evidence": "A long exact criterion."},
@@ -920,6 +945,49 @@ class ServiceTests(unittest.TestCase):
             "acceptance": True, "merge": True, "main_sync": True, "findings": []})
         self.assertEqual(result["status"], "needs_verification")
         self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
+
+    def test_malformed_verdict_is_reused_after_service_restart(self):
+        task = self.tasks.create_task(purpose="review once", acceptance_evidence=["accepted"])
+        self.tasks.add_acceptance_evidence(task["id"], "accepted", verified=True)
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context", retry_base=0)
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        verdict = {"acceptance": True, "findings": []}
+        calls = []
+
+        def verifier(_):
+            calls.append(1)
+            return verdict
+
+        first = self.service.verify_with_agent(job["id"], verifier)
+        self.assertEqual(first["status"], "needs_verification")
+        self.service.close()
+        reopened = ServiceStore(self.db, self.tasks)
+        self.service = reopened
+        self.assertTrue(reopened._start_verification(job["id"]))
+        second = reopened.verify_with_agent(
+            job["id"], lambda _: (_ for _ in ()).throw(AssertionError("unchanged verdict must be reused")))
+        self.assertEqual(second["status"], "needs_verification")
+        self.assertEqual(second["verification"], verdict)
+        self.assertEqual(calls, [1])
+
+    def test_verifier_rechecks_after_relevant_evidence_changes(self):
+        task = self.tasks.create_task(purpose="review evidence", acceptance_evidence=["accepted"])
+        self.tasks.add_acceptance_evidence(task["id"], "accepted", verified=True)
+        job = self.service.enroll(task["id"], self.workspace, "prompt", "context", retry_base=0)
+        self.service.run_once(executor=lambda _: {"status": "completed"})
+        self.assertTrue(self.service._start_verification(job["id"]))
+        calls = []
+
+        def verifier(_):
+            calls.append(1)
+            return {"acceptance": False, "findings": [], "evidence": str(len(calls))}
+
+        self.service.verify_with_agent(job["id"], verifier)
+        self.service.record_update(job["id"], "repair evidence", ["vault://repair"])
+        self.assertTrue(self.service._start_verification(job["id"]))
+        self.service.verify_with_agent(job["id"], verifier)
+        self.assertEqual(calls, [1, 1])
 
     def test_verify_requires_merge_and_main_sync_evidence(self):
         task = self.tasks.create_task(purpose="verify evidence", acceptance_evidence=["accepted"])

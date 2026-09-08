@@ -136,6 +136,64 @@ def _atomic_write_bytes(path, content):
             pass
 
 
+def _verification_input_digest(job, task, *, publication_snapshot=None,
+                                publication_readback=None):
+    """Identify the evidence reviewed by one acceptance-verifier turn.
+
+    Scheduling ownership, retry timing and process identities are deliberately
+    excluded.  They may change while the same review is being reconciled.
+    Worker results, task evidence, updates and publication observations remain
+    bound so an accepted repair or new evidence requests a fresh turn.
+    """
+    task_keys = (
+        "id", "purpose", "source", "source_task_id", "source_event_key",
+        "expected_result", "repository", "assignee", "priority", "version",
+        "evidence_links", "acceptance_records", "completion_evidence",
+        "dependencies", "work_units", "github_issues", "expected_result_history",
+    )
+    job_keys = (
+        "id", "task_id", "workspace", "run_dir", "resource", "prompt", "context",
+        "model", "effort", "timeout", "attempts_count", "updates", "requirement_id",
+        "work_unit_id", "repository", "canonical_repo", "branch", "immutable_base",
+        "vault_reference", "criteria", "selection_context",
+    )
+
+    def pick(value, keys):
+        return {key: value[key] for key in keys if key in value}
+
+    stable_job = pick(job, job_keys)
+    attempts = []
+    for attempt in job.get("attempts", []):
+        if not isinstance(attempt, dict):
+            continue
+        attempts.append({key: attempt[key] for key in
+                         ("attempt_number", "result") if key in attempt})
+    stable_job["attempts"] = attempts
+    payload = {
+        "task": pick(task, task_keys),
+        "job": stable_job,
+        "publication_snapshot": publication_snapshot,
+        "publication_readback": publication_readback,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def _save_verification_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _atomic_write_bytes(path, (json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                           separators=(",", ":"), default=str) + "\n").encode())
+
+
+def _load_verification_json(path):
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return value
+
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS service_jobs (
@@ -1320,6 +1378,56 @@ class ServiceStore:
                            WHERE id=?""", (now(), job_id))
         return self.get_job(job_id)
 
+    @staticmethod
+    def _verification_record(job, digest):
+        record = Path(job["run_dir"]) / ("verification-" + digest)
+        record.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return record
+
+    @staticmethod
+    def _cached_verification(record):
+        marker = _load_verification_json(Path(record) / "service-result.json")
+        if isinstance(marker, dict) and marker.get("digest") is not None:
+            if marker.get("terminal_error") is True:
+                return True, {"_verification_error": marker.get("error", "verification provider returned a terminal error")}
+            if "result" in marker:
+                return True, marker["result"]
+        # The service may be restarted after the provider has durably written
+        # its own verdict but before the small service-result index is saved.
+        # Reconcile that terminal record mechanically instead of invoking the
+        # same provider turn again.
+        for name in ("bound-verdict.json", "verdict.json"):
+            value = _load_verification_json(Path(record) / name)
+            if isinstance(value, dict):
+                return True, value
+        outcome = _load_verification_json(Path(record) / "outcome.json")
+        state = _load_verification_json(Path(record) / "process-state.json")
+        if (isinstance(outcome, dict) and not outcome.get("output_pending")
+                and outcome.get("exit_code") in (0, None)
+                and isinstance(state, dict)
+                and state.get("status") not in ("starting", "running", "collecting")):
+            return True, {"_verification_error": "verification provider returned a terminal malformed verdict"}
+        return False, None
+
+    @staticmethod
+    def _mark_terminal_verification_error(record, error):
+        """Cache only a completed provider turn whose verdict was malformed."""
+        outcome = _load_verification_json(Path(record) / "outcome.json")
+        state = _load_verification_json(Path(record) / "process-state.json")
+        if not isinstance(outcome, dict) or outcome.get("output_pending") or outcome.get("exit_code") not in (0, None):
+            return False
+        if isinstance(state, dict) and state.get("status") in ("starting", "running", "collecting"):
+            return False
+        input_marker = _load_verification_json(Path(record) / "input-digest.json")
+        if not isinstance(input_marker, dict) or not input_marker.get("digest"):
+            return False
+        _save_verification_json(Path(record) / "service-result.json", {
+            "digest": input_marker["digest"],
+            "terminal_error": True,
+            "error": str(error),
+        })
+        return True
+
     def verify_with_agent(self, job_id, verifier):
         job = self.get_job(job_id)
         task = self.tasks.get_task(job["task_id"])
@@ -1373,7 +1481,37 @@ class ServiceStore:
                 # Supply the host's actual readback before final review, then
                 # recheck it again at the completion boundary below.
                 verifier_spec["publication_readback"] = observe_publication(job, task, resumed_proof)
-            result = verifier(verifier_spec)
+            verification_digest = _verification_input_digest(
+                job, task,
+                publication_snapshot=verifier_spec.get("publication_snapshot"),
+                publication_readback=verifier_spec.get("publication_readback"),
+            )
+            verification_record = self._verification_record(job, verification_digest)
+            _save_verification_json(verification_record / "input-digest.json",
+                                    {"digest": verification_digest})
+            verifier_spec["verification_input_digest"] = verification_digest
+            verifier_spec["verification_record_dir"] = str(verification_record)
+            cached_found, cached = self._cached_verification(verification_record)
+            if isinstance(cached, dict) and "_verification_error" in cached:
+                self._reset_verification(job_id, cached["_verification_error"])
+                return {"status": "needs_verification", "job_id": job_id,
+                        "verification_error": cached["_verification_error"]}
+            if cached_found:
+                result = cached
+            else:
+                try:
+                    result = verifier(verifier_spec)
+                except Exception as exc:
+                    if self._mark_terminal_verification_error(verification_record, exc):
+                        self._reset_verification(job_id, str(exc))
+                        return {"status": "needs_verification", "job_id": job_id,
+                                "verification_error": str(exc)}
+                    self._reset_verification(job_id, str(exc))
+                    return {"status": "needs_verification", "job_id": job_id,
+                            "verification_error": str(exc)}
+                _save_verification_json(verification_record / "service-result.json", {
+                    "digest": verification_digest, "result": result,
+                })
         except Exception as exc:
             self._reset_verification(job_id, str(exc))
             return {"status": "needs_verification", "job_id": job_id, "verification_error": str(exc)}
@@ -1950,8 +2088,11 @@ def default_verifier(spec):
     }, ensure_ascii=False)
     from .runner import execute, save
     import uuid
-    record = Path(spec["job"]["run_dir"]) / ("verification-" + uuid.uuid4().hex)
-    record.mkdir(mode=0o700, parents=True)
+    record = Path(spec.get("verification_record_dir") or
+                  (Path(spec["job"]["run_dir"]) / ("verification-" + uuid.uuid4().hex)))
+    record.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if spec.get("verification_input_digest"):
+        save(record / "input-digest.json", {"digest": spec["verification_input_digest"]}, env)
     save(record / "prompt.json", prompt, env)
     argv = ["codex", "exec", "--ignore-user-config", "--ephemeral", "--json",
             "--skip-git-repo-check", "-m", "gpt-5.6-luna", "-s", "read-only",
