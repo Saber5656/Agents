@@ -109,6 +109,17 @@ def default_repo_table() -> Path:
     return LOCAL_REPO_TABLE if LOCAL_REPO_TABLE.exists() else DEFAULT_REPO_TABLE
 
 
+def select_repositories(repos: list[ManagedRepo], names: list[str] | None = None) -> list[ManagedRepo]:
+    """Limit a managed operation to explicitly named repositories."""
+    if not names:
+        return repos
+    by_name = {repo.name: repo for repo in repos}
+    unknown = [name for name in names if name not in by_name]
+    if unknown:
+        raise ValueError("unknown managed repository: " + ", ".join(unknown))
+    return [by_name[name] for name in names]
+
+
 def is_git_repo(path: Path) -> bool:
     try:
         run_git(path, ["rev-parse", "--git-dir"])
@@ -192,6 +203,12 @@ def inspect_repo(repo: ManagedRepo) -> RepoResult:
         return result
     result.branch = current_branch(repo.path)
     result.before_head = current_head(repo.path)
+    if not result.branch:
+        result.reason = "detached_head"
+        result.fetch_status = "skipped"
+        result.merge_status = "blocked"
+        result.after_head = result.before_head
+        return result
     result.dirty = dirty_state(repo.path)
     if has_unmerged_paths(repo.path):
         result.reason = "unmerged_paths"
@@ -210,7 +227,7 @@ def inspect_repo(repo: ManagedRepo) -> RepoResult:
 
 def process_repo(repo: ManagedRepo, *, execute: bool) -> RepoResult:
     result = inspect_repo(repo)
-    if result.merge_status == "blocked" and result.reason in {"path_missing", "not_git_repo", "unmerged_paths"}:
+    if result.merge_status == "blocked" and result.reason in {"path_missing", "not_git_repo", "unmerged_paths", "detached_head"}:
         return result
 
     if execute:
@@ -300,10 +317,14 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--dry-run", action="store_true", help="Inspect and report without fetch or merge.")
     mode.add_argument("--execute", action="store_true", help="Fetch and merge according to safe policy.")
     parser.add_argument("--repo-table", type=Path, default=default_repo_table())
+    parser.add_argument("--repo-name", action="append", default=[], help="Operate only on this managed repository name; repeatable.")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of Markdown table.")
     args = parser.parse_args(argv)
 
-    repos = parse_managed_repositories(args.repo_table)
+    try:
+        repos = select_repositories(parse_managed_repositories(args.repo_table), args.repo_name)
+    except ValueError as exc:
+        parser.error(str(exc))
     results = [process_repo(repo, execute=args.execute) for repo in repos]
 
     if args.json:

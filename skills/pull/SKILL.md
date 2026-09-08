@@ -19,6 +19,11 @@ Use existing changes and verified results. Preserve unrelated files, index entri
 
 Resolve the requested checkout(s), remote, current branch/upstream and dirty/index state. A short request uses the current repository. Only an explicit all-repositories request expands the set, using discovered configuration and showing the actual scope in the record.
 
+The managed-repository helper accepts `--repo-name NAME` to limit an operation
+to an explicitly named repository. A named operation must not fetch or merge any
+other configured repository. Detached checkouts, missing upstreams, dirty state
+and remote failures remain explicit blockers with the checkout preserved.
+
 Fetch using existing credentials. For a clean branch with an unambiguous upstream, fast-forward to the verified remote commit. If dirty, diverged, detached or missing its intended upstream, preserve the state and record the concrete reconciliation needed. Do not automatically commit, stash, reset or delete local work. Already-authorized repairs can proceed separately with evidence.
 
 This skill does not push, create PRs, merge GitHub PRs or alter protection. Post-PR canonical synchronization is owned by the delivery workflow and must verify the merge ancestry. Record per-repository actual outcome; one blocked checkout does not hide the others.

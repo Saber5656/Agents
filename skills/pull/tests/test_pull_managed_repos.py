@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from skills.pull.scripts.pull_managed_repos import parse_managed_repositories, process_repo
+from skills.pull.scripts.pull_managed_repos import parse_managed_repositories, process_repo, select_repositories
 
 
 def git(repo: Path, *args: str) -> str:
@@ -88,6 +88,55 @@ class PullManagedReposTest(unittest.TestCase):
         self.assertEqual(result.fetch_status, "success")
         self.assertEqual(result.merge_status, "merged")
         self.assertTrue((local / "remote.txt").exists())
+        head = git(local, "rev-parse", "HEAD")
+        repeated = process_repo(repo, execute=True)
+        self.assertEqual(repeated.merge_status, "not_needed")
+        self.assertEqual(head, git(local, "rev-parse", "HEAD"))
+
+    def test_detached_head_blocks_before_fetch(self) -> None:
+        remote, local = self.init_repo_pair()
+        self.commit_remote_update(remote)
+        git(local, "switch", "--detach", "HEAD")
+        repo = parse_managed_repositories_from_text(self.make_repo(local))[0]
+        result = process_repo(repo, execute=True)
+        self.assertEqual(result.merge_status, "blocked")
+        self.assertEqual(result.reason, "detached_head")
+        self.assertFalse((local / "remote.txt").exists())
+
+    def test_remote_failure_is_blocked_without_local_merge(self) -> None:
+        remote, local = self.init_repo_pair()
+        self.commit_remote_update(remote)
+        subprocess.run(["git", "-C", str(local), "remote", "set-url", "origin", str(self.root / "missing.git")], check=True)
+        repo = parse_managed_repositories_from_text(self.make_repo(local))[0]
+        before = git(local, "rev-parse", "HEAD")
+        result = process_repo(repo, execute=True)
+        self.assertEqual(result.merge_status, "blocked")
+        self.assertTrue(result.reason.startswith("fetch_failed:"))
+        self.assertEqual(before, git(local, "rev-parse", "HEAD"))
+
+    def test_named_repository_selection_does_not_touch_other_repo(self) -> None:
+        remote_one, local_one = self.init_repo_pair()
+        remote_two = self.root / "remote-two.git"
+        seed_two = self.root / "seed-two"
+        subprocess.check_call(["git", "init", "--bare", str(remote_two)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(["git", "clone", str(remote_two), str(seed_two)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        git(seed_two, "config", "user.email", "test@example.com"); git(seed_two, "config", "user.name", "Test User")
+        git(seed_two, "switch", "-c", "main"); write(seed_two / "README.md", "two\n")
+        git(seed_two, "add", "README.md"); git(seed_two, "commit", "-m", "initial two"); git(seed_two, "push", "origin", "main")
+        git(remote_two, "symbolic-ref", "HEAD", "refs/heads/main")
+        local_two = self.root / "local-two"
+        subprocess.check_call(["git", "clone", str(remote_two), str(local_two)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        git(local_two, "config", "user.email", "test@example.com"); git(local_two, "config", "user.name", "Test User")
+        self.commit_remote_update(remote_one, filename="one.txt")
+        self.commit_remote_update(remote_two, filename="two.txt")
+        table = self.root / "two-repos.md"
+        write(table, self.make_repo(local_one) + self.make_repo(local_two).replace("| local |", "| second |"))
+        selected = select_repositories(parse_managed_repositories(table), ["local"])
+        self.assertEqual(["local"], [item.name for item in selected])
+        result = process_repo(selected[0], execute=True)
+        self.assertEqual(result.merge_status, "merged")
+        self.assertTrue((local_one / "one.txt").exists())
+        self.assertFalse((local_two / "two.txt").exists())
 
     def test_dirty_repo_with_remote_update_blocks_merge(self) -> None:
         remote, local = self.init_repo_pair()
