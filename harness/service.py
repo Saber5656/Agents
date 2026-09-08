@@ -656,6 +656,8 @@ class ServiceStore:
             diagnostic = "held recheck passed but dependencies are not ready"
             self.record_update(job_id, diagnostic, ["local://cost-security/recheck-dependencies"])
             return {"status": "held", "safe": False, "reason": diagnostic}
+        self.record_update(job_id, "Held job explicitly cleared for resume after safety recheck: " + str(result.get("reason", "passed")),
+                           result.get("evidence", []) or ["local://cost-security/recheck-passed"])
         with self.tx() as conn:
             changed = conn.execute(
                 "UPDATE service_jobs SET state='retry',next_attempt_at=NULL,last_error=NULL,updated_at=? WHERE id=? AND state='held'",
@@ -672,8 +674,6 @@ class ServiceStore:
                              (diagnostic, now(), job_id))
             self.record_update(job_id, diagnostic, ["local://cost-security/recheck-task-update-failed"])
             return {"status": "held", "safe": False, "reason": diagnostic}
-        self.record_update(job_id, "Held job explicitly resumed after safety recheck: " + str(result.get("reason", "passed")),
-                           result.get("evidence", []) or ["local://cost-security/recheck-passed"])
         return {"status": "retry", "safe": True, "job_id": job_id}
 
     def _dependencies_ready(self, task):
