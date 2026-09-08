@@ -21,4 +21,10 @@ Identify whether the request means a local branch merge or a GitHub PR merge. Ro
 
 For local work, inspect target branch, selected source commit, index, dirty files and existing commits before mutation. Preserve unrelated changes. Commit only when requested/already authorized, with `commit` validation and review; do not sweep dirty state into a checkpoint merely to make merge convenient.
 
+The managed-repository helper accepts `--repo-name NAME` to limit an operation
+to an explicitly named repository. A request naming one repository must not fetch,
+commit, stash, or merge any other configured repository. A GitHub PR URL or PR
+number is routed to `pr-merge-gate`; it is never treated as a local repository
+merge request.
+
 Prefer a fast-forward when applicable. A requested history-preserving merge may create a merge commit. Resolve ordinary conflicts by preserving both intended behaviors and verifying the affected code. Ask only when a real specification choice cannot be established. Never reset, clean, force push, bypass hooks or silently change repositories. This local operation alone does not publish. Record source/result SHA, conflict decisions and checks.
