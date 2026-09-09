@@ -57,6 +57,21 @@ class ResourceProcessAcceptanceTests(unittest.TestCase):
                 return process, json.loads(process.stdout.readline())
 
             try:
+                completed = []
+                for name in ("independent-a", "independent-b"):
+                    workspace = root / name
+                    workspace.mkdir()
+                    process, state = start(workspace, "ref:" + name, name)
+                    self.assertEqual(state["state"], "running")
+                    completed.append((process, state, workspace, name))
+                self.assertNotEqual(completed[0][1]["port"], completed[1][1]["port"])
+                self.assertTrue(all(process.poll() is None for process, *_ in completed))
+                for process, _, workspace, name in completed:
+                    process.communicate("finish\n", timeout=10)
+                    self.assertEqual(process.returncode, 0)
+                    with sqlite3.connect(str(workspace / "worker.sqlite3")) as db:
+                        self.assertEqual([row[0] for row in db.execute("SELECT value FROM observations")],
+                                         [name, name + "-finished"])
                 first, first_state = start(left, "ref:left", "left")
                 second, second_state = start(right, "ref:right", "right")
                 self.assertEqual(first_state["state"], "running")
