@@ -118,6 +118,8 @@ provider のエラーイベントやエラー結果が利用上限を示した�
 
 ## 検証
 
+モバイルアプリの検証を扱う場合は、共通ルールから参照する[モバイルアプリのテスト環境](../policies/mobile-testing.md)に従う。Simulator / Emulatorでの日常的な確認、実機での機能確認、配布用ビルドでの最終確認を分ける。iPhoneミラーリングは任意の補助機能であり、このCLIがGUI操作を提供・保証するものではない。
+
 ```sh
 python3 -m unittest discover -s tests -v
 ```
