@@ -58,9 +58,11 @@ class SchedulerAcceptanceTests(unittest.TestCase):
         self.tasks = TaskStore(self.root / "tasks.sqlite3", agents_root=self.agents,
                                vault_root=self.vault)
         self.service = ServiceStore(self.root / "service.sqlite3", self.tasks)
-        self.addCleanup(self.service.close)
-        self.addCleanup(self.tasks.close)
+        # unittest cleanups run LIFO: close SQLite connections before removing
+        # the temporary directory that contains their WAL/SHM files.
         self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.tasks.close)
+        self.addCleanup(self.service.close)
 
     def _fixture(self, count=5, *, dependencies=None):
         dependencies = dependencies or {}
@@ -181,7 +183,13 @@ class SchedulerAcceptanceTests(unittest.TestCase):
             # The production scheduler loop owns the bounded worker pool and
             # repeatedly reclaims only eligible rows.  The fixture callback
             # stops this disposable loop after its wave has run.
-            self.assertEqual(scheduler.run_forever(executor=execute), "stopped")
+            timer = threading.Timer(5.0, stop.set)
+            timer.daemon = True
+            timer.start()
+            try:
+                self.assertEqual(scheduler.run_forever(executor=execute), "stopped")
+            finally:
+                timer.cancel()
             wave_job_ids = {item["job"]["id"] for item in wave.values()}
             self.assertTrue(all(job["state"] == "needs_verification"
                                 for job in self.service.list_jobs()
