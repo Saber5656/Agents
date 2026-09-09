@@ -1,12 +1,14 @@
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 from harness.delivery import (public_text, public_git_changes, prepare_worktree,
                               sync_main, merge_ready, DeliveryError, issue_body,
-                              GitHub)
+                              GitHub, main as delivery_main)
 
 
 def git(cwd,*args):
@@ -172,6 +174,38 @@ class DeliveryTests(unittest.TestCase):
         git(self.repo,'switch','--detach','HEAD')
         with self.assertRaisesRegex(DeliveryError,'detached'):
             sync_main(self.repo,'main',git(other,'rev-parse','HEAD'),str(remote))
+
+    def test_sync_respects_existing_service_workspace_lock(self):
+        remote=self.root/'remote.git';git(self.root,'init','--bare',str(remote))
+        git(self.repo,'remote','add','origin',str(remote));git(self.repo,'push','origin','main')
+        other=self.root/'other';git(self.root,'clone','--branch','main',str(remote),str(other))
+        git(other,'config','user.name','Fixture');git(other,'config','user.email','fixture@example.invalid')
+        (other/'b').write_text('remote')
+        git(other,'add','b');git(other,'commit','-m','remote');git(other,'push','origin','main')
+        latest=git(other,'rev-parse','HEAD')
+        lock_root=self.root/'service-locks'
+        holder_script=(
+            "import sys; from pathlib import Path; "
+            "from harness.service import WorkspaceLock; "
+            "lock=WorkspaceLock(Path(sys.argv[1]),Path(sys.argv[2])); "
+            "assert lock.acquire(blocking=False); print('ready',flush=True); sys.stdin.readline(); lock.release()"
+        )
+        holder=subprocess.Popen(
+            [sys.executable,'-c',holder_script,str(self.repo),str(lock_root)],
+            cwd=Path(__file__).resolve().parents[1], env=os.environ.copy(),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.addCleanup(lambda: holder.poll() is None and holder.kill())
+        self.assertEqual('ready',holder.stdout.readline().strip())
+        with self.assertRaisesRegex(DeliveryError,'live writer'):
+            sync_main(self.repo,'main',latest,str(remote),lock_root=lock_root)
+        self.assertEqual(self.base,git(self.repo,'rev-parse','HEAD'))
+        _, stderr=holder.communicate('release\n',timeout=10)
+        self.assertEqual(0,holder.returncode,stderr)
+        self.assertEqual(0,delivery_main([
+            'sync','--repo',str(self.repo),'--remote',str(remote),
+            '--merge-sha',latest,'--lock-root',str(lock_root),
+        ]))
 
     def test_other_base_branch_never_mutates_even_with_same_oid(self):
         client=GitHub('fixture/repository')

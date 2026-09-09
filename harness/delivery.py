@@ -104,25 +104,47 @@ def verify_remote(repo,expected):
     if urls!=[expected,expected]:raise DeliveryError('Remote destination changed')
 
 
-def sync_main(repo,branch,merge_sha,remote):
-    oid(merge_sha);verify_remote(repo,remote)
+def sync_main(repo,branch,merge_sha,remote,*,lock_root=None):
+    """Fast-forward a clean canonical checkout under the service workspace lock.
+
+    The background service already uses ``WorkspaceLock`` for every live
+    writer.  Reusing that same lock here prevents a post-merge sync from
+    racing a service worker that owns the canonical checkout.  ``lock_root``
+    is injectable for isolated callers; the default follows the configured
+    ``AGENTS_ROOT`` service root and falls back to a sibling private root for
+    disposable repositories so the lock directory is not a repository change.
+    """
+    repo=Path(repo).resolve()
+    oid(merge_sha)
+    from .service import WorkspaceLock
+    if lock_root is None:
+        configured_root=os.environ.get('AGENTS_ROOT')
+        lock_root=(Path(configured_root).resolve() if configured_root
+                   else repo.parent.resolve())/'.local'/'service-locks'
+    lock=WorkspaceLock(repo, Path(lock_root).resolve())
+    if not lock.acquire(blocking=False):
+        raise DeliveryError('Canonical checkout has a live writer; preserve local state')
     try:
-        current_branch=git(repo,'symbolic-ref','--short','HEAD')
-    except DeliveryError as exc:
-        raise DeliveryError('Canonical checkout is detached or on another branch') from exc
-    if current_branch!=branch:
-        raise DeliveryError('Canonical checkout is detached or on another branch')
-    if git(repo,'status','--porcelain=v1','-uall'):
-        raise DeliveryError('Canonical checkout is dirty; preserve local state')
-    git(repo,'fetch','origin',branch)
-    target=git(repo,'rev-parse','FETCH_HEAD')
-    if git(repo,'merge-base',merge_sha,target)!=merge_sha:
-        raise DeliveryError('Remote branch does not contain verified merge')
-    if git(repo,'merge-base','HEAD',target)!=git(repo,'rev-parse','HEAD'):
-        raise DeliveryError('Canonical main diverged; preserve local commits')
-    git(repo,'merge','--ff-only',target)
-    if git(repo,'rev-parse','HEAD')!=target:raise DeliveryError('Main read-back mismatch')
-    return target
+        verify_remote(repo,remote)
+        try:
+            current_branch=git(repo,'symbolic-ref','--short','HEAD')
+        except DeliveryError as exc:
+            raise DeliveryError('Canonical checkout is detached or on another branch') from exc
+        if current_branch!=branch:
+            raise DeliveryError('Canonical checkout is detached or on another branch')
+        if git(repo,'status','--porcelain=v1','-uall'):
+            raise DeliveryError('Canonical checkout is dirty; preserve local state')
+        git(repo,'fetch','origin',branch)
+        target=git(repo,'rev-parse','FETCH_HEAD')
+        if git(repo,'merge-base',merge_sha,target)!=merge_sha:
+            raise DeliveryError('Remote branch does not contain verified merge')
+        if git(repo,'merge-base','HEAD',target)!=git(repo,'rev-parse','HEAD'):
+            raise DeliveryError('Canonical main diverged; preserve local commits')
+        git(repo,'merge','--ff-only',target)
+        if git(repo,'rev-parse','HEAD')!=target:raise DeliveryError('Main read-back mismatch')
+        return target
+    finally:
+        lock.release()
 
 
 def _check_successful(check):
@@ -414,6 +436,7 @@ def main(argv=None):
     revision=p.add_parser('check-public-revision');revision.add_argument('--repo',type=Path,required=True)
     revision.add_argument('--base',required=True);revision.add_argument('--head',required=True)
     sync=p.add_parser('sync');sync.add_argument('--repo',type=Path,required=True);sync.add_argument('--remote',required=True)
+    sync.add_argument('--lock-root',type=Path,help='Existing service WorkspaceLock root (default: configured AGENTS_ROOT/.local/service-locks)')
     sync.add_argument('--branch',default='main');sync.add_argument('--merge-sha',required=True)
     merge=p.add_parser('merge');merge.add_argument('--repo',required=True);merge.add_argument('--pr',type=int,required=True)
     merge.add_argument('--head',required=True);merge.add_argument('--base',required=True);merge.add_argument('--branch',default='main')
@@ -423,7 +446,7 @@ def main(argv=None):
         if args.command=='check-public':public_text(args.path.read_text(),english=args.english);result={'status':'checked'}
         elif args.command=='check-public-revision':
             public_git_changes(args.repo,args.base,args.head);result={'status':'checked'}
-        elif args.command=='sync':result={'main':sync_main(args.repo,args.branch,args.merge_sha,args.remote)}
+        elif args.command=='sync':result={'main':sync_main(args.repo,args.branch,args.merge_sha,args.remote,lock_root=args.lock_root)}
         else:result=GitHub(args.repo).merge(args.pr,args.head,args.base,args.branch,merge_method=args.merge_method)
         print(json.dumps(result,indent=2));return 0
     except (DeliveryError,OSError,KeyError) as exc:
