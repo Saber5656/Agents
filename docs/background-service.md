@@ -25,12 +25,81 @@ The Python API is the equivalent when a prompt file has already been read:
 ```python
 job = store.enroll(
     task_id, workspace, original_prompt, current_context,
-    model="gpt-5.6-luna", effort="low", timeout=900,
+    provider="claude", model="gpt-5.6-luna", effort="low", timeout=900,
 )
 store.record_update(job["id"], "Accepted scope correction", ["vault://runs/update.json"])
 ```
 
-The default model is `gpt-5.6-luna` with `low` effort. `timeout` applies to
+## Provider routing (Claude first, Codex on quota only)
+
+A new enrollment defaults to `provider="claude"`: the ordinary worker and the
+acceptance verifier both run Claude `sonnet`/`low` first, so the separate
+Codex subscription is spent only when Claude cannot serve the request. The
+persisted `model` column keeps its original meaning as the configured Codex
+model (`gpt-5.6-luna` by default); when Claude is primary that value becomes
+the automatic fallback model instead of a second explicit selection. The
+underlying `harness.runner` fallback is quota-only: it switches provider only
+on an explicit `usage_limit` classification from the provider's own control
+records, never on an ordinary failure or an authentication error, and never
+promotes to a higher-cost model. Falling back once from Claude to Codex does
+not fall back again.
+
+Passing `provider="codex"` preserves the original single-provider semantics
+exactly: the job runs only the configured Codex `model`, with no Claude
+attempt and no automatic fallback. This is how an explicitly selected Codex
+model keeps its original behavior. A job enrolled before this column existed
+is migrated to `provider="codex"` on the next restart, so an already
+scheduled or resumed job keeps running the provider it started with instead
+of silently moving onto the new default; only a fresh enrollment adopts the
+Claude-first default. A direct `default_executor(spec)` call that omits the
+`provider` key (an older integration) also keeps the original Codex-only
+routing; only `run_once`/the `Scheduler` supply the persisted job's
+`provider` explicitly.
+
+The worker's pre-attempt authentication guard mirrors this choice: a
+`provider="claude"` job checks `claude auth status --json` for the actual
+Claude Pro/Max subscription route, not merely `loggedIn: true` (a saved API
+key also reports that): `authMethod` must be `"claude.ai"`, `apiProvider`
+must be `"firstParty"`, and `subscriptionType` must be a truthy plan name. A
+`provider="codex"` job keeps the original `codex login status`
+ChatGPT-subscription check. Both routes still reject the existing separately
+billed API-route environment variables (`OPENAI_API_KEY`, `OPENAI_BASE_URL`,
+`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CODEX_API_KEY`) plus the
+Bedrock/Vertex/Foundry paid-route variables
+(`CLAUDE_CODE_USE_BEDROCK`, `AWS_BEARER_TOKEN_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_VERTEX_PROJECT_ID`,
+`CLAUDE_CODE_USE_FOUNDRY`, `ANTHROPIC_FOUNDRY_API_KEY`) before any provider
+runs. An authentication failure is a distinct, non-quota outcome: it is never
+classified as `usage_limit` and never triggers the Codex fallback; it
+surfaces as an ordinary retryable failure (or, for a held job's
+`inference_api_route` recheck, a still-blocked hold) so an operator can fix
+the login instead of the job silently burning the other subscription. When a
+Claude-primary worker attempt actually falls back inside `harness.runner`,
+the Codex subscription login is verified before that Codex turn spends any
+inference, using the same guard as the ordinary Codex path.
+The guard is attached to that job's executor and preserves its streaming
+records; it never replaces a shared module function used by other workers.
+
+The acceptance verifier (`default_verifier`) follows the identical policy
+independently of the worker's own provider: it always attempts Claude
+`sonnet`/`low` first and falls back to Codex `gpt-5.6-luna`/`low` only when
+Claude's own turn is classified `usage_limit` and the Codex subscription
+login itself verifies; both provider turns share one overall time budget
+(`min(job.timeout, 300)` seconds total, not per provider), so a fallback
+attempt that would exceed the shared deadline is not started. Any other
+verifier failure, including an authentication failure, stops immediately
+with no fallback attempt. Each verification attempt's Vault record stores
+its own `<index>-<provider>-command.json`/`-stdout.jsonl`/`-stderr.txt`/
+`-process-state.json`/`-outcome.json`, and the returned/bound verdict
+records the selected `provider`, requested `model`/`requested_model`, and
+the `actual_model` and `usage` reported by the winning attempt (unreported
+values stay null). In-progress fallback state takes precedence over an older
+completed attempt; a quota response is never cached as a malformed verdict.
+The acceptance verdict schema, criterion binding, caching and
+publication-review boundaries described below are unchanged by which
+provider produced the turn.
+
+`timeout` applies to
 one attempt; it is not a whole-task timeout. Failures remain retryable with
 durable exponential backoff and no fixed whole-task retry count. A successful
 provider result moves the job to `needs_verification`. It does not mark the
@@ -119,11 +188,19 @@ opens the file.
 
 ## Authentication boundary
 
-The production worker requires `codex login status` to succeed and rejects
+The production worker requires a subscription login for its provider to
+succeed: `claude auth status --json` (`loggedIn: true`, `authMethod:
+"claude.ai"`, `apiProvider: "firstParty"`, and a truthy `subscriptionType`,
+rejecting a saved API key) for the default `provider="claude"` job, or `codex
+login status` for an explicit `provider="codex"` job. Either route rejects
 API-key or API-base-url routes, including `OPENAI_API_KEY`,
-`OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, and
-`CODEX_API_KEY`. It has no paid-inference fallback. Tests may inject an
-executor and an auth check; that does not change the production guard.
+`OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`,
+`CODEX_API_KEY`, and the Bedrock/Vertex/Foundry paid-route variables. There
+is no paid-inference fallback; the only automatic provider switch is the
+quota-only Claude→Codex fallback described above, and that switch still
+requires the Codex subscription login to succeed once it is attempted. Tests
+may inject an executor and an auth check; that does not change the
+production guard.
 
 ## launchd
 
@@ -135,8 +212,10 @@ python3 -m harness.service launchd generate --label com.example.agents
 
 The plist uses the absolute `sys.executable`, a configured database path, the
 Agents root as working directory, `RunAtLoad`, and `KeepAlive`. It includes
-only a safe explicit `PATH` containing the resolved `codex` directory and
-system directories, so launchd does not depend on an interactive shell.
+only a safe explicit `PATH` containing the resolved `claude` and `codex`
+directories (whichever are actually installed) and system directories, so a
+headless launchd process can discover both the Claude-first worker/verifier
+and its Codex quota fallback without depending on an interactive shell.
 Prompts, contexts, tokens, and API keys are never written into the plist. On
 macOS, `install` rejects symlink targets, preserves the exact bytes of a
 differing existing plist in a private timestamped backup, and uses a synced

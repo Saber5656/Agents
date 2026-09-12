@@ -120,6 +120,12 @@ provider のエラーイベントやエラー結果が利用上限を示した�
 
 ## 結果の扱い
 
+Claudeのレビュー・受入確認・Issue下書きは `--json-schema` を指定し、成功した
+terminal result の `structured_output` を判定に使う。説明文からJSONらしい断片を
+拾って承認へ変換しない。生の応答は引き続き保存する。
+仕様は [Claude Code structured output](https://code.claude.com/docs/en/headless#get-structured-output)
+を参照し、導入CLIの対応オプションと実応答でも確認する。
+
 - レビューの指摘は利用者への承認待ちではなく、メインエージェントへの判断材料とする。メインが根拠と影響を評価し、採用する指摘の修正・検証・必要な再レビューを自律的に進める。採否と理由は Vault に記録する。
 - CLI は一回の実行結果を返し、修正方針の判断はメインエージェントが担う。終了コード3を受け取っても「修正してよいか」と利用者へ差し戻さない。固定の role 順序や機械的な全指摘採用ループは導入しない。
 - 明示的な approve と空の findings は、limitations に補足事項があっても承認として扱い、補足は返却原文に保持する。判断不能な場合は incomplete を使う。JSON 全体を囲むコードブロックも受け付ける。

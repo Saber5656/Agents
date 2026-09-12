@@ -343,7 +343,12 @@ class ClaudeDraftAgent:
             raise AuthorizationError('Claude must use an existing Claude subscription login') from exc
 
     def _command(self):
-        argv = build_command("claude", "review", self.model, self.effort)
+        argv = build_command("claude", "review", self.model, self.effort, output_schema={
+            'type': 'object', 'properties': {
+                'title': {'type': 'string'}, 'body': {'type': 'string'},
+                'acceptance': {'type': 'array', 'items': {'type': 'string'}},
+            }, 'required': ['title', 'body', 'acceptance'],
+        })
         argv[argv.index("--tools") + 1] = ""
         allowed_index = argv.index("--allowedTools")
         del argv[allowed_index:allowed_index + 2]

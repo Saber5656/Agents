@@ -894,11 +894,18 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "needs_verification")
         self.assertEqual(self.service.get_job(job["id"])["state"], "needs_verification")
 
-    def test_default_verifier_requires_codex_terminal_and_inspects_saved_context(self):
+    def test_default_verifier_falls_back_to_codex_terminal_and_inspects_saved_context(self):
+        """Claude sonnet/low is primary; a Claude quota status falls back to the
+        Codex terminal, still using the codex-specific read-only sandbox."""
         task = self.tasks.create_task(purpose="verify actual", acceptance_evidence=["A test passes"])
         self.tasks.add_acceptance_evidence(task["id"], "A test passes", verified=True)
         job = self.service.enroll(task["id"], self.workspace, "prompt", "context")
-        events = "\n".join([
+        claude_quota_events = "\n".join([
+            json.dumps({"type": "system", "subtype": "init"}),
+            json.dumps({"type": "result", "subtype": "error", "is_error": True,
+                       "result": "You have hit your usage limit"}),
+        ])
+        codex_events = "\n".join([
             json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({
                 "acceptance": True, "merge": True, "main_sync": True,
                 "findings": [], "criteria": [{"criterion_id": __import__("hashlib").sha256(b"A test passes").hexdigest(), "verified": True, "evidence": "test output"}], "evidence": "observed test and merged commit", "evidence_links": []})}}),
@@ -907,12 +914,20 @@ class ServiceTests(unittest.TestCase):
         from harness.runner import ProcessResult
         job_spec = self.service.get_job(job["id"])
         job_spec["last_error"] = "unknown or stale acceptance criterion identity"
-        with mock.patch("harness.service.subprocess.run", return_value=mock.Mock(returncode=0, stdout="Logged in using ChatGPT", stderr="")), mock.patch("harness.runner.execute", return_value=ProcessResult(0, events, "")) as run:
+        claude_login = json.dumps({"loggedIn": True, "authMethod": "claude.ai",
+                                   "apiProvider": "firstParty", "subscriptionType": "pro"})
+        calls = [ProcessResult(0, claude_quota_events, ""), ProcessResult(0, codex_events, "")]
+        with mock.patch("harness.service.subprocess.run",
+                        return_value=mock.Mock(returncode=0, stdout=claude_login, stderr="")), \
+             mock.patch("harness.service._codex_login_check", return_value=True), \
+             mock.patch("harness.runner.execute", side_effect=lambda *a, **k: calls.pop(0)) as run:
             value = default_verifier({"job": job_spec, "task": self.tasks.get_task(task["id"]),
                                       "agents_root": str(self.root), "vault_root": str(self.vault),
                                       "publication_snapshot": {"head": "a" * 40, "diff": "b" * 64}})
         self.assertTrue(value["acceptance"])
         self.assertEqual(value["criteria"][0]["criterion"], "A test passes")
+        self.assertEqual(value["provider"], "codex")
+        self.assertEqual(run.call_count, 2)
         command = run.call_args.args[0]
         self.assertIn("read-only", command)
         self.assertIn("plugins", command)
@@ -937,8 +952,10 @@ class ServiceTests(unittest.TestCase):
             json.dumps({"type": "turn.completed", "status": "completed"}),
         ])
         from harness.runner import ProcessResult
+        claude_login = json.dumps({"loggedIn": True, "authMethod": "claude.ai",
+                                   "apiProvider": "firstParty", "subscriptionType": "pro"})
         with mock.patch("harness.service.subprocess.run",
-                        return_value=mock.Mock(returncode=0, stdout="Logged in using ChatGPT", stderr="")), \
+                        return_value=mock.Mock(returncode=0, stdout=claude_login, stderr="")), \
              mock.patch("harness.runner.execute", return_value=ProcessResult(0, events, "")) as execute:
             first = self.service.verify_with_agent(job["id"], default_verifier)
         self.assertEqual(first["status"], "needs_verification")

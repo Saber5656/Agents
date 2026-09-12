@@ -25,6 +25,18 @@ import uuid
 from .status import build_status, emit_status
 
 ROOT = Path(__file__).resolve().parents[1]
+REVIEW_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'verdict': {'type': 'string', 'enum': ['approve', 'request_changes', 'incomplete']},
+        'findings': {'type': 'array', 'items': {'type': 'object', 'properties': {
+            'severity': {'type': 'string'}, 'file': {'type': 'string'},
+            'issue': {'type': 'string'}, 'evidence': {'type': 'array', 'items': {'type': 'string'}},
+        }, 'required': ['severity', 'file', 'issue', 'evidence']}},
+        'limitations': {'type': 'array', 'items': {'type': 'string'}},
+    },
+    'required': ['verdict', 'findings', 'limitations'],
+}
 AUTH_KEYS = ('HOME', 'PATH', 'GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN',
              'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
              'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CODEX_HOME',
@@ -440,6 +452,8 @@ def classify(provider, output, error, code):
             if terminal.get('subtype') in ('error_max_budget_usd', 'error_max_turns'):
                 return Result('budget_exhausted', text, actual_model=actual_model, model_verified=model_verified)
             if not terminal.get('is_error') and terminal.get('subtype') == 'success' and code == 0:
+                if isinstance(terminal.get('structured_output'), dict):
+                    text = json.dumps(terminal['structured_output'], ensure_ascii=False)
                 if not text.strip():
                     return Result('failed', 'Provider returned an empty terminal result',
                                   terminal.get('usage'), actual_model, model_verified)
@@ -471,7 +485,7 @@ def classify(provider, output, error, code):
     return Result(_error_status(error), error, actual_model=actual_model, model_verified=model_verified)
 
 
-def build_command(provider, mode, model, effort, *, add_dirs=()):
+def build_command(provider, mode, model, effort, *, add_dirs=(), output_schema=None):
     if provider == 'claude':
         tools = 'Read,Grep,Glob' if mode == 'review' else 'Read,Grep,Glob,Edit,Write,Bash'
         command = ['claude', '-p', '--model', model, '--effort', effort,
@@ -482,6 +496,8 @@ def build_command(provider, mode, model, effort, *, add_dirs=()):
                    '--no-session-persistence']
         if mode == 'review':
             command += ['--allowedTools', 'Read,Grep,Glob']
+        if output_schema is not None:
+            command += ['--json-schema', json.dumps(output_schema, ensure_ascii=False)]
         return command
     command = ['codex', 'exec', '--ignore-user-config', '--ephemeral', '--json',
             '--skip-git-repo-check', '-m', model, '-s', 'read-only' if mode == 'review' else 'workspace-write',
@@ -891,6 +907,9 @@ def run_job(job, env, executor=None, run_dir=None, resume=False):
 
 def _run_job(job, env, executor=None, run_dir=None, resume=False):
     executor = executor or execute
+    # A per-job wrapper can retain execute's streaming contract without
+    # replacing the module-global function used by concurrent service jobs.
+    records_streams = executor is execute or getattr(executor, 'records_streams', False) is True
     if not job.vault.is_dir() or not job.workspace.is_dir():
         raise ValueError('Existing workspace and AGENTS_VAULT_ROOT directories are required')
     if job.timeout <= 0:
@@ -1011,7 +1030,8 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         model = job.claude_model if provider == 'claude' else job.codex_model
         attempt_no = len(summary['attempts'])
         argv = build_command(provider, job.mode, model, job.effort,
-                             add_dirs=capture_dirs if provider == 'codex' else ())
+                             add_dirs=capture_dirs if provider == 'codex' else (),
+                             output_schema=REVIEW_SCHEMA if job.mode == 'review' else None)
         stem = f'{attempt_no}-{provider}'
         state_path = run_dir/f'{stem}-state.json'
         stdout_path = run_dir/f'{stem}-stdout.jsonl'
@@ -1034,7 +1054,7 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         _context_index(run_dir, env)
         try:
             attempt_started = time.monotonic()
-            if executor is execute:
+            if records_streams:
                 result = executor(argv, env, job.workspace, prompt, remaining,
                                   stdout_path=stdout_path, stderr_path=stderr_path,
                                   state_path=state_path, redaction_env=env)
@@ -1042,7 +1062,7 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
                 result = executor(argv, env, job.workspace, prompt, remaining)
         except OSError as exc:
             result = ProcessResult(126, stderr=f'Process startup failed: {exc}')
-        if executor is not execute or not stdout_path.exists():
+        if not records_streams or not stdout_path.exists():
             save(stdout_path, result.stdout, env)
             save(stderr_path, result.stderr, env)
         parsed = (Result('incomplete', 'Output collection is still running') if result.output_pending

@@ -201,6 +201,46 @@ def _load_verification_json(path):
     return value
 
 
+def _provider_attempt_stems(record):
+    """Attempt stems (e.g. ``0-claude``) written by ``default_verifier``, latest first."""
+    def _index(stem):
+        try:
+            return int(stem.split("-", 1)[0])
+        except ValueError:
+            return -1
+    stems = sorted({path.name[:-len(suffix)]
+                    for suffix in ('-outcome.json', '-process-state.json')
+                    for path in Path(record).glob('*' + suffix)}, key=_index, reverse=True)
+    return stems
+
+
+def _latest_provider_attempt_records(record):
+    """Read the most recent per-provider attempt's outcome/process-state.
+
+    ``default_verifier`` writes one ``<index>-<provider>-outcome.json`` and
+    ``<index>-<provider>-process-state.json`` pair per attempted provider
+    instead of a single shared ``outcome.json``/``process-state.json``; a
+    live/interrupted or malformed-cache decision must reflect the attempt
+    that actually ran last. A bare ``outcome.json``/``process-state.json``
+    pair is also accepted for records written before this per-provider format.
+    """
+    record = Path(record)
+    stems = _provider_attempt_stems(record)
+    if stems:
+        stem = stems[0]
+        return (_load_verification_json(record / f"{stem}-outcome.json"),
+                _load_verification_json(record / f"{stem}-process-state.json"))
+    return (_load_verification_json(record / "outcome.json"),
+            _load_verification_json(record / "process-state.json"))
+
+
+def _verification_process_state_paths(run_dir):
+    """All process-state records (per-provider or legacy) under one job's verifications."""
+    paths = list(run_dir.glob("verification-*/*-process-state.json"))
+    paths += list(run_dir.glob("verification-*/process-state.json"))
+    return paths
+
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS service_jobs (
@@ -390,6 +430,11 @@ class ServiceStore:
         for column, kind in (("verification_pid", "INTEGER"), ("verification_identity", "TEXT"), ("verification_count", "INTEGER NOT NULL DEFAULT 0")):
             if column not in job_columns:
                 self._conn.execute(f"ALTER TABLE service_jobs ADD COLUMN {column} {kind}")
+        if "provider" not in job_columns:
+            # A job enrolled before this column existed was always executed
+            # with Codex; preserve that persisted/resumed identity instead of
+            # silently moving it onto the new Claude-first default.
+            self._conn.execute("ALTER TABLE service_jobs ADD COLUMN provider TEXT NOT NULL DEFAULT 'codex'")
         attempt_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(service_attempts)")}
         if "identity" not in attempt_columns:
             self._conn.execute("ALTER TABLE service_attempts ADD COLUMN identity TEXT")
@@ -610,7 +655,7 @@ class ServiceStore:
                 if self._pid_state(row["verification_pid"], row["verification_identity"]) != "dead":
                     continue
                 surviving = False
-                for path in Path(row["run_dir"]).glob("verification-*/process-state.json"):
+                for path in _verification_process_state_paths(Path(row["run_dir"])):
                     try:
                         record = json.loads(path.read_text())
                         processes = [record] + record.get("collectors", [])
@@ -720,8 +765,10 @@ class ServiceStore:
             rows = self._conn.execute("SELECT * FROM service_attempts WHERE job_id=? ORDER BY attempt_number", (job_id,))
             return [dict(row) for row in rows]
 
-    def enroll(self, task_id, workspace, prompt, context, *, model="gpt-5.6-luna", effort="low",
-               timeout=300.0, retry_base=30.0, retry_max=3600.0, resource="default"):
+    def enroll(self, task_id, workspace, prompt, context, *, provider="claude", model="gpt-5.6-luna",
+               effort="low", timeout=300.0, retry_base=30.0, retry_max=3600.0, resource="default"):
+        if provider not in ("claude", "codex"):
+            raise ValueError("provider must be 'claude' or 'codex'")
         workspace = Path(workspace).resolve()
         if not workspace.is_dir(): raise ValueError(f"workspace does not exist: {workspace}")
         if not prompt or not context: raise ValueError("prompt and context are required")
@@ -735,9 +782,9 @@ class ServiceStore:
             run_dir = self.tasks.vault_root / "01-Projects" / "agent-runs" / f"service-{jid}"
             stamp = now()
             conn.execute("""INSERT INTO service_jobs
-              (id,task_id,workspace,run_dir,resource,prompt,context,model,effort,timeout,retry_base,retry_max,state,created_at,updated_at)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
-                         (jid, task_id, str(workspace), str(run_dir), resource, prompt, context, model, effort, float(timeout), float(retry_base), float(retry_max), stamp, stamp))
+              (id,task_id,workspace,run_dir,resource,prompt,context,model,effort,timeout,retry_base,retry_max,state,provider,created_at,updated_at)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)""",
+                         (jid, task_id, str(workspace), str(run_dir), resource, prompt, context, model, effort, float(timeout), float(retry_base), float(retry_max), provider, stamp, stamp))
         return self.get_job(jid)
 
     @staticmethod
@@ -851,8 +898,8 @@ class ServiceStore:
 
     def enroll_selected(self, requirement_id, task_id, *, ledger, workspace,
                         repository, repository_path, branch, immutable_base,
-                        vault_reference, criteria, work_unit=None, model="gpt-5.6-luna",
-                        effort="low", timeout=300.0, retry_base=30.0,
+                        vault_reference, criteria, work_unit=None, provider="claude",
+                        model="gpt-5.6-luna", effort="low", timeout=300.0, retry_base=30.0,
                         retry_max=3600.0, resource="default"):
         """Enroll one coordinator-selected requirement/task binding.
 
@@ -861,6 +908,8 @@ class ServiceStore:
         linked TaskStore task.  Its immutable selection metadata is persisted
         with the service job so a restart or retry reuses the same identity.
         """
+        if provider not in ("claude", "codex"):
+            raise ValueError("provider must be 'claude' or 'codex'")
         if not isinstance(ledger, RequirementLedger):
             raise TypeError("an existing RequirementLedger is required")
         if Path(ledger.store.db_path).resolve() != Path(self.tasks.db_path).resolve():
@@ -946,11 +995,11 @@ class ServiceStore:
                 run_dir = self.tasks.vault_root / "01-Projects" / "agent-runs" / f"service-{jid}"
                 stamp = now()
                 conn.execute("""INSERT INTO service_jobs
-                  (id,task_id,workspace,run_dir,resource,prompt,context,model,effort,timeout,retry_base,retry_max,state,created_at,updated_at)
-                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
+                  (id,task_id,workspace,run_dir,resource,prompt,context,model,effort,timeout,retry_base,retry_max,state,provider,created_at,updated_at)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)""",
                              (jid, task_id, str(workspace), str(run_dir), resource, prompt, context,
                               model, effort, float(timeout), float(retry_base), float(retry_max),
-                              stamp, stamp))
+                              provider, stamp, stamp))
                 conn.execute("""INSERT INTO service_selections
                     (job_id,requirement_id,work_unit_id,repository,canonical_repo,branch,
                      immutable_base,vault_reference,criteria_json)
@@ -1032,7 +1081,8 @@ class ServiceStore:
         latest = attempts[-1].get("result", {}) if attempts else {}
         if isinstance(latest, dict) and latest.get("action") == "inference_api_route":
             try:
-                self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"))
+                login_check = _claude_login_check if (job.get("provider") or "codex") == "claude" else None
+                self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"), login_check=login_check)
             except Exception as exc:
                 diagnostic = f"held inference route remains blocked: {type(exc).__name__}: {exc}"
                 self.record_update(job_id, diagnostic, ["local://cost-security/recheck-auth-failed"])
@@ -1295,7 +1345,8 @@ class ServiceStore:
         try:
             if executor is None:
                 try:
-                    self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"))
+                    login_check = _claude_login_check if (job.get("provider") or "codex") == "claude" else None
+                    self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"), login_check=login_check)
                 except Exception as exc:
                     held = isinstance(exc, AuthError) and exc.hold
                     diagnostic = str(exc)
@@ -1309,7 +1360,7 @@ class ServiceStore:
                 executor = default_executor
             try:
                 latest = self.get_job(job["id"])
-                result = executor({"job_id": job["id"], "task_id": job["task_id"], "workspace": job["workspace"], "run_dir": job.get("attempt_run_dir") or str(Path(job["run_dir"]) / f"attempt-{job['attempts_count']}"), "attempt_id": job["attempt_id"], "attempt": job["attempts_count"], "agents_root": str(self.tasks.agents_root), "vault_root": str(self.tasks.vault_root), "prompt": job["prompt"], "context": job["context"], "model": job["model"], "effort": job["effort"], "timeout": job["timeout"], "updates": latest["updates"], "requirement_id": latest.get("requirement_id"), "work_unit_id": latest.get("work_unit_id"), "criteria": latest.get("criteria"), "selection_context": {
+                result = executor({"job_id": job["id"], "task_id": job["task_id"], "workspace": job["workspace"], "run_dir": job.get("attempt_run_dir") or str(Path(job["run_dir"]) / f"attempt-{job['attempts_count']}"), "attempt_id": job["attempt_id"], "attempt": job["attempts_count"], "agents_root": str(self.tasks.agents_root), "vault_root": str(self.tasks.vault_root), "prompt": job["prompt"], "context": job["context"], "provider": job.get("provider") or "codex", "model": job["model"], "effort": job["effort"], "timeout": job["timeout"], "updates": latest["updates"], "requirement_id": latest.get("requirement_id"), "work_unit_id": latest.get("work_unit_id"), "criteria": latest.get("criteria"), "selection_context": {
                     key: latest[key] for key in ("requirement_id", "work_unit_id", "repository",
                         "canonical_repo", "workspace", "branch", "immutable_base", "vault_reference", "criteria")
                     if key in latest
@@ -1407,10 +1458,10 @@ class ServiceStore:
             value = _load_verification_json(Path(record) / name)
             if isinstance(value, dict):
                 return True, value
-        outcome = _load_verification_json(Path(record) / "outcome.json")
-        state = _load_verification_json(Path(record) / "process-state.json")
+        outcome, state = _latest_provider_attempt_records(record)
         if (isinstance(outcome, dict) and not outcome.get("output_pending")
                 and outcome.get("exit_code") in (0, None)
+                and outcome.get('provider_status') in (None, 'completed')
                 and isinstance(state, dict)
                 and state.get("status") not in ("starting", "running", "collecting")):
             return True, {"_verification_error": "verification provider returned a terminal malformed verdict"}
@@ -1419,9 +1470,10 @@ class ServiceStore:
     @staticmethod
     def _mark_terminal_verification_error(record, error):
         """Cache only a completed provider turn whose verdict was malformed."""
-        outcome = _load_verification_json(Path(record) / "outcome.json")
-        state = _load_verification_json(Path(record) / "process-state.json")
-        if not isinstance(outcome, dict) or outcome.get("output_pending") or outcome.get("exit_code") not in (0, None):
+        outcome, state = _latest_provider_attempt_records(record)
+        if (not isinstance(outcome, dict) or outcome.get("output_pending")
+                or outcome.get("exit_code") not in (0, None)
+                or outcome.get('provider_status') not in (None, 'completed')):
             return False
         if isinstance(state, dict) and state.get("status") in ("starting", "running", "collecting"):
             return False
@@ -1835,7 +1887,9 @@ class ServiceStore:
             raise AuthError(
                 f"Charged operation blocked before execution: source={charge_source}; action={operation}",
                 hold=True, action=operation, source=charge_source)
-        blocked = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CODEX_API_KEY")
+        blocked = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "CODEX_API_KEY",
+                   "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_BEARER_TOKEN_BEDROCK",
+                   "ANTHROPIC_VERTEX_PROJECT_ID", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_FOUNDRY_API_KEY")
         configured = next((key for key in blocked if env.get(key)), None)
         if configured:
             raise AuthError(
@@ -1843,15 +1897,49 @@ class ServiceStore:
                 f"(extra billing blocked: source={configured}; action=inference_api_route)",
                 hold=True, action="inference_api_route", source=configured)
         if login_check is None:
-            def login_check(actual):
-                try:
-                    result = subprocess.run(["codex", "login", "status"], env=actual, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
-                    text = (result.stdout + "\n" + result.stderr).lower()
-                    return result.returncode == 0 and "chatgpt" in text and any(marker in text for marker in ("logged in", "authenticated", "signed in"))
-                except (OSError, subprocess.TimeoutExpired): return False
+            login_check = _codex_login_check
         if not login_check(env):
-            raise AuthError("codex login status is not authenticated")
+            raise AuthError("subscription login is not authenticated")
         return True
+
+
+def _codex_login_check(env, timeout=20):
+    """Default Codex subscription check; also used as the quota-fallback auth gate."""
+    try:
+        result = subprocess.run(["codex", "login", "status"], env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        text = (result.stdout + "\n" + result.stderr).lower()
+        return result.returncode == 0 and "chatgpt" in text and any(
+            marker in text for marker in ("logged in", "authenticated", "signed in"))
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _claude_login_check(env):
+    """Claude subscription check for the ordinary worker/review primary provider.
+
+    A saved API key can also report ``loggedIn: true``; that is a
+    separately-billed route, not the Claude Pro/Max subscription this
+    routing is scoped to. Verified against actual local CLI output
+    (``claude auth status --json`` while logged into Claude Pro):
+    ``authMethod`` is ``"claude.ai"``, ``apiProvider`` is ``"firstParty"``,
+    and ``subscriptionType`` is a truthy plan name only for that route.
+    """
+    try:
+        result = subprocess.run(["claude", "auth", "status", "--json"], env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        data = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        return False
+    return (isinstance(data, dict) and data.get("loggedIn") is True
+            and data.get("authMethod") == "claude.ai"
+            and data.get("apiProvider") == "firstParty"
+            and bool(data.get("subscriptionType")))
 
 
 def _worker_publication_proposal(result):
@@ -1884,6 +1972,26 @@ def _worker_publication_proposal(result):
     return proposal
 
 
+def _worker_executor(job):
+    """Per-job preflight preserves live records and never mutates shared state."""
+    from . import runner
+    original = runner.execute
+    if job.provider != "claude" or not job.fallback:
+        return original
+
+    def guarded(argv, env, cwd, prompt, timeout, **records):
+        if argv and argv[0] == "codex":
+            deadline = time.monotonic() + timeout
+            ServiceStore.auth_guard(env, login_check=lambda actual: _codex_login_check(actual, min(20, timeout)))
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                return runner.ProcessResult(124, timed_out=True)
+        return original(argv, env, cwd, prompt, timeout, **records)
+
+    guarded.records_streams = True
+    return guarded
+
+
 def default_executor(spec):
     from .runner import Job, run_job, resume_job
     agents_root = Path(spec["agents_root"]).resolve()
@@ -1910,9 +2018,25 @@ def default_executor(spec):
         "cannot authorize publication. Do not claim publication or completion; the host independently "
         "checks the diff, review, remote, and required CI checks."
     )
-    job_args = dict(workspace=Path(spec["workspace"]), vault=vault, prompt=prompt,
-                    mode="run", provider="codex", codex_model=spec["model"], effort=spec["effort"],
-                    timeout=spec["timeout"], fallback=False, run_dir=Path(spec["run_dir"]))
+    # A caller without the newer "provider" field keeps the original,
+    # single-provider Codex behavior; run_once always supplies it explicitly
+    # from the persisted job row (defaulting new enrollments to "claude").
+    provider = spec.get("provider", "codex")
+    if provider == "claude":
+        # The persisted "model" column is the configured Codex model; when
+        # Claude is primary it becomes the quota-only fallback model, not a
+        # Claude model name.
+        job_args = dict(workspace=Path(spec["workspace"]), vault=vault, prompt=prompt,
+                        mode="run", provider="claude", claude_model="sonnet",
+                        codex_model=spec["model"], effort=spec["effort"],
+                        timeout=spec["timeout"], fallback=True, run_dir=Path(spec["run_dir"]))
+    else:
+        # An explicitly selected Codex model runs alone; quota fallback is
+        # only ever automatic away from Claude, never away from an explicit
+        # Codex selection.
+        job_args = dict(workspace=Path(spec["workspace"]), vault=vault, prompt=prompt,
+                        mode="run", provider="codex", codex_model=spec["model"], effort=spec["effort"],
+                        timeout=spec["timeout"], fallback=False, run_dir=Path(spec["run_dir"]))
     # Newer runners persist task identity in their Job record.  Keep this
     # compatible with the older local runner while passing it whenever the
     # runner exposes the field.
@@ -1922,10 +2046,11 @@ def default_executor(spec):
     if "task_id" in spec and not hasattr(job, "task_id"):
         job.task_id = spec["task_id"]
     run_dir = Path(spec["run_dir"])
+    executor = _worker_executor(job)
     if run_dir.exists():
-        result = resume_job(job, run_dir, env)
+        result = resume_job(job, run_dir, env, executor=executor)
     else:
-        result = run_job(job, env, run_dir=run_dir)
+        result = run_job(job, env, run_dir=run_dir, executor=executor)
     if isinstance(result, dict):
         proposal = _worker_publication_proposal(result)
         if proposal is not None:
@@ -2063,10 +2188,17 @@ def _bind_acceptance_ids(task, verdict):
 
 
 def default_verifier(spec):
-    """Use an actual read-only subscription Codex turn for acceptance review."""
+    """Use an actual read-only subscription turn for acceptance review.
+
+    Claude sonnet/low is the primary reviewer, conserving the separate Codex
+    subscription; an explicit provider usage-limit status falls back once to
+    Codex gpt-5.6-luna/low, mirroring the worker's quota-only fallback. Any
+    other failure, including an authentication failure, stops immediately
+    and never triggers the fallback.
+    """
     task = spec["task"]
     env = load_agents_env(Path(spec["agents_root"]) / ".env")
-    ServiceStore.auth_guard(env)
+    ServiceStore.auth_guard(env, login_check=_claude_login_check)
     phase = "pre_publication" if spec.get("publication_snapshot") is not None else "final_acceptance"
     phase_instructions = (
         "Review only source readiness for host publication now. An uncommitted diff, pending CI, "
@@ -2113,7 +2245,7 @@ def default_verifier(spec):
             "when findings exist, return exactly one explicit adopt/reject/separate decision for every finding."
         ),
     }, ensure_ascii=False)
-    from .runner import execute, save
+    from .runner import build_command, execute, classify, save
     import uuid
     record = Path(spec.get("verification_record_dir") or
                   (Path(spec["job"]["run_dir"]) / ("verification-" + uuid.uuid4().hex)))
@@ -2121,41 +2253,70 @@ def default_verifier(spec):
     if spec.get("verification_input_digest"):
         save(record / "input-digest.json", {"digest": spec["verification_input_digest"]}, env)
     save(record / "prompt.json", prompt, env)
-    argv = ["codex", "exec", "--ignore-user-config", "--ephemeral", "--json",
-            "--skip-git-repo-check", "-m", "gpt-5.6-luna", "-s", "read-only",
-            "-c", 'approval_policy="never"', "-c", 'model_reasoning_effort="low"',
-            "-c", 'web_search="disabled"', "-c", "skills.max_context_tokens=1"]
-    for feature in ("apps", "plugins", "browser_use", "computer_use", "image_generation", "multi_agent"):
-        argv.extend(["--disable", feature])
-    argv.append("-")
-    save(record / "command.json", {"argv": argv, "model": "gpt-5.6-luna", "effort": "low"}, env)
-    result = execute(argv, env, spec["job"]["workspace"], prompt,
-                     min(float(spec["job"].get("timeout", 300)), 300),
-                     stdout_path=record / "stdout.jsonl", stderr_path=record / "stderr.txt",
-                     state_path=record / "process-state.json", redaction_env=env)
-    save(record / "outcome.json", {"exit_code": result.code, "output_pending": result.output_pending}, env)
-    if result.code or result.output_pending:
-        raise AuthError("verification agent did not complete; preserved records: " + str(record))
-    messages = []
-    completed = None
-    for line in result.stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except (TypeError, ValueError):
+    providers = (("claude", "sonnet"), ("codex", "gpt-5.6-luna"))
+    total_budget = min(float(spec["job"].get("timeout", 300)), 300)
+    deadline = time.monotonic() + total_budget
+    parsed = None
+    used_provider = used_model = None
+    for index, (provider, model) in enumerate(providers):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AuthError(f"verification agent did not complete successfully: timeout; "
+                            f"preserved records: {record}")
+        if provider == "codex":
+            # The fallback route is a separate subscription; verify it before
+            # spending any of its inference, mirroring the worker's guard.
+            ServiceStore.auth_guard(env, login_check=lambda actual: _codex_login_check(actual, min(20, remaining)))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AuthError(f'verification timeout during fallback authentication; preserved records: {record}')
+        argv = build_command(provider, "review", model, "low", output_schema={
+            'type': 'object', 'properties': {
+                'acceptance': {'type': 'boolean'},
+                'publication_readiness': {'type': 'boolean'},
+                'publication': {'type': 'object', 'additionalProperties': True},
+                'publication_review': {'type': 'object', 'additionalProperties': True},
+                'evidence': {'type': 'string'},
+                'findings': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': True}},
+                'criteria': {'type': 'array', 'items': {'type': 'object', 'properties': {
+                    'criterion_id': {'type': 'string'}, 'criterion': {'type': 'string'},
+                    'verified': {'type': 'boolean'}, 'evidence': {'type': 'string'},
+                }, 'required': ['criterion_id', 'verified', 'evidence']}},
+                'evidence_links': {'type': 'array', 'items': {'type': 'string'}},
+            }, 'required': ['acceptance', 'findings', 'criteria', 'evidence_links'],
+        })
+        if provider == "codex":
+            # Extra hardening beyond the shared build: an acceptance verifier
+            # never needs live network access.
+            insert_at = argv.index("-")
+            argv[insert_at:insert_at] = ["-c", 'web_search="disabled"']
+        stem = f"{index}-{provider}"
+        save(record / f"{stem}-command.json", {"argv": argv, "model": model, "effort": "low"}, env)
+        result = execute(argv, env, spec["job"]["workspace"], prompt, remaining,
+                         stdout_path=record / f"{stem}-stdout.jsonl",
+                         stderr_path=record / f"{stem}-stderr.txt",
+                         state_path=record / f"{stem}-process-state.json", redaction_env=env)
+        parsed = classify(provider, result.stdout, result.stderr, result.code)
+        if result.timed_out:
+            parsed.status = 'timeout'
+        save(record / f"{stem}-outcome.json",
+             {"exit_code": result.code, "output_pending": result.output_pending,
+              'provider_status': parsed.status, 'provider': provider,
+              'requested_model': model, 'actual_model': parsed.actual_model,
+              'usage': parsed.usage}, env)
+        if result.output_pending:
+            raise AuthError("verification agent did not complete; preserved records: " + str(record))
+        used_provider, used_model = provider, model
+        if (parsed.status == "usage_limit" and provider == "claude"
+                and index + 1 < len(providers)):
             continue
-        if not isinstance(event, dict):
-            continue
-        item = event.get("item")
-        if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
-            if isinstance(item.get("text"), str): messages.append(item["text"])
-        if event.get("type") == "turn.completed": completed = event
-    # Current subscription CLI emits a completed event with no status field;
-    # returncode=0 plus that terminal event is its success signal. Explicit
-    # failure statuses remain rejected.
-    if completed is None or (completed.get("status") not in (None, "completed", "success", "succeeded")):
-        raise AuthError("verification agent turn did not complete successfully")
-    save(record / "usage.json", completed.get("usage"), env)
-    text = messages[-1].strip() if messages else ""
+        break
+    if parsed is None or parsed.status != "completed":
+        status = parsed.status if parsed is not None else "incomplete"
+        raise AuthError(f"verification agent did not complete successfully: {status}; "
+                        f"preserved records: {record}")
+    save(record / "usage.json", parsed.usage, env)
+    text = (parsed.text or "").strip()
     fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", text, flags=re.S)
     candidate = fenced.group(1) if fenced else text
     try:
@@ -2168,6 +2329,11 @@ def default_verifier(spec):
         raise ValueError("verification agent findings must be a list")
     save(record / "verdict.json", value, env)
     value = _bind_acceptance_ids(task, value)
+    value["provider"] = used_provider
+    value["model"] = used_model
+    value['requested_model'] = used_model
+    value['actual_model'] = parsed.actual_model
+    value["usage"] = parsed.usage
     save(record / "bound-verdict.json", value, env)
     value.setdefault("evidence_links", []).append(str(record))
     return value
@@ -2270,8 +2436,16 @@ class Launchd:
         vault_root = self.vault_root or (Path(os.environ["AGENTS_VAULT_ROOT"]).resolve() if os.environ.get("AGENTS_VAULT_ROOT") else None)
         if vault_root:
             environment["AGENTS_VAULT_ROOT"] = str(vault_root)
-        codex = shutil.which("codex")
-        environment["PATH"] = (str(Path(codex).parent) + ":/usr/bin:/bin") if codex else "/usr/bin:/bin"
+        # The worker/verifier default to Claude with a Codex quota fallback,
+        # so launchd's minimal PATH must be able to discover both binaries.
+        directories = []
+        for name in ("claude", "codex"):
+            found = shutil.which(name)
+            if found:
+                directory = str(Path(found).parent)
+                if directory not in directories:
+                    directories.append(directory)
+        environment["PATH"] = ":".join(directories + ["/usr/bin", "/bin"])
         payload = {"Label": label, "ProgramArguments": [sys.executable, "-m", "harness.service", "--db", str(self.db_path), "run"], "WorkingDirectory": str(self.agents_root), "EnvironmentVariables": environment, "RunAtLoad": True, "KeepAlive": True, "StandardOutPath": str(self.agents_root / ".local" / "service.log"), "StandardErrorPath": str(self.agents_root / ".local" / "service.error.log")}
         return plistlib.dumps(payload, fmt=plistlib.FMT_XML).decode()
 
@@ -2331,7 +2505,7 @@ class Launchd:
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Durable App-independent Agents service")
     parser.add_argument("--db", default=None); sub = parser.add_subparsers(dest="command", required=True)
-    en = sub.add_parser("enroll"); en.add_argument("--task", required=True); en.add_argument("--workspace", required=True); prompt_group = en.add_mutually_exclusive_group(required=True); prompt_group.add_argument("--prompt"); prompt_group.add_argument("--prompt-file"); en.add_argument("--context", required=True); en.add_argument("--model", default="gpt-5.6-luna"); en.add_argument("--effort", default="low"); en.add_argument("--timeout", type=float, default=300); en.add_argument("--json", action="store_true")
+    en = sub.add_parser("enroll"); en.add_argument("--task", required=True); en.add_argument("--workspace", required=True); prompt_group = en.add_mutually_exclusive_group(required=True); prompt_group.add_argument("--prompt"); prompt_group.add_argument("--prompt-file"); en.add_argument("--context", required=True); en.add_argument("--provider", choices=("claude", "codex"), default="claude"); en.add_argument("--model", default="gpt-5.6-luna"); en.add_argument("--effort", default="low"); en.add_argument("--timeout", type=float, default=300); en.add_argument("--json", action="store_true")
     selected = sub.add_parser("enroll-selected", help="enroll one explicitly selected RequirementLedger task")
     selected.add_argument("--ledger", required=True, help="existing RequirementLedger JSON record")
     selected.add_argument("--requirement", required=True); selected.add_argument("--task", required=True)
@@ -2339,7 +2513,8 @@ def main(argv=None):
     selected.add_argument("--repository-path", required=True); selected.add_argument("--branch", required=True)
     selected.add_argument("--immutable-base", required=True); selected.add_argument("--vault-reference", required=True)
     selected.add_argument("--criteria", nargs="+", action="append", required=True)
-    selected.add_argument("--work-unit"); selected.add_argument("--model", default="gpt-5.6-luna")
+    selected.add_argument("--work-unit"); selected.add_argument("--provider", choices=("claude", "codex"), default="claude")
+    selected.add_argument("--model", default="gpt-5.6-luna")
     selected.add_argument("--effort", default="low"); selected.add_argument("--timeout", type=float, default=300)
     selected.add_argument("--json", action="store_true")
     ls = sub.add_parser("list"); ls.add_argument("--db", default=argparse.SUPPRESS); ls.add_argument("--state"); ls.add_argument("--json", action="store_true")
@@ -2358,7 +2533,7 @@ def main(argv=None):
     try:
         if args.command == "enroll":
             prompt = Path(args.prompt_file).read_text() if args.prompt_file else args.prompt
-            value = store.enroll(args.task, args.workspace, prompt, args.context, model=args.model, effort=args.effort, timeout=args.timeout)
+            value = store.enroll(args.task, args.workspace, prompt, args.context, provider=args.provider, model=args.model, effort=args.effort, timeout=args.timeout)
         elif args.command == "enroll-selected":
             ledger = RequirementLedger(store.tasks, args.ledger)
             criteria = [item for group in args.criteria for item in group]
@@ -2367,7 +2542,7 @@ def main(argv=None):
                 repository=args.repository, repository_path=args.repository_path,
                 branch=args.branch, immutable_base=args.immutable_base,
                 vault_reference=args.vault_reference, criteria=criteria,
-                work_unit=args.work_unit, model=args.model, effort=args.effort,
+                work_unit=args.work_unit, provider=args.provider, model=args.model, effort=args.effort,
                 timeout=args.timeout,
             )
         elif args.command == "list": value = store.list_jobs(args.state)
