@@ -29,6 +29,16 @@ def test_missing_executable_is_structured_without_fallback(tmp_path):
     assert payload["command"][0] == "hermes"
 
 
+def test_native_x_search_missing_runtime_is_structured_and_recorded(tmp_path):
+    result = _run_cli(tmp_path, 'x-search', '--query', 'query',
+                      '--receipt-dir', str(tmp_path / 'receipts'))
+    payload = json.loads(result.stdout)
+    assert result.returncode == 127
+    assert payload['error'] == 'runtime_unavailable'
+    assert payload['action'] == 'rejected_before_process'
+    assert Path(payload['receipt_path']).is_file()
+
+
 def _run_cli(tmp_path, *args, extra_env=None):
     config = tmp_path / "hermes-config.yaml"
     if not config.exists():

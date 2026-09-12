@@ -14,7 +14,7 @@ category: Utility
 created: 2026-05-20
 status: active
 purpose: Codex / Claude agentsからHermes Agentを汎用I/O・tool bridgeとして呼び出す
-argument-hint: "[oneshot|send|mcp|response-design ...]"
+argument-hint: "[x-search|oneshot|send|mcp|response-design ...]"
 ---
 
 # Hermes Agent Bridge
@@ -53,7 +53,8 @@ Hermesはtransport/tool bridgeであり、秘書や組織タスクのownerでは
 
 | Pattern | Use when | Codex/Claudeに応答が戻るか |
 |---|---|---|
-| `oneshot` | Hermes tool結果をその場で欲しい。例: X検索、Web調査、軽い外部tool実行 | Yes。`hermes -z` / `hermes chat -q` のstdoutで戻る |
+| `x-search` | Xの投稿・会話を検索し、出典付きで戻す。通常のX検索の第一候補 | Yes。Hermesのnative X toolをGrok OAuthに固定して呼ぶ |
+| `oneshot` | X検索以外のHermes tool結果をその場で欲しい。例: Web調査、軽い外部tool実行 | Yes。`hermes -z` / `hermes chat -q` のstdoutで戻る |
 | `send` | Discord/Slack等へ通知だけ送る | No。配送結果だけ戻る。人間の返信は別途取得が必要 |
 | `mcp` | gateway会話履歴、live events、messages_send/readをagent側から扱いたい | Yes, if MCP client/runtime is configured and polling/waiting is running |
 | `async-callback` | Hermes/Discord側の後続返信でCodexを再開したい | Skill alone is not enough. receiver, polling automation, or MCP event loop is required |
@@ -77,7 +78,7 @@ Hermesへ渡す前に、呼び出し元はこの形に整理する。
 | request_id |  |
 | caller | Codex / Claude / secretary-ai / other |
 | intent |  |
-| hermes_pattern | oneshot / send / mcp / async-callback |
+| hermes_pattern | x-search / oneshot / send / mcp / async-callback |
 | target | cli / discord:#channel / mcp-session / other |
 | required_toolsets |  |
 | prompt_or_message |  |
@@ -105,6 +106,25 @@ and existing user authorization before invocation; ordinary subscribed token
 usage is permitted. Record all available context and redacted receipts in
 Agents Vault. A `safe_to_run` field alone is not an authorization or safety check.
 
+## Pattern: X Search Through Grok OAuth
+
+通常のX検索にはこの入口を使う。CodexやClaudeの追加推論でHermesを操作せず、
+既存Hermesの `x_search` toolを直接呼び、Grokの契約枠へ処理を分散する。
+
+```bash
+python3 "$SKILLS_ROOT/hermes-agent-bridge/scripts/hermes_bridge.py" \
+  x-search \
+  --query "XでOpenAI Codexの公式投稿を検索し、日付と投稿URL付きで3件返して" \
+  --timeout 120 \
+  --receipt-dir "$AGENTS_VAULT_ROOT/01-Projects/agent-runs/hermes-x-search"
+```
+
+- `hermes` 実行ファイルから既存の仮想環境とnative toolを解決する。別のHermes環境を作らない。
+- workerは保存済みGrok OAuthを解決し、公式endpointと認証元を確認する。native toolのcredential resolverをそのプロセス内だけで固定し、Hermesの `.env` に `XAI_API_KEY` が存在してもAPIキーへ代替しない。OAuth自体の通常の更新は既存resolverが行う。
+- Hermesの主推論モデル設定・gateway設定を変更しない。`hermes -z` の自動承認モードは使わず、検索toolだけを実行する。
+- JSONの `tool_result` に結果、出典、実モデル、`credential_source: xai-oauth` が入る。providerが使用量を返さない場合は推定しない。
+- 利用上限は終了コード75と `usage_limit`、認証失敗は `auth_error` として返す。上限時の `codex_handoff` を受け取った呼び出し元は、同じ目的と取得済みの資料を保持してCodexで残作業を継続する。X専用検索の上限そのものはCodexへ切り替えても解消しないため、公開Webで代替できる範囲と取得制限を明示し、架空のX検索結果を作らない。このCLI単体は追加のCodex推論を起動しない。
+
 ## Pattern: Oneshot Hermes Tool Call
 
 Use this when the caller needs Hermes to execute a tool and return the result immediately.
@@ -114,15 +134,16 @@ Preferred command:
 ```bash
 python3 "$SKILLS_ROOT/hermes-agent-bridge/scripts/hermes_bridge.py" \
   oneshot \
-  --prompt "XでOpenAI Codexの最新動向を検索して要点を3つにして" \
-  --toolsets "x-search" \
+  --prompt "指定した公開資料を調べて要点を3つにして" \
+  --provider openai-codex --model gpt-5.6-luna \
+  --toolsets "search" \
   --timeout 30
 ```
 
 Underlying command reference (not a substitute for the wrapper route check, timeout or receipt):
 
 ```bash
-hermes -z "XでOpenAI Codexの最新動向を検索して要点を3つにして" --toolsets "x-search"
+hermes -z "指定した公開資料を調べて要点を3つにして" --provider openai-codex --model gpt-5.6-luna --toolsets "search"
 ```
 
 Rules:
@@ -134,6 +155,7 @@ Rules:
 - Before process creation, the wrapper resolves and verifies the Hermes config primary/fallback route, then binds the actual command to the `openai-codex` OAuth subscription provider. API-key route variables, fallback route variables, other providers, and unavailable or malformed config are rejected; there is no paid-route fallback. An omitted route is allowed only when the resolved config primary is `openai-codex`.
 - Receipt prompt/command and stdout/stderr are redacted before persistence. Request IDs are filesystem-safe, receipt files are private and atomic, and repeated IDs create a new attempt while retaining earlier records.
 - Do not use `--yolo`.
+- Installed `hermes -z` internally bypasses interactive approval. Use only an explicitly authorized, restricted toolset; for X search always use `x-search` above. Its native toolset identifier is `x_search`, not `x-search`.
 - If the command needs network or privileged local access and the current runtime blocks it, ask for approval through the current host environment.
 
 ## Pattern: Send Message To Discord Or Another Gateway
@@ -219,7 +241,7 @@ When used by `secretary-ai`:
 
 | User asks | Use |
 |---|---|
-| "HermesでX検索して結果を戻して" | `oneshot` |
+| "HermesでX検索して結果を戻して" | `x-search` |
 | "Discordへアナウンスして" | `send` |
 | "Discordで質問して返答を待って続きやって" | `async-callback` design; requires runtime |
 | "Hermesの会話履歴を読んで" | `mcp` if configured; otherwise inspect Hermes sessions with explicit approval/context |

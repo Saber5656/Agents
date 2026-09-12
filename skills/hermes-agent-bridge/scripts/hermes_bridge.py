@@ -466,6 +466,8 @@ def run_command(
     model: str | None = None,
     receipt_dir: str | Path | None = None,
     request_id: str | None = None,
+    native_x_search: bool = False,
+    runtime_error: str | None = None,
 ) -> int:
     if timeout is None or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be positive and finite")
@@ -501,8 +503,21 @@ def run_command(
         }
         print(json.dumps(_redact_value(payload, environment), ensure_ascii=False, indent=2))
         return 126
+    if runtime_error:
+        payload = {**base, 'status': 'blocked', 'error': 'runtime_unavailable',
+                   'reason': runtime_error, 'action': 'rejected_before_process',
+                   'returncode': 127, 'reconciliation_required': False, 'resumable': False}
+        artifacts = _save_receipt(context, payload)
+        if artifacts:
+            payload['artifacts'] = artifacts
+            payload['receipt_path'] = str(context['result'])
+        print(json.dumps(_redact_value(payload, environment), ensure_ascii=False, indent=2))
+        return 127
     try:
-        route = validate_subscription_route(provider, model, env=environment)
+        route = ({'provider': 'xai-oauth', 'model': None,
+                  'source': 'native X tool; worker verifies OAuth and pins credentials',
+                  'subscription_route': True}
+                 if native_x_search else validate_subscription_route(provider, model, env=environment))
     except RoutePolicyError as exc:
         payload = {
             **base,
@@ -573,6 +588,15 @@ def run_command(
     safe_stdout = _redact_text(stdout, environment)
     safe_stderr = _redact_text(stderr, environment)
     kind = _outcome_kind(returncode, safe_stdout, safe_stderr, timed_out)
+    tool_result = None
+    if native_x_search and not timed_out:
+        try:
+            tool_result = json.loads(safe_stdout)
+            if tool_result.get('success') is not True:
+                kind = tool_result.get('error_kind', 'process_failure')
+                returncode = returncode or 2
+        except (ValueError, AttributeError):
+            kind, returncode = 'process_failure', returncode or 2
     payload = {
         **base,
         "status": "timeout" if timed_out else ("completed" if returncode == 0 else "failed"),
@@ -589,6 +613,8 @@ def run_command(
         "reconciliation_required": timed_out,
         "resumable": not timed_out and returncode == 0,
     }
+    if native_x_search:
+        payload['tool_result'] = tool_result
     if timed_out:
         payload["error"] = "timeout"
         payload["timeout_seconds"] = timeout
@@ -626,6 +652,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    x_search = sub.add_parser('x-search', help='Search X via the installed Hermes native tool and Grok OAuth only.')
+    x_search.add_argument('--query', required=True)
+    _add_execution_options(x_search)
+
     oneshot = sub.add_parser("oneshot", help="Run Hermes and return final stdout.")
     oneshot.add_argument("--prompt", required=True)
     oneshot.add_argument("--model")
@@ -657,6 +687,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     ns = parser.parse_args()
+
+    if ns.command == 'x-search':
+        executable = shutil.which('hermes')
+        binary = Path(executable).resolve() if executable else None
+        interpreter = binary.with_name('python') if binary else None
+        root = binary.parents[2] if binary and len(binary.parents) > 2 else None
+        if not interpreter or not interpreter.is_file() or not root or not (root / 'tools' / 'x_search_tool.py').is_file():
+            return run_command(
+                ['hermes', 'x-search', '--query', ns.query], timeout=ns.timeout,
+                native_x_search=True, receipt_dir=ns.receipt_dir, request_id=ns.request_id,
+                runtime_error='Hermes virtual environment and native X search tool could not be located',
+            )
+        return run_command(
+            [str(interpreter), str(Path(__file__).with_name('hermes_x_search.py')),
+             '--hermes-root', str(root), '--query', ns.query],
+            timeout=ns.timeout, native_x_search=True,
+            receipt_dir=ns.receipt_dir, request_id=ns.request_id,
+        )
 
     if ns.command == "resume":
         print(json.dumps(_redact_value(read_receipt(ns.receipt), dict(os.environ)), ensure_ascii=False, indent=2))
