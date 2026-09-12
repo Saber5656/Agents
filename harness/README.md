@@ -54,6 +54,19 @@ python3 -m harness gh -- auth status --active
 
 ## 作業とレビュー
 
+通常の独立した実装・調査・文書化とレビューは原則 Claude に依頼する。
+Astra は全体の判断・成果の統合・指摘の採否を担当する。`run` / `review` は
+Claude Sonnet/low が既定で、実際の利用上限時だけ同じ成果を Codex Luna/low
+へ渡す。Codex を直接選ぶ場合は明示指定や必要な機能など理由を残す。
+入口が用意されているだけでは分散されないため、主担当も通常の作業計画に
+Claudeへの依頼を含め、実装とは別の実行でレビューする。
+
+X検索には `$SKILLS_ROOT/hermes-agent-bridge/scripts/hermes_bridge.py x-search`
+を使う。これはHermesのnative X toolを保存済みGrok OAuthで直接呼ぶ入口で、
+Codexの追加推論を使わない。結果・投稿URL・認証元・失敗区分を記録する。
+X検索が上限なら取得制限を保ったまま主担当がCodexで残作業を継続する。
+検索CLI単体がCodexを起動したり、CodexにX専用アクセスを付与したりはしない。
+
 依頼と対象ファイル、期待結果を `--prompt-file` に渡す。コマンドは `AGENTS_ROOT` で実行する。
 
 ```sh

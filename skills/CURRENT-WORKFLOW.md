@@ -11,6 +11,15 @@ Never guess a replacement Vault. Keep full available requirements, corrections,
 context, decisions and raw evidence privately in Vault, with links from durable
 local tasks. Redact secrets and state missing/truncated history explicitly.
 
+Delegate ordinary independent implementation, research and writing to Claude,
+and request reviews from a separate Claude execution by default (Sonnet/low).
+Astra coordinates scope, adoption of findings and final quality. Use Codex
+Luna/low automatically on actual provider quota exhaustion; authentication,
+permission, network and timeout failures are distinct. Direct Codex selection
+needs a task-specific reason. Tiny inseparable work may stay with the lead.
+Use the Hermes bridge for X search through the existing Grok OAuth route;
+record the actual provider and never claim a substitute has X-only access.
+
 For ordinary development, the endpoint is validation, pre-commit review,
 accepted finding remediation, minimal commits, branch push/PR, verified merge,
 main synchronization and matching chat organization. A task-specific explicit

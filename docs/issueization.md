@@ -1,6 +1,6 @@
 # Issueization batch
 
-Workers record discoveries in the local `TaskStore`; they do not create GitHub Issues. The separately invoked batch in `harness.issueize` claims eligible local tasks, asks the authenticated Codex subscription surface for an English draft, creates or reuses the Issue, reads it back, and only then links the exact Issue identity to the task.
+Workers record discoveries in the local `TaskStore`; they do not create GitHub Issues. The separately invoked batch in `harness.issueize` claims eligible local tasks, asks an authenticated subscription draft agent for an English draft, creates or reuses the Issue, reads it back, and only then links the exact Issue identity to the task.
 
 Run one repository at a time from a shell that has the existing Agents roots configured:
 
@@ -11,7 +11,11 @@ python3 -m harness.issueize \
   --limit 20
 ```
 
-The draft agent is fixed to `gpt-5.6-luna` with `low` effort, read-only sandboxing, no extra agents, and a verified `codex login status` showing a ChatGPT subscription. API keys (including `CODEX_API_KEY`) and custom API/base URL routes are rejected before the provider process starts; the batch never promotes to a higher model or routes inference to a separately billed API. A live draft is accepted only after Codex emits a successful `turn.completed` event.
+By default (`--draft-provider claude`), drafting uses the authenticated Claude subscription surface at `sonnet`/`low` effort through a tool-less `claude` CLI invocation (no `Read`/`Grep`/`Glob`/etc.), reusing `harness.runner.build_command`/`classify`/`execute`. Codex is only used as an automatic fallback, and only when Claude's own terminal result reports a subscription usage limit (`QuotaExceededError`); authentication, network/timeout, and budget failures are raised as their own distinct errors and never trigger the fallback. The fallback always uses the authenticated Codex subscription surface at `gpt-5.6-luna`/`low`, identical to explicit Codex selection.
+
+Passing `--draft-provider codex` selects `CodexDraftAgent` directly, with no Claude attempt and no fallback: `gpt-5.6-luna` with `low` effort, read-only sandboxing, no extra agents, and a verified `codex login status` showing a ChatGPT subscription. In both modes API keys (including `ANTHROPIC_API_KEY`/`CODEX_API_KEY`) and custom API/base URL routes are rejected before any provider process starts; the batch never promotes to a higher model or routes inference to a separately billed API. A live Codex draft is accepted only after Codex emits a successful `turn.completed` event; a live Claude draft is accepted only after Claude's terminal `result` event reports success.
+
+Each draft attempt writes a redacted private Vault artifact per provider (prompt, stdout, stderr, reported usage), so a Claude attempt followed by a Codex fallback keeps both raw records.
 
 Each task has a stable public marker, `<!-- agents-local-task:TASK_ID -->`. The batch uses a paginated, non-search Issue listing to reconcile that marker before every create or retry. A returned Issue is read back and must match the repository, number, exact GitHub URL, and marker before `TaskStore.link_issue(..., verified=True, readback=...)` can mark the task `issued`.
 
