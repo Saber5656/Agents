@@ -43,6 +43,8 @@ python3 "$AGENTS_ROOT/scripts/daily_it_news_batch.py" --resume-run RUN_ID
 
 助言は入力ニュースのbasenameとSHA-256に結び付けて保存する。再実行時は同じ入力の完成済み助言と配送済みreceiptを再利用する。送信前intentがあり結果が不明な場合は再送せず、配送結果の照合が必要と記録する。
 
+助言へ渡すニュースは、収集・検証結果のSHA-256と一致することを確認し、同期フォルダ外の `advisory-input/` に読み取り用コピーを保存する。同期中の一時的な空読み取りやEDEADLKは最大3回、0.5秒間隔で読み直し、一致しなければ助言を開始しない。助言の完了後にもコピーの一致を確認し、モデルへ同期フォルダの元ファイルを直接渡さない。棚卸し開始時刻もrunnerから渡す。
+
 追加のprivate runtime設定: `USER_VAULT_ROOT`, `USER_VAULT_REMOTE`, `AGENTS_VAULT_REMOTE`, `NEWS_PUBLICATION_BRANCH`, `PUBLISHER_GIT_NAME`, `PUBLISHER_GIT_EMAIL`, `GITLEAKS_BIN`, `HERMES_BRIDGE_PYTHON`, `DISCORD_NEWS_TARGET`。通知は既存Hermes gatewayの認証を使う。sendはLLMを呼ばず、bridgeのroute検証は送信プロセス限定でopenai-codexに固定する。gatewayやOAuth設定は変更しない。定期起動のPATHには既存Hermesの配置ディレクトリを含める。
 
 バッチの状態は `last-batch-status.json` と `batch-logs/YYYY-MM-DD/RUN_ID/` に保存する。日次処理の実行上限はニュース生成30分/試行、助言20分、Discord bridge90秒。
