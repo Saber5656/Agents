@@ -11,13 +11,21 @@ sys.path.insert(0, str(Path(__file__).parents[1] / 'scripts'))
 import daily_it_news_batch as batch
 
 class BatchTests(unittest.TestCase):
+    def setUp(self):
+        self.preflight = patch.object(batch, 'preflight', create=True)
+        self.preflight_mock = self.preflight.start()
+        self.addCleanup(self.preflight.stop)
+        sleeper = patch.object(batch.time, 'sleep')
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
+
     def test_advisory_input_retries_cloud_placeholder_and_is_digest_bound(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             summary = root/'SUMMARY-IT-NEWS-2026-09-14.md'
             content = b'verified news'
             expected = hashlib.sha256(content).hexdigest()
-            with patch.object(Path, 'read_bytes', side_effect=[b'', OSError(errno.EDEADLK, 'cloud busy'), content]):
+            with patch.object(batch.news.runtime, '_read_once', side_effect=[b'', OSError(errno.EDEADLK, 'cloud busy'), content]):
                 path = batch.snapshot_advisory_input(summary, root/'run', expected)
             self.assertEqual(path.read_bytes(), content)
             self.assertEqual(path.name, summary.name)
@@ -77,5 +85,42 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(result['status'],'complete')
             self.assertEqual(result['delivery']['message_id'],'1234567890123456789')
             self.assertEqual(json.loads((root/'last-status.json').read_text())['status'],'complete')
+
+    def test_delivery_retry_reuses_completed_news_and_advisory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);cfg=batch.news.Config(root,root,root,root,root,root,'codex')
+            summary=root/'SUMMARY-IT-NEWS-2026-09-14.md';summary.write_text('news')
+            advisory=root/'advisory.md';advisory.write_text('advice')
+            with patch.object(batch.news,'run',return_value={'status':'complete','summary_path':str(summary),'summary_sha256':batch.news.digest(summary)}) as collect, \
+                 patch.object(batch,'generate_advisory',return_value=advisory) as advise, \
+                 patch.object(batch,'complete_delivery',side_effect=[RuntimeError('temporary outage'),{'delivery_status':'delivered','message_id':'1234567890123456789'}]) as deliver, \
+                 patch.object(batch.time,'sleep'):
+                result=batch.run_batch(cfg,{})
+            self.assertEqual('complete',result['status'],result)
+            self.assertEqual(1,collect.call_count)
+            self.assertEqual(1,advise.call_count)
+            self.assertEqual(2,deliver.call_count)
+            self.assertTrue((Path(result['run_root'])/'attempt-1.json').is_file())
+
+    def test_preflight_failure_does_not_start_collection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);cfg=batch.news.Config(root,root,root,root,root,root,'codex')
+            self.preflight_mock.side_effect=batch.news.RunnerError('missing delivery configuration')
+            with patch.object(batch.news,'run') as collect:
+                result=batch.run_batch(cfg,{})
+            self.assertEqual('blocked',result['status'])
+            self.assertEqual('preflight',result['phase'])
+            collect.assert_not_called()
+
+    def test_invalid_success_without_message_id_is_not_complete(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);cfg=batch.news.Config(root,root,root,root,root,root,'codex')
+            summary=root/'SUMMARY-IT-NEWS-2026-09-14.md';summary.write_text('news')
+            with patch.object(batch.news,'run',return_value={'status':'complete','summary_path':str(summary),'summary_sha256':batch.news.digest(summary)}), \
+                 patch.object(batch,'generate_advisory',return_value=root/'advice.md'), \
+                 patch.object(batch,'complete_delivery',return_value={'delivery_status':'skipped','message_id':None}), \
+                 patch.object(batch.time,'sleep'):
+                result=batch.run_batch(cfg,{})
+            self.assertEqual('blocked',result['status'])
 
 if __name__=='__main__':unittest.main()
