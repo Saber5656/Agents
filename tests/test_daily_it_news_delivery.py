@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import hashlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -100,6 +101,84 @@ class DeliveryTests(unittest.TestCase):
     def test_unsafe_path_rejected(self):
         with self.assertRaises(delivery.DeliveryError):
             delivery.publish_artifact(str(self.remote), "main", self.artifact, "../secret", self.run, "x", "x@y", "")
+
+    def test_publication_uses_the_same_bytes_that_were_verified(self):
+        content = self.artifact.read_bytes()
+        original = delivery.shutil.copyfile
+        def cloud_read(source, destination, *args, **kwargs):
+            if Path(source) == self.artifact:
+                Path(destination).write_bytes(b'')
+                return str(destination)
+            return original(source, destination, *args, **kwargs)
+        with patch.object(delivery.shutil, 'copyfile', side_effect=cloud_read):
+            result = delivery.publish_artifact(str(self.remote), 'main', self.artifact,
+                'daily/summary.md', self.run, 'Fixture', 'fixture@example.invalid', str(self.gitleaks))
+        self.assertEqual(result['artifact_sha256'], hashlib.sha256(content).hexdigest())
+        self.assertEqual(content, subprocess.check_output(['git', 'show', 'main:daily/summary.md'], cwd=self.remote))
+
+    def test_transient_fetch_failure_retries_without_changing_payload(self):
+        original = delivery._git
+        failed = []
+        def flaky(args, *a, **kw):
+            if args[0] == 'fetch' and not failed:
+                failed.append(True)
+                raise delivery.RetryableDeliveryError('temporary connection failure')
+            return original(args, *a, **kw)
+        with patch.object(delivery, '_git', side_effect=flaky):
+            result = delivery.publish_artifact(str(self.remote), 'main', self.artifact,
+                'daily/summary.md', self.run, 'Fixture', 'fixture@example.invalid', str(self.gitleaks))
+        self.assertEqual('published', result['status'])
+        self.assertEqual(1, len(failed))
+
+    def test_unrelated_remote_advance_after_push_does_not_block_delivery(self):
+        original = delivery._git
+        def advance(args, *a, **kw):
+            value = original(args, *a, **kw)
+            if args[0] == 'push':
+                seed = Path(self.tmp.name)/'seed'
+                git(seed, 'fetch', 'origin', 'main');git(seed, 'reset', '--hard', 'origin/main')
+                (seed/'README').write_text('independent update')
+                git(seed, 'add', 'README');git(seed, 'commit', '-m', 'independent update');git(seed, 'push', 'origin', 'main')
+            return value
+        with patch.object(delivery, '_git', side_effect=advance):
+            result = delivery.publish_artifact(str(self.remote), 'main', self.artifact,
+                'daily/summary.md', self.run, 'Fixture', 'fixture@example.invalid', str(self.gitleaks))
+        self.assertEqual('published', result['status'])
+        self.assertEqual('independent update', git(self.remote, 'show', 'main:README'))
+
+    def test_process_start_failure_is_retryable_without_an_unknown_intent(self):
+        args = ('2026-09-14', 'https://news', 'https://advice', 'e'*64, self.run)
+        bridge = Path(self.tmp.name)/'send.py'
+        bridge.write_text("import json;print(json.dumps({'success':True,'platform':'discord','chat_id':'12345678901234567','message_id':'22345678901234567'}))")
+        first = delivery.notify_discord(*args, '/does/not/exist', 'discord:12345678901234567', 'req-start', bridge)
+        self.assertEqual('failed', first['delivery_status'])
+        second = delivery.notify_discord(*args, sys.executable, 'discord:12345678901234567', 'req-start', bridge)
+        self.assertEqual('delivered', second['delivery_status'])
+
+    def test_confirmed_bridge_receipt_recovers_without_resending(self):
+        target = 'discord:12345678901234567';artifact = 'f'*64
+        key = hashlib.sha256(f'{artifact}:{target}'.encode()).hexdigest()
+        base = self.run/'discord-bridge';base.mkdir(parents=True)
+        message = 'ITニュース 2026-09-14\nニュース: https://news\n助言: https://advice'
+        (base/f'intent-{key}.json').write_text(json.dumps({'artifact_sha256':artifact,'target':target,'message':message}))
+        message_file = base/f'message-{key}.txt';message_file.write_text(message)
+        attempt = base/'req-recover/attempt-test';attempt.mkdir(parents=True)
+        (attempt/'request.json').write_text(json.dumps({'request_id':'req-recover','command':['hermes','send','--to',target,'--json','--file',str(message_file)]}))
+        payload = {'success':True,'platform':'discord','chat_id':'12345678901234567','message_id':'22345678901234567'}
+        (attempt/'result.json').write_text(json.dumps({'request_id':'req-recover','returncode':0,'status':'completed','stdout':json.dumps(payload)}))
+        with patch.object(delivery, 'run_command', side_effect=AssertionError('must not resend')):
+            result = delivery.notify_discord('2026-09-14','https://news','https://advice',artifact,self.run,sys.executable,target,'req-recover','bridge.py')
+        self.assertEqual('delivered', result['delivery_status'])
+        self.assertEqual(payload['message_id'], result['message_id'])
+        self.assertTrue((base/f'sent-{key}.json').is_file())
+
+    def test_invalid_sent_receipt_is_not_success(self):
+        target = 'discord:12345678901234567';artifact = '9'*64
+        key = hashlib.sha256(f'{artifact}:{target}'.encode()).hexdigest()
+        base = self.run/'discord-bridge';base.mkdir(parents=True)
+        (base/f'sent-{key}.json').write_text('{}')
+        result = delivery.notify_discord('2026-09-14','https://news','https://advice',artifact,self.run,sys.executable,target,'req-invalid','bridge.py')
+        self.assertEqual('unknown', result['delivery_status'])
 
 
 if __name__ == "__main__":
