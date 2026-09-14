@@ -281,6 +281,35 @@ type: it-news-summary
         self.assertIn("| Site 0 | 1 | 取得済み | サイト限定検索 | https://example0.com/article | 1 |",
                       Path(result["summary_path"]).read_text())
 
+    def test_malformed_model_output_gets_one_bounded_repair_instead_of_stopping(self):
+        model_calls = []
+        def execute(argv, **kwargs):
+            if "exec" in argv:
+                model_calls.append(argv)
+                if len(model_calls) == 1:
+                    return subprocess.CompletedProcess(argv, 0, "not-json-and-no-summary_status", "")
+            return self.execute(argv, **kwargs)
+        with patch.object(news, "load_module", side_effect=self.helper):
+            result = news.run(self.cfg, today=self.date, runner=execute)
+        self.assertEqual(result["status"], "complete", result)
+        self.assertEqual(len(model_calls), 2)
+        self.assertTrue((Path(result["run_root"]) / "codex.validation-error.txt").exists())
+
+    def test_transient_empty_receipt_read_reuses_summary_without_regenerating(self):
+        with patch.object(news, "load_module", side_effect=self.helper):
+            result = news.run(self.cfg, today=self.date, runner=self.execute)
+        self.assertEqual(result["status"], "complete", result)
+        calls = []
+        original_reader = news.runtime._read_once
+        def flaky_reader(path):
+            calls.append(path)
+            if len(calls) == 1:
+                return b""
+            return original_reader(path)
+        with patch.object(news.runtime, "_read_once", side_effect=flaky_reader):
+            retry = news.run(self.cfg, today=self.date, runner=lambda *a, **k: self.fail("must not collect twice"))
+        self.assertEqual(retry["status"], "already_complete")
+
     def test_resume_rejects_paths_and_previous_dates_without_leaking_lock(self):
         for value in ["../outside", "20260909T040000+0900-1-1"]:
             with self.assertRaises(news.RunnerError):

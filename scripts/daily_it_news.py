@@ -20,6 +20,8 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+import daily_it_news_runtime as runtime
+
 JST = ZoneInfo("Asia/Tokyo")
 SUMMARY_RE = re.compile(r"^SUMMARY-IT-NEWS-(\d{4})-(\d{2})-(\d{2})(?:-(\d+))?\.md$")
 HEADER = "| サイト | Tier | 状態 | 取得方法 | 確認URL | 期間内件数 | 理由 |"
@@ -55,7 +57,7 @@ class Config:
 
 
 def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashlib.sha256(runtime.read_verified(path)).hexdigest()
 
 
 def atomic_write(path: Path, data: bytes) -> None:
@@ -150,8 +152,8 @@ def valid_summary(path: Path, date: dt.date, expected_sources: int = 26) -> bool
     if path.is_symlink() or not match or tuple(map(int, match.groups()[:3])) != (date.year, date.month, date.day):
         return False
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
+        text = runtime.read_verified(path).decode("utf-8")
+    except (OSError, RuntimeError, UnicodeError):
         return False
     required = [f"created: {date}", "type: it-news-summary", "## ハイライト", "## 個別トピック",
                 "## 総括", "## 注目キーワード", "### ", "- 出典:", "- 公開日:"]
@@ -193,14 +195,16 @@ def existing_summary(archive: Path, date: dt.date) -> Path | None:
     """Only this runner's durable, digest-bound success receipt proves completion."""
     receipt = archive / ".daily-it-news-complete.json"
     try:
-        info = json.loads(receipt.read_text())
+        info = json.loads(runtime.read_verified(receipt))
         name = info["name"]
         if Path(name).name != name:
             return None
         path = archive / name
-        if valid_summary(path, date) and digest(path) == info["sha256"]:
-            return path
-    except (OSError, ValueError, KeyError, TypeError):
+        if not valid_summary(path, date):
+            return None
+        runtime.read_verified(path, expected_sha256=info["sha256"])
+        return path
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
         pass
     return None
 
@@ -288,6 +292,8 @@ resolutionsにはsealed statusがneeds_search_fallbackのsourceだけを入れ�
 
 def logged_command(runner: Callable, argv: list[str], root: Path, name: str, **kwargs: Any) -> subprocess.CompletedProcess:
     try:
+        if runner is subprocess.run:
+            runner = runtime.run_command
         result = runner(argv, text=True, capture_output=True, **kwargs)
     except subprocess.TimeoutExpired as exc:
         for label, data in [("stdout", exc.stdout), ("stderr", exc.stderr)]:
@@ -301,7 +307,7 @@ def logged_command(runner: Callable, argv: list[str], root: Path, name: str, **k
 
 
 def run(config: Config, *, force: bool = False, today: dt.date | None = None,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = runtime.run_command,
         resume_run: str | None = None) -> dict[str, Any]:
     now = dt.datetime.now(JST)
     date = today or now.date()
@@ -324,6 +330,7 @@ def run(config: Config, *, force: bool = False, today: dt.date | None = None,
             os.close(lock)
             raise RunnerError(str(exc)) from exc
     status: dict[str, Any] = {"status": "blocked", "run_id": run_id, "started_at": started, "run_root": str(run_root)}
+    repair_label = f"repair-{now:%H%M%S}-{secrets.token_hex(3)}" if resume_run else "codex"
     try:
         if resume_run:
             started = previous["started_at"]
@@ -350,22 +357,23 @@ def run(config: Config, *, force: bool = False, today: dt.date | None = None,
             prompt = prompt_for(config, staging, date, started)
             if resume_run:
                 prompt += "\nこれは同じrunの修復です。all-topics.json、summary-content.md、既存保存済み本文を再利用し、欠落した必須見出し・7列監査表・個別記事URLを修正してください。候補全件の作り直しは不要。新しい要約をsaverで別名保存してください。\n"
-            atomic_write(run_root / ("repair.prompt.md" if resume_run else "collection.prompt.md"), prompt.encode())
+            atomic_write(run_root / (f"{repair_label}.prompt.md" if resume_run else "collection.prompt.md"), prompt.encode())
             env["COLLECTION_OUTPUT_ROOT"] = str(staging)
             validator = load_module(config.workdir / "validate-collection-result.py", "news_coverage_validator")
             for attempt in range(2):
-                label = ("repair" if resume_run else "codex") + (f"-retry-{attempt}" if attempt else "")
-                codex = logged_command(runner, codex_command(config, prompt), run_root, label, cwd=staging,
-                                       env=env, input=prompt, timeout=1800)
-                generated = extract_json(codex.stdout)
-                if generated.get("summary_status") != "created":
-                    raise RunnerError("collection agent did not create a summary: " + str(generated))
-                source = Path(generated.get("summary_path", ""))
-                if not source.is_absolute() or source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(staging.resolve()):
-                    raise RunnerError("summary is outside the current staging directory")
-                if evidence_hashes != {p.name: digest(p) for p in source_inputs.iterdir() if p.is_file()}:
-                    raise RunnerError("sealed source evidence changed")
+                label = repair_label + (f"-retry-{attempt}" if attempt else "")
+                source = None
                 try:
+                    codex = logged_command(runner, codex_command(config, prompt), run_root, label, cwd=staging,
+                                           env=env, input=prompt, timeout=1800)
+                    generated = extract_json(codex.stdout)
+                    if generated.get("summary_status") != "created":
+                        raise RunnerError("collection agent did not create a summary: " + str(generated))
+                    source = Path(generated.get("summary_path", ""))
+                    if not source.is_absolute() or source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(staging.resolve()):
+                        raise RunnerError("summary is outside the current staging directory")
+                    if evidence_hashes != {p.name: digest(p) for p in source_inputs.iterdir() if p.is_file()}:
+                        raise RunnerError("sealed source evidence changed")
                     verified = run_root / "verified-source-resolutions.json"
                     if verified.exists():
                         verified.rename(run_root / f"verified-source-resolutions.before-{now:%H%M%S}-{attempt}.json")
@@ -386,13 +394,16 @@ def run(config: Config, *, force: bool = False, today: dt.date | None = None,
                 except Exception as exc:
                     if attempt:
                         raise
-                    prompt += f"\n前の生成物 {source} は検証不合格: {exc}。既存の候補一覧・根拠を再利用し、この不合格を修正する。必須フォーマットを簡略化せず、saverで修正版を新しい別名へ保存する。\n"
+                    hint = f"生成物 {source}" if source is not None else "モデル出力"
+                    prompt += f"\n前の{hint}は検証不合格: {exc}。既存の候補一覧・根拠を再利用し、この不合格を修正する。必須フォーマットを簡略化せず、saverで修正版を新しい別名へ保存する。\n"
                     atomic_write(run_root / f"{label}.validation-error.txt", str(exc).encode())
             saver = load_module(config.skills_root / "summarize-it-news/scripts/save_summary.py", "news_saver")
             config.archive_root.mkdir(parents=True, exist_ok=True)
+            source_sha256 = digest(source)
             saved = saver.save_summary("interactive_manual", config.archive_root, str(date), source, started)
             destination = Path(saved["summary_path"])
-            status.update(status="complete", summary_path=str(destination), summary_sha256=digest(destination),
+            runtime.read_verified(destination, expected_sha256=source_sha256)
+            status.update(status="complete", summary_path=str(destination), summary_sha256=source_sha256,
                           source_count=manifest["source_count"], validation="source_coverage_verified")
             atomic_write(target / ".daily-it-news-complete.json", json.dumps({"name": destination.name,
                          "sha256": status["summary_sha256"], "run_id": run_id}).encode())
