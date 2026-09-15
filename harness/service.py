@@ -765,10 +765,16 @@ class ServiceStore:
             rows = self._conn.execute("SELECT * FROM service_attempts WHERE job_id=? ORDER BY attempt_number", (job_id,))
             return [dict(row) for row in rows]
 
-    def enroll(self, task_id, workspace, prompt, context, *, provider="claude", model="gpt-5.6-luna",
+    def enroll(self, task_id, workspace, prompt, context, *, provider="claude", model=None,
                effort="low", timeout=300.0, retry_base=30.0, retry_max=3600.0, resource="default"):
-        if provider not in ("claude", "codex"):
-            raise ValueError("provider must be 'claude' or 'codex'")
+        if provider not in ("claude", "codex", "devin"):
+            raise ValueError("provider must be 'claude', 'codex' or 'devin'")
+        model = model or ("swe-2-medium" if provider == "devin" else "gpt-5.6-luna")
+        if provider == "devin":
+            from .devin import MODELS
+            if model not in MODELS:
+                raise ValueError("Devin model must be an explicit SWE-2 variant")
+            effort = model.rsplit("-", 1)[-1]
         workspace = Path(workspace).resolve()
         if not workspace.is_dir(): raise ValueError(f"workspace does not exist: {workspace}")
         if not prompt or not context: raise ValueError("prompt and context are required")
@@ -899,7 +905,7 @@ class ServiceStore:
     def enroll_selected(self, requirement_id, task_id, *, ledger, workspace,
                         repository, repository_path, branch, immutable_base,
                         vault_reference, criteria, work_unit=None, provider="claude",
-                        model="gpt-5.6-luna", effort="low", timeout=300.0, retry_base=30.0,
+                        model=None, effort="low", timeout=300.0, retry_base=30.0,
                         retry_max=3600.0, resource="default"):
         """Enroll one coordinator-selected requirement/task binding.
 
@@ -908,8 +914,14 @@ class ServiceStore:
         linked TaskStore task.  Its immutable selection metadata is persisted
         with the service job so a restart or retry reuses the same identity.
         """
-        if provider not in ("claude", "codex"):
-            raise ValueError("provider must be 'claude' or 'codex'")
+        if provider not in ("claude", "codex", "devin"):
+            raise ValueError("provider must be 'claude', 'codex' or 'devin'")
+        model = model or ("swe-2-medium" if provider == "devin" else "gpt-5.6-luna")
+        if provider == "devin":
+            from .devin import MODELS
+            if model not in MODELS:
+                raise ValueError("Devin model must be an explicit SWE-2 variant")
+            effort = model.rsplit("-", 1)[-1]
         if not isinstance(ledger, RequirementLedger):
             raise TypeError("an existing RequirementLedger is required")
         if Path(ledger.store.db_path).resolve() != Path(self.tasks.db_path).resolve():
@@ -1081,7 +1093,7 @@ class ServiceStore:
         latest = attempts[-1].get("result", {}) if attempts else {}
         if isinstance(latest, dict) and latest.get("action") == "inference_api_route":
             try:
-                login_check = _claude_login_check if (job.get("provider") or "codex") == "claude" else None
+                login_check = _provider_login_check(job.get("provider") or "codex")
                 self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"), login_check=login_check)
             except Exception as exc:
                 diagnostic = f"held inference route remains blocked: {type(exc).__name__}: {exc}"
@@ -1345,7 +1357,7 @@ class ServiceStore:
         try:
             if executor is None:
                 try:
-                    login_check = _claude_login_check if (job.get("provider") or "codex") == "claude" else None
+                    login_check = _provider_login_check(job.get("provider") or "codex")
                     self.auth_guard(load_agents_env(self.tasks.agents_root / ".env"), login_check=login_check)
                 except Exception as exc:
                     held = isinstance(exc, AuthError) and exc.hold
@@ -1915,6 +1927,23 @@ def _codex_login_check(env, timeout=20):
         return False
 
 
+def _devin_login_check(env):
+    """Use the existing Devin CLI login; never read/copy its credentials."""
+    try:
+        result = subprocess.run(["devin", "auth", "status"], env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        return result.returncode == 0 and "logged in (via devin)" in result.stdout.lower()
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _provider_login_check(provider):
+    checks = {"claude": _claude_login_check, "codex": _codex_login_check, "devin": _devin_login_check}
+    if provider not in checks:
+        raise ValueError("Unknown provider: " + str(provider))
+    return checks[provider]
+
+
 def _claude_login_check(env):
     """Claude subscription check for the ordinary worker/review primary provider.
 
@@ -2030,13 +2059,23 @@ def default_executor(spec):
                         mode="run", provider="claude", claude_model="sonnet",
                         codex_model=spec["model"], effort=spec["effort"],
                         timeout=spec["timeout"], fallback=True, run_dir=Path(spec["run_dir"]))
-    else:
+    elif provider == "devin":
+        from .devin import MODELS
+        if spec["model"] not in MODELS:
+            raise ValueError("Devin model must be an explicit SWE-2 variant")
+        job_args = dict(workspace=Path(spec["workspace"]), vault=vault, prompt=prompt,
+                        mode="run", provider="devin", devin_model=spec["model"],
+                        effort=spec["model"].rsplit("-", 1)[-1], timeout=spec["timeout"],
+                        fallback=False, run_dir=Path(spec["run_dir"]))
+    elif provider == "codex":
         # An explicitly selected Codex model runs alone; quota fallback is
         # only ever automatic away from Claude, never away from an explicit
         # Codex selection.
         job_args = dict(workspace=Path(spec["workspace"]), vault=vault, prompt=prompt,
                         mode="run", provider="codex", codex_model=spec["model"], effort=spec["effort"],
                         timeout=spec["timeout"], fallback=False, run_dir=Path(spec["run_dir"]))
+    else:
+        raise ValueError("Unknown provider: " + str(provider))
     # Newer runners persist task identity in their Job record.  Keep this
     # compatible with the older local runner while passing it whenever the
     # runner exposes the field.
@@ -2439,7 +2478,7 @@ class Launchd:
         # The worker/verifier default to Claude with a Codex quota fallback,
         # so launchd's minimal PATH must be able to discover both binaries.
         directories = []
-        for name in ("claude", "codex"):
+        for name in ("claude", "codex", "devin"):
             found = shutil.which(name)
             if found:
                 directory = str(Path(found).parent)
@@ -2505,7 +2544,7 @@ class Launchd:
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Durable App-independent Agents service")
     parser.add_argument("--db", default=None); sub = parser.add_subparsers(dest="command", required=True)
-    en = sub.add_parser("enroll"); en.add_argument("--task", required=True); en.add_argument("--workspace", required=True); prompt_group = en.add_mutually_exclusive_group(required=True); prompt_group.add_argument("--prompt"); prompt_group.add_argument("--prompt-file"); en.add_argument("--context", required=True); en.add_argument("--provider", choices=("claude", "codex"), default="claude"); en.add_argument("--model", default="gpt-5.6-luna"); en.add_argument("--effort", default="low"); en.add_argument("--timeout", type=float, default=300); en.add_argument("--json", action="store_true")
+    en = sub.add_parser("enroll"); en.add_argument("--task", required=True); en.add_argument("--workspace", required=True); prompt_group = en.add_mutually_exclusive_group(required=True); prompt_group.add_argument("--prompt"); prompt_group.add_argument("--prompt-file"); en.add_argument("--context", required=True); en.add_argument("--provider", choices=("claude", "codex", "devin"), default="claude"); en.add_argument("--model", default=None); en.add_argument("--effort", default="low"); en.add_argument("--timeout", type=float, default=300); en.add_argument("--json", action="store_true")
     selected = sub.add_parser("enroll-selected", help="enroll one explicitly selected RequirementLedger task")
     selected.add_argument("--ledger", required=True, help="existing RequirementLedger JSON record")
     selected.add_argument("--requirement", required=True); selected.add_argument("--task", required=True)
@@ -2513,8 +2552,8 @@ def main(argv=None):
     selected.add_argument("--repository-path", required=True); selected.add_argument("--branch", required=True)
     selected.add_argument("--immutable-base", required=True); selected.add_argument("--vault-reference", required=True)
     selected.add_argument("--criteria", nargs="+", action="append", required=True)
-    selected.add_argument("--work-unit"); selected.add_argument("--provider", choices=("claude", "codex"), default="claude")
-    selected.add_argument("--model", default="gpt-5.6-luna")
+    selected.add_argument("--work-unit"); selected.add_argument("--provider", choices=("claude", "codex", "devin"), default="claude")
+    selected.add_argument("--model", default=None)
     selected.add_argument("--effort", default="low"); selected.add_argument("--timeout", type=float, default=300)
     selected.add_argument("--json", action="store_true")
     ls = sub.add_parser("list"); ls.add_argument("--db", default=argparse.SUPPRESS); ls.add_argument("--state"); ls.add_argument("--json", action="store_true")

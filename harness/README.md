@@ -13,7 +13,7 @@ set +a
 python3 -m harness doctor
 ```
 
-`gh`、`claude`、`codex` は通常のターミナルでログイン済みのものを利用する。認証情報の生成・複製・置き換えは行わない。
+`gh`、`claude`、`codex`、`devin` は通常のターミナルでログイン済みのものを利用する。認証情報の生成・複製・置き換えは行わない。
 
 ## バックグラウンドサービス
 
@@ -93,22 +93,82 @@ python3 -m harness run --workspace "$AGENTS_ROOT" \
 | 項目 | 動作 |
 |---|---|
 | Claude | 既定は `sonnet` / `low`。`--claude-model` と `--effort` で明示変更 |
+| Devin 作業 | `--provider devin`。既定は `swe-2-medium`、`--devin-model` で `swe-2-high` / `swe-2-max` を明示選択 |
 | Codex | 既定は `gpt-5.6-luna` / `low`。`--codex-model` で明示変更 |
 | Claude レビュー | `dontAsk` と Read/Grep/Glob。編集・Bash・追加エージェント用ツールは提供しない |
 | Codex レビュー | read-only sandbox と `approval_policy=never`。追加エージェント機能は無効 |
 | Claude 作業 | Read/Grep/Glob/Edit/Write/Bash と auto permissions。実際の権限判定は CLI が行う |
 | Codex 作業 | workspace-write sandbox と `approval_policy=never` |
 | 待機 | CLI プロセス内で完了を待機。モデルによる短周期の進捗確認なし |
-| 実行上限 | `--timeout` は両 provider 合計の時間。タイムアウト時はプロセス群を終了 |
+| 実行上限 | `--timeout` は引き継ぎを含む全 provider 合計の時間。タイムアウト時はプロセス群を終了 |
 | 記録 | Vault 内 `01-Projects/agent-runs/` に依頼・コマンド・stdout・stderr・state・変更状態・結果・使用量を保存。主要記録は同一ディレクトリ内で atomic/private save |
 
 provider の stdout / stderr は実行中から redaction collector を通して記録するため、親 runner の終了後も既に出力された内容を復元できる。再開時は終了済み provider の terminal output を先に照合し、成功記録があれば再実行せずに結果を確定する。`context-index.json` は利用可能な raw record と実行中・完了状態を列挙し、`result.json` は process identity と reconciliation 結果を保持する。壊れた結果 record は上書きせず `incomplete` として返す。stdin 配信も provider の実行 timeout の範囲で行う。
+
+`sonnet` などのClaude公式aliasと対応する実モデルの違いは `match_type=provider_alias` として記録する。
 
 `requested_model` は設定値、`actual_model` は provider が明示的に返した値だけを記録する。provider が model identity や usage を返さない場合、要求値や推定値で補わず `null` / `provider_did_not_report` とする。usage の集計は provider が報告した numeric fields のみを合算する。
 
 Claude は `--safe-mode`、Codex は `--ignore-user-config` で旧カスタマイズを持ち込まず、共通方針と指定 role を明示的に渡す。Claude の `--bare` は保存済み OAuth/Keychain を使わないため採用しない。これらの設定は今回の子プロセスだけに適用し、既存の CLI 設定ファイルは変更しない。Claude の管理者ポリシーは引き続き適用される。
 
 safe mode ではユーザーの hook・plugin・MCP も使わないため、それらに依存した独自認証 helper やツールがある環境は別途確認する。両 CLI の対応オプションは導入バージョンの help で確認する。
+
+## Devin CLI（SWE-2）で作業する
+
+```sh
+python3 -m harness run --provider devin --devin-model swe-2-medium \
+  --workspace "$AGENTS_ROOT" --prompt-file "$AGENTS_VAULT_ROOT/request.md" --timeout 900
+
+python3 -m harness.service enroll --provider devin --model swe-2-medium \
+  --task TASK_ID --workspace "$AGENTS_ROOT/worktrees/parser" \
+  --prompt-file "$AGENTS_VAULT_ROOT/request.md" --context "vault://request"
+```
+
+Devinの既存ログインを利用する。モデルの選択はSWE-2の3種類に限定し、他モデルや
+API keyへの自動切替は行わない。SWE-2の推論強度はモデル名末尾のmedium/high/maxで
+決まり、Claude/Codex向けの `--effort` はDevinには適用しない。
+通常の既定は引き続きClaude、Claudeの実際の上限時だけCodexへ引き継ぐ。
+
+Devinはstdinから依頼を受け取らないため、`harness/devin.py` が一時ファイルと
+`--prompt-file` を使って渡す。`--export` のATIF出力から最終応答、実モデル、
+報告されたトークン数を読み取る。標準出力の文章や終了コード0だけでは成功にしない。
+一時ファイルはprivateに作成し、永続ログはrunnerの秘密値除去を通す。
+
+作業はDevinの `--sandbox` を使い、編集・テストをsandboxの対象となる `exec` で
+行う。直接のedit/write、追加エージェント、MCP、browser previewは子設定で禁止する。
+Devin固有のルール・skill等の自動読込はClaudeのsafe modeと同等には隔離できない。
+既存のユーザー設定は書き換えず、子用の設定だけを生成する。
+呼び出し元が `--workspace` で作業先を明示することを実行の承認範囲とし、
+非対話CLIで確認画面を開けないため `--respect-workspace-trust false` を子に渡す。
+この指定はDevinの信頼確認を省略するもので、OS sandboxの解除ではない。
+Devinのレビュー専用read-only境界は未対応なので `review --provider devin` は
+明示的にエラーにする。レビューとサービスの受入確認にはClaude/Codexを使う。
+対応はDevin 3000.10.23のhelp、実際のATIF-v1.7出力と作業試験で確認した。
+
+参考: [Devin CLI flags](https://docs.devin.ai/cli/reference/commands)、
+[Devin sandbox](https://docs.devin.ai/cli/sandbox)。
+
+## 使用量と委譲実績を確認する
+
+```sh
+python3 -m harness usage
+python3 -m harness usage --since 2026-09-15T00:00:00+09:00 --json
+python3 -m harness usage --run-dir "$AGENTS_VAULT_ROOT/01-Projects/agent-runs/<run-id>"
+python3 -m harness doctor --probe
+```
+
+`usage` はVaultの保存済み実行を読み、provider・実モデルごとの実行件数、結果、
+入力・出力・キャッシュのトークン数を表示する。CLIの推論や認証取得は行わない。
+同じattemptの重複はまとめ、使用量がない記録は「未観測」として数える。
+不正な記録やiCloudの未取得ファイルは取得できなかった理由を表示する。
+`--run-dir` はVaultのagent-runs内に限定し、サービスの入れ子の実行も対象にできる。
+
+Claudeの `rate_limit_event` があれば、枠の種類、許可/拒否、リセット時刻などの
+providerの通知をそのまま表示する。これは記録時点の情報で、残量の割合ではない。
+使用トークン数から5時間・週間枠の残量を推計しない。未観測や過去の上限通知を
+理由に新しいClaudeの依頼を止めることもない。`doctor --probe` は短いClaude推論を
+一度実行し、認証だけでなく実モデル・使用量・利用上限通知を保存する。
+実行失敗時もCLIが返した使用量を保持する。
 
 ## Claude 利用上限からの引き継ぎ
 

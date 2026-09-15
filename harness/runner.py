@@ -67,6 +67,7 @@ class Job:
     run_dir: Path | None = None
     task_id: str | None = None
     task_store_db: Path | None = None
+    devin_model: str = 'swe-2-medium'
 
 
 @dataclass
@@ -433,24 +434,69 @@ def _actual_model(events):
                 value = candidate.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+    for event in reversed(events):
+        models = event.get('modelUsage') if event.get('type') == 'result' else None
+        if isinstance(models, dict) and len(models) == 1:
+            name = next(iter(models))
+            if isinstance(name, str) and name.strip():
+                return name.strip()
     return None
+
+
+def _classify_devin(events, error, code):
+    terminal = next((e for e in reversed(events) if e.get('type') == 'devin_result'), None)
+    trajectory = terminal.get('trajectory') if terminal else None
+    supported = (isinstance(trajectory, dict)
+                 and str(trajectory.get('schema_version', '')).startswith('ATIF-v1.'))
+    trajectory = trajectory if supported else {}
+    steps = trajectory.get('steps')
+    final = steps[-1] if isinstance(steps, list) and steps else None
+    final = final if isinstance(final, dict) and final.get('source') == 'agent' else {}
+    model = final.get('model_name')
+    model = model.strip() if isinstance(model, str) and model.strip() else None
+    metrics = trajectory.get('final_metrics')
+    metrics = metrics if isinstance(metrics, dict) else {}
+    mapping = {'total_prompt_tokens': 'input_tokens', 'total_completion_tokens': 'output_tokens',
+               'total_cached_tokens': 'cached_input_tokens'}
+    usage = {target: metrics[source] for source, target in mapping.items() if source in metrics}
+    usage = _usage_record(usage).get('values')
+    rejected = 'rejected a tool call that requires confirmation' in error
+    if not terminal or code != 0 or terminal.get('exit_code') != 0:
+        status = 'permission_denied' if rejected else _error_status(error)
+        return Result(status, error or 'Devin did not report a successful exit', usage, model, model is not None)
+    if not supported:
+        return Result('failed', 'Devin did not export a supported ATIF trajectory')
+    if 'rejected a tool call that requires confirmation' in error:
+        return Result('permission_denied', 'Devin rejected a tool requiring confirmation', usage, model, model is not None)
+    if final.get('tool_calls'):
+        return Result('failed', 'Devin did not export a final agent response', usage, model, model is not None)
+    text = final.get('message')
+    if not isinstance(text, str) or not text.strip():
+        return Result('failed', 'Devin returned an empty final response', usage, model, model is not None)
+    return Result('completed', text, usage, model, model is not None)
 
 
 def classify(provider, output, error, code):
     """Inspect provider control records only, never tool-result text for fallback."""
     events = _events(output)
+    if provider == 'devin':
+        return _classify_devin(events, error, code)
+    if provider not in ('claude', 'codex'):
+        raise ValueError('Unknown provider: ' + provider)
     actual_model = _actual_model(events)
     model_verified = actual_model is not None
     if provider == 'claude':
         terminal_error = ''
+        usage = None
         terminal = next((e for e in reversed(events) if e.get('type') == 'result'), None)
         if terminal:
+            usage = terminal.get('usage')
             text = terminal.get('result', '')
             text = text if isinstance(text, str) else json.dumps(text)
             if terminal.get('permission_denials'):
-                return Result('permission_denied', text, actual_model=actual_model, model_verified=model_verified)
+                return Result('permission_denied', text, usage=usage, actual_model=actual_model, model_verified=model_verified)
             if terminal.get('subtype') in ('error_max_budget_usd', 'error_max_turns'):
-                return Result('budget_exhausted', text, actual_model=actual_model, model_verified=model_verified)
+                return Result('budget_exhausted', text, usage=usage, actual_model=actual_model, model_verified=model_verified)
             if not terminal.get('is_error') and terminal.get('subtype') == 'success' and code == 0:
                 if isinstance(terminal.get('structured_output'), dict):
                     text = json.dumps(terminal['structured_output'], ensure_ascii=False)
@@ -463,16 +509,16 @@ def classify(provider, output, error, code):
                                       if part)
             status = _error_status(terminal_error)
             if status != 'failed':
-                return Result(status, text, actual_model=actual_model, model_verified=model_verified)
+                return Result(status, text, usage=usage, actual_model=actual_model, model_verified=model_verified)
         for e in reversed(events):
             if e.get('type') == 'assistant' and e.get('error'):
-                return Result(_error_status(str(e['error'])), str(e['error']),
+                return Result(_error_status(str(e['error'])), str(e['error']), usage=usage,
                               actual_model=actual_model, model_verified=model_verified)
             if e.get('type') == 'rate_limit_event' and e.get('rate_limit_info', {}).get('status') == 'rejected':
-                return Result('usage_limit', 'Provider rejected the request at its usage limit',
+                return Result('usage_limit', 'Provider rejected the request at its usage limit', usage=usage,
                               actual_model=actual_model, model_verified=model_verified)
         message = '\n'.join(part for part in (terminal_error, error) if part)
-        return Result(_error_status(message), message, actual_model=actual_model, model_verified=model_verified)
+        return Result(_error_status(message), message, usage=usage, actual_model=actual_model, model_verified=model_verified)
     text = '\n'.join(e['item'].get('text', '') for e in events
                      if e.get('type') == 'item.completed' and e.get('item', {}).get('type') == 'agent_message')
     failed = next((e for e in reversed(events) if e.get('type') == 'turn.failed'), None)
@@ -486,6 +532,15 @@ def classify(provider, output, error, code):
 
 
 def build_command(provider, mode, model, effort, *, add_dirs=(), output_schema=None):
+    if provider == 'devin':
+        if mode != 'run':
+            raise ValueError('Devin review is not supported; select Claude or Codex for read-only review')
+        from .devin import MODELS
+        if model not in MODELS:
+            raise ValueError('Devin model must be an explicit SWE-2 variant')
+        return [sys.executable, str(ROOT/'harness'/'devin.py'), '--model', model]
+    if provider not in ('claude', 'codex'):
+        raise ValueError('Unknown provider: ' + provider)
     if provider == 'claude':
         tools = 'Read,Grep,Glob' if mode == 'review' else 'Read,Grep,Glob,Edit,Write,Bash'
         command = ['claude', '-p', '--model', model, '--effort', effort,
@@ -705,7 +760,8 @@ def _usage_record(usage):
     if not isinstance(usage, dict):
         return {'available': False, 'reason': 'provider_reported_unstructured_usage'}
     numeric = {key: value for key, value in usage.items()
-               if isinstance(value, (int, float)) and not isinstance(value, bool)}
+               if isinstance(value, (int, float)) and not isinstance(value, bool)
+               and math.isfinite(value) and value >= 0}
     if not numeric:
         return {'available': False, 'reason': 'provider_reported_no_numeric_usage'}
     return {'available': True, 'reason': 'provider_reported', 'values': numeric}
@@ -772,13 +828,18 @@ def _usage_summary(attempts):
 
 def _model_observation(requested_model, actual_model, provider_reported):
     """Bind provider identity to the model requested for this attempt."""
-    matches = (actual_model is not None and actual_model == requested_model)
+    exact = actual_model is not None and actual_model == requested_model
+    alias = (requested_model in ('sonnet', 'opus', 'haiku')
+             and isinstance(actual_model, str)
+             and actual_model.startswith('claude-' + requested_model + '-'))
+    matches = exact or alias
     return {
         'requested_model': requested_model,
         'actual_model': actual_model,
         'provider_reported': bool(provider_reported),
         'model_verified': bool(provider_reported and matches),
         'model_mismatch': bool(actual_model is not None and not matches),
+        'match_type': 'exact' if exact else 'provider_alias' if alias else 'mismatch' if actual_model else 'unreported',
     }
 
 
@@ -914,6 +975,8 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         raise ValueError('Existing workspace and AGENTS_VAULT_ROOT directories are required')
     if job.timeout <= 0:
         raise ValueError('timeout must be positive')
+    model = {'claude': job.claude_model, 'codex': job.codex_model, 'devin': job.devin_model}.get(job.provider)
+    build_command(job.provider, job.mode, model, job.effort)
     env = child_env(env)
     capture_dirs = _capture_dirs(job, env) if job.mode == 'run' else []
     capture_config = ({'task_id': job.task_id,
@@ -992,7 +1055,7 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
     summary['configured_limits'] = {
         'timeout_seconds': job.timeout,
         'provider': job.provider,
-        'effort': job.effort,
+        'effort': job.devin_model.rsplit('-',1)[-1] if job.provider == 'devin' else job.effort,
         'fallback_enabled': bool(job.fallback),
     }
     if capture_config:
@@ -1027,7 +1090,7 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         if remaining <= 0:
             summary['status'] = 'timeout'
             break
-        model = job.claude_model if provider == 'claude' else job.codex_model
+        model = {'claude': job.claude_model, 'codex': job.codex_model, 'devin': job.devin_model}[provider]
         attempt_no = len(summary['attempts'])
         argv = build_command(provider, job.mode, model, job.effort,
                              add_dirs=capture_dirs if provider == 'codex' else (),
@@ -1042,7 +1105,7 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         save(run_dir/f'{stem}-command.json', argv, env)
         attempt = {'attempt_number': attempt_no, 'attempt_id': f'{run_dir.name}:{attempt_no}',
                    'provider':provider, 'requested_model':model,
-                   'requested_effort':job.effort, 'timeout_seconds':remaining,
+                   'requested_effort':model.rsplit('-', 1)[-1] if provider == 'devin' else job.effort, 'timeout_seconds':remaining,
                    'status':'running',
                    'started_at':datetime.now(timezone.utc).isoformat(),
                    'state_record':state_path.name}
@@ -1176,7 +1239,8 @@ def doctor(env, current, probe=False, *, env_file=None, environment_mode='curren
              'selected_set':bool(env.get(key)), 'same':current.get(key)==env.get(key)}
     for tool, command in [('gh',['gh','auth','status','--active']),
                            ('claude',['claude','auth','status','--json']),
-                           ('codex',['codex','login','status'])]:
+                           ('codex',['codex','login','status']),
+                           ('devin',['devin','auth','status'])]:
         p=execute(command,child_env(env),ROOT,'',20)
         binary=shutil.which(tool,path=env.get('PATH'))
         version=execute([tool,'--version'],child_env(env),ROOT,'',10)
@@ -1198,8 +1262,14 @@ def doctor(env, current, probe=False, *, env_file=None, environment_mode='curren
         allowed_index=command.index('--allowedTools')
         del command[allowed_index:allowed_index+2]
         p=execute(command,child_env(env),ROOT,'Return exactly READY. Do not use tools.',60)
-        report['claude_inference']={'status':'timeout' if p.timed_out else classify('claude',p.stdout,p.stderr,p.code).status,
-                                    'exit_code':p.code}
+        observed=classify('claude',p.stdout,p.stderr,p.code)
+        report['claude_inference']={'status':'timeout' if p.timed_out else observed.status,
+                                    'exit_code':p.code, 'actual_model':observed.actual_model,
+                                    'usage':observed.usage, 'usage_info':_usage_record(observed.usage),
+                                    'observed_at':datetime.now(timezone.utc).isoformat(),
+                                    'rate_limits':[e.get('rate_limit_info') for e in _events(p.stdout)
+                                                   if e.get('type')=='rate_limit_event']}
+        report['claude_probe_output']={'stdout':redact(p.stdout,env),'stderr':redact(p.stderr,env)}
     report['notes']=['auth status does not prove inference works; --probe checks one bounded Claude request',
                      'Environment credentials can override saved logins; no credentials were created or replaced',
                      'Login-shell capture inherits the caller environment; aliases and functions are not exported',
@@ -1212,6 +1282,10 @@ def main(argv=None):
     parser.add_argument('--env-file',type=Path,default=ROOT/'.env')
     parser.add_argument('--environment',choices=('terminal','current'),default='terminal')
     commands=parser.add_subparsers(dest='command',required=True)
+    u=commands.add_parser('usage', help='Read observed delegation usage without running a provider')
+    u.add_argument('--json', action='store_true')
+    u.add_argument('--since', help='Timezone-aware ISO 8601 start time')
+    u.add_argument('--run-dir', type=Path, help='Limit records to this directory under Vault agent-runs')
     d=commands.add_parser('doctor'); d.add_argument('--probe',action='store_true')
     g=commands.add_parser('gh'); g.add_argument('arguments',nargs=argparse.REMAINDER)
     s=commands.add_parser('status')
@@ -1224,7 +1298,8 @@ def main(argv=None):
         p.add_argument('--prompt-file',type=Path,required=True)
         p.add_argument('--role',default='tech-reviewer' if mode=='review' else None,
                        help='Name of one roles/*.md document; review defaults to tech-reviewer')
-        p.add_argument('--provider',choices=('claude','codex'),default='claude')
+        p.add_argument('--provider',choices=('claude','codex','devin'),default='claude')
+        p.add_argument('--devin-model', choices=('swe-2-medium','swe-2-high','swe-2-max'), default='swe-2-medium')
         p.add_argument('--claude-model',default='sonnet')
         p.add_argument('--codex-model',default='gpt-5.6-luna')
         p.add_argument('--effort',choices=('low','medium','high'),default='low')
@@ -1241,6 +1316,17 @@ def main(argv=None):
     args=parser.parse_args(argv)
     try:
         current=dict(os.environ)
+        if args.command=='usage':
+            from .usage import build_usage_report, emit_usage
+            env=load_dotenv(args.env_file,current)
+            if not env.get('AGENTS_VAULT_ROOT') or not Path(env['AGENTS_VAULT_ROOT']).is_dir():
+                raise ValueError('Set AGENTS_VAULT_ROOT to the existing Vault')
+            options={'since': args.since}
+            if args.run_dir is not None:
+                options['run_dir']=args.run_dir
+            report=build_usage_report(Path(env['AGENTS_VAULT_ROOT']), **options)
+            print(redact(emit_usage(report,as_json=args.json), env))
+            return 0
         if args.command=='status':
             # Status is deliberately independent of login-shell startup and
             # performs only safe dotenv parsing plus read-only inspection.
@@ -1286,7 +1372,7 @@ def main(argv=None):
         job=Job(args.workspace.resolve(),vault.resolve(),prompt, args.command,args.provider,
                 args.claude_model,args.codex_model,args.effort,args.timeout,not args.no_fallback,
                 args.run_dir.resolve() if args.run_dir else None,
-                args.task_id, args.task_db.resolve() if args.task_db else None)
+                args.task_id, args.task_db.resolve() if args.task_db else None, args.devin_model)
         if args.resume and job.run_dir is None:
             raise ValueError('--resume requires --run-dir')
         result=run_job(job,env,run_dir=job.run_dir,resume=args.resume)
