@@ -111,6 +111,14 @@ provider の stdout / stderr は実行中から redaction collector を通して
 
 Claude は `--safe-mode`、Codex は `--ignore-user-config` で旧カスタマイズを持ち込まず、共通方針と指定 role を明示的に渡す。Claude の `--bare` は保存済み OAuth/Keychain を使わないため採用しない。これらの設定は今回の子プロセスだけに適用し、既存の CLI 設定ファイルは変更しない。Claude の管理者ポリシーは引き続き適用される。
 
+Claudeレビューでは子プロセスだけに `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` を設定し、
+CLIの初期Git status収集を省く。レビュー依頼には対象の差分や確認すべきファイルを明示する。
+Vault内の読み取りレビューではharnessのGit snapshotも省略し、`before.json` / `after.json`
+にその理由を記録する。それ以外のsnapshotはworkspace内のpathspecに限定し、各コマンドの
+10秒上限を維持する。これにより大きなVault全体の走査を避けるが、iCloudのファイル取得や
+モデルの応答時間まで保証するものではない。
+設定仕様: [Claude Code environment variables](https://code.claude.com/docs/en/env-vars)。
+
 safe mode ではユーザーの hook・plugin・MCP も使わないため、それらに依存した独自認証 helper やツールがある環境は別途確認する。両 CLI の対応オプションは導入バージョンの help で確認する。
 
 ## Devin CLI（SWE-2）で作業する

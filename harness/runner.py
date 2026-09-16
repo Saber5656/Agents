@@ -683,14 +683,21 @@ def _complete_capture(summary):
 
 def snapshot(workspace):
     results = {}
-    for name, args in [('head', ['rev-parse','HEAD']), ('status',['status','--porcelain=v1','-uall']),
-                       ('diff',['diff','--no-ext-diff','--no-textconv','HEAD','--'])]:
+    for name, args in [('head', ['rev-parse','HEAD']), ('status',['status','--porcelain=v1','-uall','--','.']),
+                       ('diff',['diff','--no-ext-diff','--no-textconv','HEAD','--','.'])]:
         try:
-            p = subprocess.run(['git', *args], cwd=workspace, capture_output=True, text=True, timeout=10)
+            p = subprocess.run(['git', '--no-optional-locks', *args], cwd=workspace, capture_output=True, text=True, timeout=10)
             results[name] = p.stdout if p.returncode == 0 else 'unavailable'
         except (OSError, subprocess.TimeoutExpired):
             results[name] = 'unavailable'
     return results
+
+
+def _job_snapshot(job):
+    if job.mode == 'review' and job.workspace.resolve().is_relative_to(job.vault.resolve()):
+        return {'head': 'not_collected', 'status': 'not_collected', 'diff': 'not_collected',
+                'reason': 'read_only_vault_review'}
+    return snapshot(job.workspace)
 
 
 def save(path, value, env):
@@ -1064,7 +1071,7 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
     else:
         save(run_dir/'request.md', prompt, env)
     if not (run_dir/'before.json').exists():
-        save(run_dir/'before.json', snapshot(job.workspace), env)
+        save(run_dir/'before.json', _job_snapshot(job), env)
     summary = old_summary or {'run_dir':str(run_dir), 'workspace':str(job.workspace), 'mode':job.mode,
                               'status':'running','attempts':[], 'model_observations': []}
     summary.setdefault('attempts', [])
@@ -1135,14 +1142,17 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
                           'status': 'starting'}, env)
         save(run_dir/'result.json', summary, env)
         _context_index(run_dir, env)
+        provider_env = dict(env)
+        if provider == 'claude' and job.mode == 'review':
+            provider_env['CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS'] = '1'
         try:
             attempt_started = time.monotonic()
             if records_streams:
-                result = executor(argv, env, job.workspace, prompt, remaining,
+                result = executor(argv, provider_env, job.workspace, prompt, remaining,
                                   stdout_path=stdout_path, stderr_path=stderr_path,
                                   state_path=state_path, redaction_env=env)
             else:
-                result = executor(argv, env, job.workspace, prompt, remaining)
+                result = executor(argv, provider_env, job.workspace, prompt, remaining)
         except OSError as exc:
             result = ProcessResult(126, stderr=f'Process startup failed: {exc}')
         if not records_streams or not stdout_path.exists():
@@ -1182,11 +1192,11 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         summary['text'] = parsed.text
         _complete_capture(summary)
         summary['usage'] = _usage_summary(summary['attempts'])
-        save(run_dir/'after.json',snapshot(job.workspace),env)
+        save(run_dir/'after.json',_job_snapshot(job),env)
         save(run_dir/'result.json',summary,env)
         _context_index(run_dir, env)
         if parsed.status == 'usage_limit' and provider == 'claude' and provider_index+1<len(providers):
-            checkpoint = snapshot(job.workspace)
+            checkpoint = _job_snapshot(job)
             save(run_dir/'handoff.json', checkpoint, env)
             checkpoint_text = json.dumps(checkpoint, ensure_ascii=False)
             prompt += ('\n\n引き継ぎ: Claude が利用上限に到達したため Codex で継続する。\n'
