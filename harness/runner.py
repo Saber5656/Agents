@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 import math
@@ -23,6 +23,8 @@ import time
 import uuid
 
 from .status import build_status, emit_status
+from .provider_usage import (usage_record as _usage_record, attempt_usage,
+                             claude_usage, COMPLETENESS_RANK)
 
 ROOT = Path(__file__).resolve().parents[1]
 REVIEW_SCHEMA = {
@@ -50,6 +52,7 @@ class Result:
     usage: object = None
     actual_model: str | None = None
     model_verified: bool = False
+    usage_info: dict | None = None
 
 
 @dataclass
@@ -440,6 +443,12 @@ def _actual_model(events):
             name = next(iter(models))
             if isinstance(name, str) and name.strip():
                 return name.strip()
+    for event in reversed(events):
+        message = event.get('message')
+        if event.get('type') == 'assistant' and not event.get('parent_tool_use_id') and isinstance(message, dict):
+            model = message.get('model')
+            if isinstance(model, str) and model.startswith('claude-'):
+                return model
     return None
 
 
@@ -477,6 +486,13 @@ def _classify_devin(events, error, code):
 
 
 def classify(provider, output, error, code):
+    parsed = _classify(provider, output, error, code)
+    if provider == 'claude':
+        parsed.usage, parsed.usage_info = claude_usage(_events(output))
+    return parsed
+
+
+def _classify(provider, output, error, code):
     """Inspect provider control records only, never tool-result text for fallback."""
     events = _events(output)
     if provider == 'devin':
@@ -754,23 +770,12 @@ def _load_record(path):
         return None
 
 
-def _usage_record(usage):
-    if usage is None:
-        return {'available': False, 'reason': 'provider_did_not_report'}
-    if not isinstance(usage, dict):
-        return {'available': False, 'reason': 'provider_reported_unstructured_usage'}
-    numeric = {key: value for key, value in usage.items()
-               if isinstance(value, (int, float)) and not isinstance(value, bool)
-               and math.isfinite(value) and value >= 0}
-    if not numeric:
-        return {'available': False, 'reason': 'provider_reported_no_numeric_usage'}
-    return {'available': True, 'reason': 'provider_reported', 'values': numeric}
-
-
 def _usage_summary(attempts):
     totals = {}
     reported = 0
     missing = 0
+    counts = {key: 0 for key in COMPLETENESS_RANK}
+    by_completeness = {key: {} for key in ('complete', 'partial', 'unknown')}
     elapsed = 0.0
     elapsed_reported = 0
     elapsed_missing = 0
@@ -778,12 +783,12 @@ def _usage_summary(attempts):
     positions = {}
 
     def quality(attempt):
-        usage = _usage_record(attempt.get('usage'))
+        usage = attempt_usage(attempt)
         elapsed_value = attempt.get('elapsed_seconds')
         elapsed_ok = (isinstance(elapsed_value, (int, float))
                       and not isinstance(elapsed_value, bool)
                       and math.isfinite(elapsed_value) and elapsed_value >= 0)
-        return (int(usage['available']), len(usage.get('values', {})),
+        return (COMPLETENESS_RANK[usage['completeness']], len(usage.get('values', {})),
                 int(elapsed_ok), int(attempt.get('actual_model') is not None),
                 int(attempt.get('status') not in (None, 'running')))
 
@@ -803,12 +808,14 @@ def _usage_summary(attempts):
             selected[position] = attempt
 
     for attempt in selected:
-        usage = attempt.get('usage')
-        record = _usage_record(usage)
+        record = attempt_usage(attempt)
+        counts[record['completeness']] += 1
         if record['available']:
             reported += 1
             for key, value in record['values'].items():
                 totals[key] = totals.get(key, 0) + value
+                scoped = by_completeness[record['completeness']]
+                scoped[key] = scoped.get(key, 0) + value
         else:
             missing += 1
         value = attempt.get('elapsed_seconds')
@@ -819,6 +826,8 @@ def _usage_summary(attempts):
         else:
             elapsed_missing += 1
     return {'attempts_reported': reported, 'attempts_missing': missing,
+            'attempts_complete': counts['complete'], 'attempts_partial': counts['partial'],
+            'attempts_unknown': counts['unknown'], 'totals_by_completeness': by_completeness,
             'totals': totals, 'totals_are_provider_reported_only': True,
             'elapsed_seconds': elapsed,
             'elapsed_attempts_reported': elapsed_reported,
@@ -883,14 +892,25 @@ def _reconcile_captured_attempt(run_dir, summary, state_record, env):
     output = stdout_path.read_text(errors='replace')
     error = stderr_path.read_text(errors='replace') if stderr_path.is_file() else ''
     parsed = classify(provider, output, error, state_record.get('exit_code', 0))
-    if parsed.status != 'completed':
-        return False
     attempt = summary['attempts'][attempt_no]
+    if parsed.status != 'completed':
+        # A killed runner may leave only streamed observations. Persist them
+        # before an explicit retry creates a new attempt; do not call this a
+        # successful review, or overwrite an already stronger observation.
+        recovered = {'usage': parsed.usage, 'usage_info': parsed.usage_info or _usage_record(parsed.usage)}
+        if (COMPLETENESS_RANK[attempt_usage(recovered)['completeness']] >
+                COMPLETENESS_RANK[attempt_usage(attempt)['completeness']]):
+            attempt.update(recovered)
+            if attempt.get('status') in ('running', 'starting'):
+                attempt['status'] = 'interrupted'
+            summary['usage'] = _usage_summary(summary['attempts'])
+            save(Path(run_dir) / 'result.json', summary, env)
+        return False
     final_status = review_verdict(parsed.text) if parsed.status == 'completed' and summary.get('mode') == 'review' else parsed.status
     observation = _model_observation(attempt.get('requested_model'), parsed.actual_model,
                                      parsed.model_verified)
     attempt.update({'status': final_status, 'exit_code': state_record.get('exit_code', 0),
-                    'usage': parsed.usage, 'usage_info': _usage_record(parsed.usage),
+                    'usage': parsed.usage, 'usage_info': parsed.usage_info or _usage_record(parsed.usage),
                     'actual_model': parsed.actual_model, 'model_verified': observation['model_verified'],
                     'model_mismatch': observation['model_mismatch'],
                     'reconciled_from_output': True})
@@ -1128,20 +1148,22 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         if not records_streams or not stdout_path.exists():
             save(stdout_path, result.stdout, env)
             save(stderr_path, result.stderr, env)
-        parsed = (Result('incomplete', 'Output collection is still running') if result.output_pending
-                  else classify(provider,result.stdout,result.stderr,result.code))
+        parsed = classify(provider,result.stdout,result.stderr,result.code)
+        if result.output_pending:
+            parsed = replace(parsed, status='incomplete', text='Output collection is still running')
         if result.timed_out:
-            parsed = Result('timeout', actual_model=parsed.actual_model, model_verified=parsed.model_verified)
+            parsed = replace(parsed, status='timeout')
         elif result.code == 130:
-            parsed = Result('interrupted', actual_model=parsed.actual_model, model_verified=parsed.model_verified)
+            parsed = replace(parsed, status='interrupted')
         elif result.code == 127:
-            parsed = Result('executable_missing', parsed.text, parsed.usage, parsed.actual_model, parsed.model_verified)
+            parsed = replace(parsed, status='executable_missing')
         observation = _model_observation(model, parsed.actual_model, parsed.model_verified)
         attempt.update({'status':parsed.status,'exit_code':result.code,'usage':parsed.usage,
-                        'usage_info': _usage_record(parsed.usage),
+                        'usage_info': parsed.usage_info or _usage_record(parsed.usage),
                         'actual_model': parsed.actual_model,
                         'model_verified': observation['model_verified'],
                         'model_mismatch': observation['model_mismatch'],
+                        'finished_at': datetime.now(timezone.utc).isoformat(),
                         'elapsed_seconds': max(0, time.monotonic() - attempt_started)})
         summary.setdefault('model_observations', []).append(observation)
         summary['model_observation'] = observation
@@ -1265,7 +1287,7 @@ def doctor(env, current, probe=False, *, env_file=None, environment_mode='curren
         observed=classify('claude',p.stdout,p.stderr,p.code)
         report['claude_inference']={'status':'timeout' if p.timed_out else observed.status,
                                     'exit_code':p.code, 'actual_model':observed.actual_model,
-                                    'usage':observed.usage, 'usage_info':_usage_record(observed.usage),
+                                    'usage':observed.usage, 'usage_info':observed.usage_info or _usage_record(observed.usage),
                                     'observed_at':datetime.now(timezone.utc).isoformat(),
                                     'rate_limits':[e.get('rate_limit_info') for e in _events(p.stdout)
                                                    if e.get('type')=='rate_limit_event']}

@@ -7,9 +7,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
-import math
 from pathlib import Path
 import sys
+
+from .provider_usage import attempt_usage as _usage_state, claude_usage, COMPLETENESS_RANK
 
 
 _STATUS_BUCKETS = {
@@ -27,16 +28,6 @@ _STATUS_BUCKETS = {
     'failed': 'failed',
     'budget_exhausted': 'failed',
 }
-
-# Real provider-reported token counters only. Never widen this to arbitrary
-# numeric keys: providers also report unrelated percentages (e.g. subscription
-# quota remaining) that must never be summed as if they were token usage.
-_TOKEN_METRIC_KEYS = frozenset({
-    'input_tokens', 'output_tokens',
-    'cache_creation_input_tokens', 'cache_read_input_tokens',
-    'cached_input_tokens', 'cached_tokens', 'total_tokens',
-    'reasoning_output_tokens',
-})
 
 # macOS SF_DATALESS: file content lives only in iCloud and is not locally
 # materialized. Touching such files (even via read_text) can block for
@@ -79,40 +70,6 @@ def _is_dataless(path):
     return bool(flags & _SF_DATALESS)
 
 
-def _whitelisted_token_metrics(values):
-    if not isinstance(values, dict):
-        return {}
-    result = {}
-    for key, value in values.items():
-        if key not in _TOKEN_METRIC_KEYS:
-            continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        if not math.isfinite(value) or value < 0:
-            continue
-        result[key] = value
-    return result
-
-
-def _usage_state(attempt):
-    """Read provider usage, preferring the raw envelope over the derived one.
-
-    ``usage`` is the raw dict the provider returned. ``usage_info`` is a
-    derived summary the runner may have written; older records only have
-    ``usage_info`` and no raw ``usage``, so it is kept as a fallback for
-    historical records.
-    """
-    raw = attempt.get('usage')
-    if isinstance(raw, dict):
-        values = _whitelisted_token_metrics(raw)
-        return {'available': bool(values), 'values': values}
-    info = attempt.get('usage_info')
-    if isinstance(info, dict):
-        values = _whitelisted_token_metrics(info.get('values'))
-        return {'available': bool(info.get('available')) and bool(values), 'values': values}
-    return {'available': False, 'values': {}}
-
-
 def _attempt_identity(run_dir, record, ordinal):
     identity = record.get('attempt_id')
     if isinstance(identity, str) and identity:
@@ -124,19 +81,18 @@ def _attempt_identity(run_dir, record, ordinal):
 
 
 def _attempt_score(attempt):
-    """Rank candidate records for the same identity: prefer a terminal
-    (non-running) status, then richer usage, then the most recent timestamp,
-    so a later completed record replaces an earlier in-flight snapshot."""
+    """Prefer complete usage over partial snapshots of the same execution,
+    then terminal status, counter coverage and recency."""
     status = attempt.get('status') if isinstance(attempt.get('status'), str) else None
     is_terminal = _status_bucket(status) != 'running'
     usage = _usage_state(attempt)
     time = _parse_time(attempt.get('finished_at')) or _parse_time(attempt.get('started_at'))
     time_key = time.timestamp() if time is not None else float('-inf')
-    return (is_terminal, usage['available'], len(usage['values']), time_key)
+    return (COMPLETENESS_RANK[usage['completeness']], is_terminal, len(usage['values']), time_key)
 
 
 def _stdout_path(run_dir, attempt):
-    """Only Claude stdout is ever read for rate-limit events: Devin ATIF
+    """Only Claude stdout is read for usage recovery and rate-limit events: Devin ATIF
     trajectories can be very large, and non-Claude providers do not emit
     ``rate_limit_event`` records at all."""
     provider = attempt.get('provider')
@@ -151,15 +107,16 @@ def _stdout_path(run_dir, attempt):
     return path
 
 
-def _rate_limit_events(run_dir, attempt, skipped=None):
+def _stream_observations(run_dir, attempt, skipped=None):
     path = _stdout_path(run_dir, attempt)
     if path is None or not path.is_file():
-        return []
+        return [], attempt
     if _is_dataless(path):
         if skipped is not None:
             skipped.append({'path': str(path), 'reason': 'dataless_icloud_stdout_skipped'})
-        return []
+        return [], attempt
     events = []
+    usage_events = []
     try:
         with path.open(errors='replace') as handle:
             for line in handle:
@@ -170,7 +127,17 @@ def _rate_limit_events(run_dir, attempt, skipped=None):
                     record = json.loads(line)
                 except ValueError:
                     continue
-                if not isinstance(record, dict) or record.get('type') != 'rate_limit_event':
+                if not isinstance(record, dict):
+                    continue
+                if record.get('type') in ('assistant', 'result'):
+                    # Usage recovery needs no message content (potentially huge
+                    # tool inputs); retain only the provider counters and IDs.
+                    message = record.get('message')
+                    usage_events.append({key: record.get(key) for key in
+                                         ('type', 'subtype', 'is_error', 'usage', 'parent_tool_use_id')} |
+                                        {'message': {key: message.get(key) for key in ('id', 'usage')}
+                                         if isinstance(message, dict) else None})
+                if record.get('type') != 'rate_limit_event':
                     continue
                 info = record.get('rate_limit_info')
                 if not isinstance(info, dict):
@@ -186,9 +153,15 @@ def _rate_limit_events(run_dir, attempt, skipped=None):
                     'source': 'stdout_rate_limit_event', 'rate_limit_info': info,
                     'timestamp_source': timestamp_source,
                 })
-    except OSError:
-        return []
-    return events
+    except OSError as exc:
+        if skipped is not None:
+            skipped.append({'path': str(path), 'reason': str(exc)})
+    usage, info = claude_usage(usage_events)
+    recovered = {**attempt, 'usage': usage, 'usage_info': info}
+    if (COMPLETENESS_RANK[_usage_state(recovered)['completeness']] >
+            COMPLETENESS_RANK[_usage_state(attempt)['completeness']]):
+        attempt = recovered
+    return events, attempt
 
 
 def _iter_result_paths(root, skipped):
@@ -269,7 +242,12 @@ def build_usage_report(vault, *, since=None, run_dir=None):
                 continue
             attempts_total += 1
             identity = _attempt_identity(identity_dir, attempt, ordinal)
-            candidate = (attempt, this_run_dir)
+            started = _parse_time(attempt.get('started_at'))
+            if since_dt is not None and (started is None or started < since_dt):
+                stream_events = []
+            else:
+                stream_events, attempt = _stream_observations(this_run_dir, attempt, runs_skipped)
+            candidate = (attempt, this_run_dir, stream_events)
             existing = candidates.get(identity)
             if existing is None:
                 candidates[identity] = candidate
@@ -284,7 +262,7 @@ def build_usage_report(vault, *, since=None, run_dir=None):
     attempts_selected = 0
 
     for identity in identity_order:
-        attempt, this_run_dir = candidates[identity]
+        attempt, this_run_dir, stream_events = candidates[identity]
         attempts_deduplicated += 1
 
         started = _parse_time(attempt.get('started_at'))
@@ -306,6 +284,9 @@ def build_usage_report(vault, *, since=None, run_dir=None):
                 'requested_models': [], 'attempts': 0,
                 'status_counts': {}, 'usage_reported_attempts': 0,
                 'usage_missing_attempts': 0, 'token_totals': {},
+                'usage_complete_attempts': 0, 'usage_partial_attempts': 0,
+                'usage_unknown_attempts': 0,
+                'token_totals_by_completeness': {'complete': {}, 'partial': {}, 'unknown': {}},
             }
             group_order.append(key)
         group = groups[key]
@@ -315,12 +296,15 @@ def build_usage_report(vault, *, since=None, run_dir=None):
         group['status_counts'][bucket] = group['status_counts'].get(bucket, 0) + 1
         if usage['available']:
             group['usage_reported_attempts'] += 1
+            group['usage_' + usage['completeness'] + '_attempts'] += 1
             for token_key, value in usage['values'].items():
                 group['token_totals'][token_key] = group['token_totals'].get(token_key, 0) + value
+                scoped = group['token_totals_by_completeness'][usage['completeness']]
+                scoped[token_key] = scoped.get(token_key, 0) + value
         else:
             group['usage_missing_attempts'] += 1
 
-        rate_limit_events.extend(_rate_limit_events(this_run_dir, attempt, runs_skipped))
+        rate_limit_events.extend(stream_events)
 
     return {
         'generated_at': datetime.now(timezone.utc).isoformat(),
@@ -345,6 +329,9 @@ def emit_usage(report, *, as_json=False):
         totals = ', '.join(f'{key}={value}' for key, value in group['token_totals'].items()) or 'none reported'
         lines.append(f'{provider}  {model}  (requested: {aliases})  attempts={group["attempts"]}  '
                      f'usage_reported={group["usage_reported_attempts"]} '
+                     f'usage_complete={group["usage_complete_attempts"]} '
+                     f'usage_partial={group["usage_partial_attempts"]} '
+                     f'usage_unknown={group["usage_unknown_attempts"]} '
                      f'usage_missing={group["usage_missing_attempts"]}  status={group["status_counts"]}  tokens: {totals}')
     for event in report['rate_limit_events']:
         lines.append(f'rate_limit: {event["provider"]} {event["timestamp"]} {event["rate_limit_info"]}')
@@ -352,5 +339,6 @@ def emit_usage(report, *, as_json=False):
         lines.append(f'skipped {len(report["runs_skipped"])} unavailable/malformed record(s)')
         for skipped in report['runs_skipped']:
             lines.append(f"  {skipped['path']}: {skipped['reason']}")
-    lines.append('Token counts are observed usage, not subscription remaining percentages. Rate limits are historical observations.')
+    lines.append('Partial usage is incomplete; unknown means usage scope was not recorded. '
+                 'Token counts are observed usage, not subscription remaining percentages. Rate limits are historical observations.')
     return '\n'.join(lines)

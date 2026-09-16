@@ -107,7 +107,7 @@ provider の stdout / stderr は実行中から redaction collector を通して
 
 `sonnet` などのClaude公式aliasと対応する実モデルの違いは `match_type=provider_alias` として記録する。
 
-`requested_model` は設定値、`actual_model` は provider が明示的に返した値だけを記録する。provider が model identity や usage を返さない場合、要求値や推定値で補わず `null` / `provider_did_not_report` とする。usage の集計は provider が報告した numeric fields のみを合算する。
+`requested_model` は設定値、`actual_model` は provider が明示的に返した値だけを記録する。provider が model identity や usage を返さない場合、要求値や推定値で補わず `null` / `provider_did_not_report` とする。usage の集計は provider が報告した有限・非負のトークンカウンターのみを合算する。
 
 Claude は `--safe-mode`、Codex は `--ignore-user-config` で旧カスタマイズを持ち込まず、共通方針と指定 role を明示的に渡す。Claude の `--bare` は保存済み OAuth/Keychain を使わないため採用しない。これらの設定は今回の子プロセスだけに適用し、既存の CLI 設定ファイルは変更しない。Claude の管理者ポリシーは引き続き適用される。
 
@@ -160,6 +160,26 @@ python3 -m harness doctor --probe
 `usage` はVaultの保存済み実行を読み、provider・実モデルごとの実行件数、結果、
 入力・出力・キャッシュのトークン数を表示する。CLIの推論や認証取得は行わない。
 同じattemptの重複はまとめ、使用量がない記録は「未観測」として数える。
+`usage_info.completeness` と集計の件数・内訳で `complete`（成功した終端resultの累計）、
+`partial`（途中観測またはエラーresult）、`missing`（未観測）、`unknown`（範囲未記録）
+を区別する。今回の完全性判定はClaude用であり、Codex/Devinおよび範囲未保存の旧記録は
+値を保持したまま `unknown` とする。`token_totals` / `totals` は観測値の合計であり、部分観測を含む場合は
+実行全体の確定総数ではない。範囲別の値は `token_totals_by_completeness` /
+`totals_by_completeness` を参照する。
+
+Claudeの途中usageは main loop のメッセージIDで重複除去した入力・キャッシュだけを
+保存する。途中の `output_tokens` は応答開始時のplaceholderなので出力総数へ足さず、
+stream deltaも重ねて足さない。最終resultを観測したら、その累計で置き換える。
+エラーresultがゼロに初期化されていた場合は取得済みの入力・キャッシュを保持する。
+途中観測もなければ消費ゼロを確定せず `missing` とする。
+IDがない応答、同じIDの矛盾する入力カウンター、子エージェントの応答は推測して合算しない。
+timeout・中断でも取得済みusageを保持し、起動だけでレビュー成功とは扱わない。
+旧記録の不足はローカルにあるClaude stdoutから読み取りで補い、元のresultは変更しない。
+仕様: [Claude Code usage](https://code.claude.com/docs/en/agent-sdk/cost-tracking)。
+
+`--no-session-persistence` の実行はCLIの会話履歴を保存しない。
+履歴を元にする統計、harnessの観測トークン、Claude契約枠の残量は別の指標であり、
+履歴画面に表示がないことを未実行・消費ゼロの根拠にしない。
 不正な記録やiCloudの未取得ファイルは取得できなかった理由を表示する。
 `--run-dir` はVaultのagent-runs内に限定し、サービスの入れ子の実行も対象にできる。
 
