@@ -17,6 +17,21 @@ allowed-tools: Read, Grep, Glob, Bash
 
 ## Current entry
 
+### Agents VaultのChatGPT参照用コピー
+
+`Saber5656/obsidian-for-ai-agents` の文書同期を依頼された場合は、
+`scripts/vault_context_sync.py --env-file "$AGENTS_ROOT/.env"` で準備し、
+公開が許可されていれば `--publish` を付ける。これは元VaultのGit履歴を送らず、
+検査済みMarkdown全文と索引をGitHubの最新mainから通常pushする経路。
+既存の日次ニュースのGit helperを再利用する。範囲・保留・結果は
+`docs/vault-context-sync.md` と生成manifestで確認し、全ファイル同期とは報告しない。
+元履歴・生ログは正本に保持する。remoteで同じ文書が変わった場合は上書きしない。
+
+以下の `harness.publication.publish_scoped` は現在 `Saber5656/Agents` を
+対象に固定されている。Vault公開時にrepository名を偽ってこの制限を回避しない。
+
+### Agentsリポジトリの選択変更
+
 実行開始に必要なのは、現在の task context にある次の情報だけです。
 
 - 利用者の明示的な操作 authorization（`save` または `publish`）
