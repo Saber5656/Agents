@@ -28,6 +28,14 @@ class ExportTests(unittest.TestCase):
         value = 'ghp_' + 'a' * 30
         self.assertNotIn(value, sync.sanitize('token=' + value, {}))
 
+    def test_home_path_examples_and_bare_prefixes_pass_public_filter(self):
+        from harness.delivery import public_text
+        prefix = '/' + 'Users' + '/'
+        text = 'example ' + prefix + '<name>/notes and `' + prefix + '`'
+        cleaned = sync.sanitize(text, {})
+        public_text(cleaned)
+        self.assertNotIn(prefix, cleaned)
+
     def test_discovery_excludes_copies_binaries_and_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

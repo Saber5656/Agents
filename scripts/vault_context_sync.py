@@ -23,6 +23,7 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness.runner import load_dotenv, redact
+from harness.delivery import public_text, DeliveryError
 from daily_it_news_runtime import run_command
 
 REMOTE = 'git@github.com:Saber5656/obsidian-for-ai-agents.git'
@@ -84,6 +85,10 @@ def sanitize(text, env):
     result = re.sub(r'/(?:Users|home)/[^/\s"\'<>`\\]+', '$HOME', result)
     result = re.sub(r'(?:/private)?/var/folders/[^\s"\'<>`]+', '$TMPDIR', result)
     result = re.sub(r'[A-Za-z]:\\Users\\[^\\\s"\'<>`]+', '$HOME', result)
+    # Template examples and a bare home-root prefix must also satisfy the
+    # publication validator. They are not real user names but have the same
+    # syntax and must not bypass the final check.
+    result = re.sub(r'/(?:Users|home)/(?:<[^>\n]+>)?', '$HOME', result)
     return result
 
 
@@ -144,7 +149,13 @@ def prepare(root, runtime, env, gitleaks, *, deadline=180):
         if (old.get('fingerprint') == info and old.get('policy') == POLICY_VERSION
                 and destination.is_file() and not destination.is_symlink()
                 and hashlib.sha256(destination.read_bytes()).hexdigest() == old.get('sha256')):
-            entries[name] = old
+            try:
+                cleaned = sanitize(destination.read_text(), env).encode()
+                public_text(cleaned.decode())
+                destination.write_bytes(cleaned)
+                entries[name] = dict(old, sha256=hashlib.sha256(cleaned).hexdigest())
+            except (ValueError, DeliveryError):
+                withheld.append({'path': name, 'reason': 'privacy_rejected'})
         else:
             pending.append((name, info))
 
@@ -154,6 +165,7 @@ def prepare(root, runtime, env, gitleaks, *, deadline=180):
             return name, info, None, 'read_budget_exhausted'
         try:
             text = sanitize(read_document(Path(root) / name, info), env)
+            public_text(text)
             return name, info, text.encode(), None
         except subprocess.TimeoutExpired:
             return name, info, None, 'source_read_timeout'
