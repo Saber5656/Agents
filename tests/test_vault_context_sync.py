@@ -56,6 +56,20 @@ class ExportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 sync.read_document(p, before, timeout=2)
 
+    def test_export_normalizes_macos_decomposed_names_for_git(self):
+        import unicodedata
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'vault'; runtime = Path(tmp) / 'runtime'
+            (root / '01-Projects').mkdir(parents=True)
+            raw = '01-Projects/' + unicodedata.normalize('NFD', 'レポート.md')
+            (root / raw).write_text('完全な本文\n')
+            scanner = Path(tmp) / 'scanner'; scanner.write_text('#!/bin/sh\nexit 0\n'); scanner.chmod(0o755)
+            files, manifest = sync.prepare(root, runtime, {}, str(scanner))
+            expected = unicodedata.normalize('NFC', raw)
+            self.assertIn(expected, files)
+            self.assertIn(expected, manifest['documents'])
+            self.assertEqual('完全な本文\n', (runtime / 'snapshot' / expected).read_text())
+
     def test_index_uses_source_time_and_links_not_poll_time(self):
         entries = {'01-Projects/demo/task.md': {'mtime_ns': 1_700_000_000_000_000_000, 'sha256': 'a'}}
         first = sync.index_document(entries, [])

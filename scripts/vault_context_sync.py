@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -142,10 +143,14 @@ def prepare(root, runtime, env, gitleaks, *, deadline=180):
     cache_file = runtime / 'cache.json'
     cache = json.loads(cache_file.read_text()) if cache_file.exists() else {}
     files, excluded = discover(root)
+    names = {name: unicodedata.normalize('NFC', name) for name in files}
+    if len(set(names.values())) != len(names):
+        raise RuntimeError('source_names_collide_after_unicode_normalization')
+    source_names = {canonical: source for source, canonical in names.items()}
     entries, withheld, pending = {}, [], []
     for name, info in files.items():
         old = cache.get(name, {})
-        destination = snapshot / name
+        destination = snapshot / names[name]
         if (old.get('fingerprint') == info and old.get('policy') == POLICY_VERSION
                 and destination.is_file() and not destination.is_symlink()
                 and hashlib.sha256(destination.read_bytes()).hexdigest() == old.get('sha256')):
@@ -179,15 +184,16 @@ def prepare(root, runtime, env, gitleaks, *, deadline=180):
         for name, info, content, error in pool.map(read_one, pending):
             if error:
                 withheld.append({'path': name, 'reason': error}); continue
-            target = snapshot / name; target.parent.mkdir(parents=True, exist_ok=True)
+            target = snapshot / names[name]; target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
             entries[name] = {'fingerprint': info, 'mtime_ns': info[1], 'policy': POLICY_VERSION,
                              'sha256': hashlib.sha256(content).hexdigest()}
     # Remove stale files only from this private disposable export, never source
     # files or remote files. This also prevents previously cached private input
     # from entering a new snapshot after a failed re-read.
+    kept = {names[name] for name in entries}
     for p in snapshot.rglob('*'):
-        if p.is_file() and p.relative_to(snapshot).as_posix() not in entries:
+        if p.is_file() and unicodedata.normalize('NFC', p.relative_to(snapshot).as_posix()) not in kept:
             p.unlink()
     report = runtime / 'gitleaks.json'
     scan = run_command([gitleaks, 'dir', str(snapshot), '--no-banner', '--redact',
@@ -203,12 +209,13 @@ def prepare(root, runtime, env, gitleaks, *, deadline=180):
             name = finding['File']
             if Path(name).is_absolute():
                 name = Path(name).relative_to(snapshot).as_posix()
+            name = source_names.get(unicodedata.normalize('NFC', name), name)
             if name not in entries and name not in rejected:
                 raise RuntimeError('secret_scanner_unexpected_path')
             rejected.add(name)
         for name in sorted(rejected):
             entries.pop(name, None)
-            (snapshot / name).unlink(missing_ok=True)
+            (snapshot / names[name]).unlink(missing_ok=True)
             withheld.append({'path': name, 'reason': 'secret_scan_rejected'})
     atomic_json(cache_file, entries)
     if 'README.md' in entries:
@@ -219,6 +226,7 @@ def prepare(root, runtime, env, gitleaks, *, deadline=180):
             readme.write_text(body.rstrip() + '\n\n' + marker + '\n\n公開対象・未取得ファイル・原記録へのリンクは上の索引から確認できます。\n')
             entries['README.md']['sha256'] = hashlib.sha256(readme.read_bytes()).hexdigest()
             atomic_json(cache_file, entries)
+    entries = {names[name]: value for name, value in entries.items()}
     withheld = sorted(withheld, key=lambda x: (x['path'], x['reason']))
     manifest = {'policy_version': POLICY_VERSION, 'scope': 'complete_markdown_documents',
                 'document_count': len(entries), 'excluded_directories': excluded,
