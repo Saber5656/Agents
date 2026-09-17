@@ -1,0 +1,14 @@
+---
+description: Expo / React Native の作業開始・動作確認・QR提供時のSDK互換性確認
+alwaysApply: true
+---
+
+# モバイル SDK 互換性
+
+Expo / React Native の実装・UI改善・動作確認・デモ・QR提供時は、[SDK互換性方針](../../policies/mobile-sdk-compatibility.md)を読む。
+
+- 端末のExpo Go対応SDK・プロジェクトの実依存・公開manifestを作業開始時と引き渡し前に照合する。
+- 過去のSDK番号を固定しない。既知の不一致があれば利用可能なQRとして渡さない。
+- HTTP200、doctor、export、CI成功だけで実機動作確認済みとしない。
+
+Codexで常時参照する入口は `COMMON-AGENTS.md`。このCursorルールだけに依存しない。
