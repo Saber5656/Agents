@@ -21,7 +21,7 @@ class VaultContextPublicationTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
         self.remote = root / "remote.git"
-        subprocess.run(["git", "init", "--bare", str(self.remote)], check=True, capture_output=True)
+        subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(self.remote)], check=True, capture_output=True)
         work = root / "seed"
         subprocess.run(["git", "clone", str(self.remote), str(work)], check=True, capture_output=True)
         git(work, "switch", "-c", "main")
