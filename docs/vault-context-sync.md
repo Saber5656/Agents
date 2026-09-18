@@ -55,9 +55,31 @@ baseline/ledger/receipt全体の削除や無条件の期待値更新はしない
 `no_op` もremoteの内容一致を確認した結果。文書取得・秘密値検査の保留は公開成否と別に数える。
 スクリプト自身はschedulerや通知を登録しない。周期実行の設定は呼び出し元で管理する。
 
+## launchd runner
+
+定期実行は `scripts/vault_sync_scheduled.py` を launchd から 1800 秒間隔で起動する。
+`--env-file` はAgents正本の `.env`、`--workdir` は `dev/scheduled/vault-github` のような専用ディレクトリを指定する。同期state（ledger、baseline、receipt、lock、`last-result.json`）は引き続き `AGENTS_ROOT/.local/vault-context-sync` に保存し、runnerのlock・ログ・AI実行メタデータだけをscheduled workdirに置く。
+
+例（個人パスは環境に合わせて置換）:
+
+```sh
+python3 "$AGENTS_ROOT/scripts/vault_sync_scheduled.py" \
+  --env-file "$AGENTS_ROOT/.env" \
+  --workdir "$SCHEDULED_ROOT/vault-github"
+```
+
+runnerは一度に一つだけ実行し、canonical sync、publication、delivery、runtime、runnerが未追跡または未コミットなら停止する。固定されたホストコマンドが既存publisherを一度実行し、AIを起動する前に検証結果を取得する。Lunaにはこのcompactな観測を渡して、成功・保留・競合の診断を依頼する。子プロセスは `--ephemeral` の `gpt-5.6-luna` / `max` 固定、read-only sandboxで、stateの書き込み権限やnetwork許可は与えない。`project_doc_max_bytes=0`、`skills.max_context_tokens=1`、承認なしと不要な機能無効化を渡す。子の環境は既存ログインに必要なHOME/PATH等に限定し、publisherの `.env` やAPIキーを継承しない。publisherは最大360秒、AIは全体900秒の残り時間でプロセスグループtimeoutを持つ。Vault内の文書・出力は資料として扱う。実行結果はcanonicalのfreshな `last-result.json` と一致する `last-success.json`、40桁のcommit、remote commitを再確認し、モデルが成功と主張してもfreshな検証結果がなければ失敗扱いにする。Codex JSONLの `turn.completed` と終了コード、報告されたusage/modelだけを記録し、未報告の値は補完しない。
+
+AIログは `workdir/runs/<UTC時刻>/stdout.jsonl` と `stderr.jsonl` に完全な（秘密値・個人パスを除去した）内容をprivate保存する。`publication.stdout.log` / `publication.stderr.log` は固定publisherのログを保持する。`last-result.json` にはcompactなreceipt metadataとログのパスだけを保存し、publicationのblob一覧は保存しない。`seen-withheld.json` は初回tick前の `prepared.json` を基準にし、既知の保留理由の揺れを繰り返し通知しない。新しい保留パスまたは保留数の増加、未完了・競合・実行失敗は、failure type・reason・保留パス集合を鍵に `alert.json` へ一度だけ記録する。成功時はactive failureを解除し、次回の再発は新しい通知として扱う。`--notify` を付けた場合だけmacOSの固定文言通知を試みるが、通知の失敗は同期結果を変えない。Discordなど外部通知は行わない。
+
+launchdの導入・停止は呼び出し元で管理する。停止時はplistをunloadし、scheduled workdirを保持したまま次回同じコマンドで再開できる。既存heartbeatと重複起動させない。
+
+ロールバックはlaunchdのplistをunloadしてからscheduled workdirを保持し、runnerの呼び出しを止める。canonicalのledger、baseline、receipt、remoteの公開内容は削除・巻き戻しせず、再開時は同じworkdirを指定する。コードの復旧はGitで必要な変更だけをレビュー済みの状態へ戻してから再開する。
+
 ## 検証
 
 ```sh
+python3 -m unittest tests.test_vault_sync_scheduled
 python3 -m unittest discover -s tests -p 'test_vault_context*.py'
 python3 -m unittest discover -s tests -p 'test_daily_it_news_delivery.py'
 ```
