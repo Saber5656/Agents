@@ -13,7 +13,7 @@ local tasks. Redact secrets and state missing/truncated history explicitly.
 
 Delegate ordinary independent implementation, research and writing to Claude,
 and request reviews from a separate Claude execution by default (Sonnet/low).
-Astra coordinates scope, adoption of findings and final quality. Use Codex
+The agent directly receiving the user request coordinates scope, adoption of findings and final quality (Astra for Codex, the native agent for Devin/Hermes/Cursor). Native applications keep their own models and features; launching Codex is not a prerequisite. Use Codex
 Luna/low automatically on actual provider quota exhaustion; authentication,
 permission, network and timeout failures are distinct. Direct Codex selection
 needs a task-specific reason. Tiny inseparable work may stay with the lead.

@@ -2,6 +2,8 @@
 
 既存 CLI の認証を利用し、作業・レビューを一回の実行として扱う。Python 標準ライブラリだけで動作する。role は選んだ一件を文脈として渡し、計画や実装方法はモデルに任せる。
 
+各アプリから直接開始する共通指示の導入は [cross-agent-instructions.md](../docs/cross-agent-instructions.md) を参照する。Devin DesktopやHermesの主担当をこのCLIに置き換える必要はない。
+
 ## 準備
 
 リポジトリ直下の `.env.example` を参考に、ローカル `.env` の環境変数を設定する。既存の Vault を指定する。
@@ -55,7 +57,7 @@ python3 -m harness gh -- auth status --active
 ## 作業とレビュー
 
 通常の独立した実装・調査・文書化とレビューは原則 Claude に依頼する。
-Astra は全体の判断・成果の統合・指摘の採否を担当する。`run` / `review` は
+起動元の主担当（CodexではAstra、Devin / Hermes / Cursorではそのエージェント）は全体の判断・成果の統合・指摘の採否を担当する。`run` / `review` は
 Claude Sonnet/low が既定で、実際の利用上限時だけ同じ成果を Codex Luna/low
 へ渡す。Codex を直接選ぶ場合は明示指定や必要な機能など理由を残す。
 入口が用意されているだけでは分散されないため、主担当も通常の作業計画に
