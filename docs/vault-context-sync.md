@@ -12,7 +12,7 @@ python3 "$AGENTS_ROOT/scripts/vault_context_sync.py" --env-file "$AGENTS_ROOT/.e
 ```
 
 既存の `.env` にある `AGENTS_ROOT` と `AGENTS_VAULT_ROOT` を明示的に読み込む。
-`git`、既存GitHub認証、`gitleaks` が必要。`GITLEAKS_BIN` を設定する場合はその実体を使う。
+`git`、既存GitHub認証、`gitleaks` が必要。commitの作成者情報（`user.name` / `user.email`）はローカルの `AGENTS_ROOT` のGit設定から取得し、iCloud上の原VaultのGit管理ファイルには依存しない。`GITLEAKS_BIN` を設定する場合はその実体を使う。
 初期の大量文書取得では `--read-budget 600` で読み取り時間を延長できる。
 通常は180秒。各ファイルの読み取りは3秒、並列数は8に限定する。
 

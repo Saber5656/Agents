@@ -10,6 +10,32 @@ import vault_context_sync as sync
 
 
 class ExportTests(unittest.TestCase):
+    def test_publication_identity_does_not_read_cloud_vault_git_metadata(self):
+        import contextlib
+        import io
+        import json
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); agents = root / 'agents'; vault = root / 'vault'
+            agents.mkdir(); vault.mkdir()
+            subprocess.run(['git', 'init', str(agents)], capture_output=True, check=True)
+            for key, value in [('user.name', 'Fixture'), ('user.email', 'fixture@example.invalid')]:
+                subprocess.run(['git', '-C', str(agents), 'config', key, value], check=True)
+            # The source documents are valid even when iCloud Git metadata is
+            # unreadable. Its history is not part of the publication transport.
+            (vault / '.git').write_text('invalid git metadata')
+            env_file = root / '.env'
+            env_file.write_text(f'AGENTS_ROOT="{agents}"\nAGENTS_VAULT_ROOT="{vault}"\nGITLEAKS_BIN=fixture\n')
+            receipt = {'status': 'no_op', 'commit': 'a' * 40, 'observed_remote': 'a' * 40, 'selected_blob': {}}
+            with patch.object(sys, 'argv', ['sync', '--env-file', str(env_file), '--publish']), \
+                 patch.object(sync, 'remote_tree', return_value=('a' * 40, {})), \
+                 patch.object(sync, 'prepare', return_value=([], {'document_count': 0, 'withheld': []})), \
+                 patch('vault_context_publication.publish_snapshot', return_value=receipt) as publish, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                sync.main()
+            self.assertEqual(('Fixture', 'fixture@example.invalid'), publish.call_args.args[4:6])
+            self.assertEqual('no_op', json.loads((agents / '.local/vault-context-sync/last-success.json').read_text())['status'])
+
     def test_full_document_is_preserved_except_private_values(self):
         fake_home = '/' + 'Users' + '/' + 'example'
         fake_linux = '/' + 'home' + '/' + 'example'

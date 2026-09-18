@@ -290,7 +290,8 @@ def main():
     args = parser.parse_args()
     env = load_dotenv(args.env_file, dict(os.environ))
     root = Path(env['AGENTS_VAULT_ROOT']).resolve()
-    runtime = Path(env['AGENTS_ROOT']) / '.local/vault-context-sync'
+    agents_root = Path(env['AGENTS_ROOT']).resolve()
+    runtime = agents_root / '.local/vault-context-sync'
     runtime.mkdir(parents=True, exist_ok=True)
     lock = open(runtime / 'sync.lock', 'a')
     try:
@@ -316,8 +317,10 @@ def main():
             baseline = json.loads(baseline_file.read_text())['blobs']
             expected = {name: ledger.get(name, baseline.get(name)) for name in files}
             from daily_it_news_delivery import _git
-            git_name = _git(['config', 'user.name'], root)
-            git_email = _git(['config', 'user.email'], root)
+            # Source Vault Git metadata may be an unavailable iCloud placeholder.
+            # This publication uses the local Agents environment, not its history.
+            git_name = _git(['config', 'user.name'], agents_root)
+            git_email = _git(['config', 'user.email'], agents_root)
             run = runtime / 'runs' / dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
             intended = {}
             for name in files:
