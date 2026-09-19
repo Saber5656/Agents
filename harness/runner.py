@@ -71,6 +71,7 @@ class Job:
     task_id: str | None = None
     task_store_db: Path | None = None
     devin_model: str = 'swe-2-medium'
+    cursor_model: str | None = None
 
 
 @dataclass
@@ -497,6 +498,20 @@ def _classify(provider, output, error, code):
     events = _events(output)
     if provider == 'devin':
         return _classify_devin(events, error, code)
+    if provider == 'cursor':
+        model = _actual_model(events)
+        terminal = next((e for e in reversed(events) if e.get('type') == 'result'), {})
+        text = terminal.get('result')
+        text = text if isinstance(text, str) else ''
+        usage = _usage_record(terminal.get('usage')).get('values')
+        if terminal.get('permission_denials'):
+            return Result('permission_denied', text, usage, model, model is not None)
+        if (code == 0 and terminal.get('subtype') == 'success'
+                and terminal.get('is_error') is False and text.strip()):
+            return Result('completed', text, usage, model, model is not None)
+        message = '\n'.join(part for part in (text if terminal.get('is_error') else '', error) if part)
+        return Result(_error_status(message), message or 'Cursor did not return a successful terminal result',
+                      usage, model, model is not None)
     if provider not in ('claude', 'codex'):
         raise ValueError('Unknown provider: ' + provider)
     actual_model = _actual_model(events)
@@ -548,6 +563,13 @@ def _classify(provider, output, error, code):
 
 
 def build_command(provider, mode, model, effort, *, add_dirs=(), output_schema=None):
+    if provider == 'cursor':
+        if mode != 'run':
+            raise ValueError('Cursor review is not supported; select Claude or Codex for read-only review')
+        if not isinstance(model, str) or not model.strip() or model.startswith('-'):
+            raise ValueError('Cursor model is required; choose an available model with cursor-agent models')
+        return ['cursor-agent', '--print', '--output-format', 'stream-json', '--model', model,
+                '--sandbox', 'enabled', '--trust', '--auto-review']
     if provider == 'devin':
         if mode != 'run':
             raise ValueError('Devin review is not supported; select Claude or Codex for read-only review')
@@ -1002,7 +1024,8 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         raise ValueError('Existing workspace and AGENTS_VAULT_ROOT directories are required')
     if job.timeout <= 0:
         raise ValueError('timeout must be positive')
-    model = {'claude': job.claude_model, 'codex': job.codex_model, 'devin': job.devin_model}.get(job.provider)
+    model = {'claude': job.claude_model, 'codex': job.codex_model, 'devin': job.devin_model,
+             'cursor': job.cursor_model}.get(job.provider)
     build_command(job.provider, job.mode, model, job.effort)
     env = child_env(env)
     capture_dirs = _capture_dirs(job, env) if job.mode == 'run' else []
@@ -1082,7 +1105,8 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
     summary['configured_limits'] = {
         'timeout_seconds': job.timeout,
         'provider': job.provider,
-        'effort': job.devin_model.rsplit('-',1)[-1] if job.provider == 'devin' else job.effort,
+        'effort': (None if job.provider == 'cursor' else
+                   job.devin_model.rsplit('-',1)[-1] if job.provider == 'devin' else job.effort),
         'fallback_enabled': bool(job.fallback),
     }
     if capture_config:
@@ -1117,7 +1141,8 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         if remaining <= 0:
             summary['status'] = 'timeout'
             break
-        model = {'claude': job.claude_model, 'codex': job.codex_model, 'devin': job.devin_model}[provider]
+        model = {'claude': job.claude_model, 'codex': job.codex_model, 'devin': job.devin_model,
+                 'cursor': job.cursor_model}[provider]
         attempt_no = len(summary['attempts'])
         argv = build_command(provider, job.mode, model, job.effort,
                              add_dirs=capture_dirs if provider == 'codex' else (),
@@ -1132,7 +1157,9 @@ def _run_job(job, env, executor=None, run_dir=None, resume=False):
         save(run_dir/f'{stem}-command.json', argv, env)
         attempt = {'attempt_number': attempt_no, 'attempt_id': f'{run_dir.name}:{attempt_no}',
                    'provider':provider, 'requested_model':model,
-                   'requested_effort':model.rsplit('-', 1)[-1] if provider == 'devin' else job.effort, 'timeout_seconds':remaining,
+                   'requested_effort': (None if provider == 'cursor' else
+                                        model.rsplit('-', 1)[-1] if provider == 'devin' else job.effort),
+                   'timeout_seconds':remaining,
                    'status':'running',
                    'started_at':datetime.now(timezone.utc).isoformat(),
                    'state_record':state_path.name}
@@ -1330,7 +1357,8 @@ def main(argv=None):
         p.add_argument('--prompt-file',type=Path,required=True)
         p.add_argument('--role',default='tech-reviewer' if mode=='review' else None,
                        help='Name of one roles/*.md document; review defaults to tech-reviewer')
-        p.add_argument('--provider',choices=('claude','codex','devin'),default='claude')
+        p.add_argument('--provider',choices=('claude','codex','devin','cursor'),default='claude')
+        p.add_argument('--cursor-model', help='Explicit model ID from cursor-agent models; required for Cursor')
         p.add_argument('--devin-model', choices=('swe-2-medium','swe-2-high','swe-2-max'), default='swe-2-medium')
         p.add_argument('--claude-model',default='sonnet')
         p.add_argument('--codex-model',default='gpt-5.6-luna')
@@ -1404,7 +1432,7 @@ def main(argv=None):
         job=Job(args.workspace.resolve(),vault.resolve(),prompt, args.command,args.provider,
                 args.claude_model,args.codex_model,args.effort,args.timeout,not args.no_fallback,
                 args.run_dir.resolve() if args.run_dir else None,
-                args.task_id, args.task_db.resolve() if args.task_db else None, args.devin_model)
+                args.task_id, args.task_db.resolve() if args.task_db else None, args.devin_model, args.cursor_model)
         if args.resume and job.run_dir is None:
             raise ValueError('--resume requires --run-dir')
         result=run_job(job,env,run_dir=job.run_dir,resume=args.resume)

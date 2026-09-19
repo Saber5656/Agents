@@ -80,3 +80,10 @@ Hermesには [会話保存機構](hermes-vault-context.md) を追加し、Discor
 - [Cursor user rule files](https://prod.cursor.com/help/customization/rules)
 - Hermes: installed `agent/prompt_builder.py` の `load_soul_md` / `build_context_files_prompt`。
   SOULはHERMES_HOMEから読み込み、AGENTSはcwdだけを探索するため、SOULに入口を配置。
+
+## CodexからCursorへ委譲する
+
+Cursor Desktopを開かず、公式CLIを `harness run --provider cursor` から呼べる。
+初回の本人認証、明示的なモデル選択、Vault記録、実行範囲は
+[harness README](../harness/README.md#codexなどからcursor-agentを呼ぶ)を参照する。
+ネイティブ起動用の共通指示と併用できる。

@@ -245,3 +245,41 @@ python3 -m unittest discover -s tests -v
 ストリーム記録は完全な行ごとに秘密値を伏せて保存する。改行されていない
 末尾は EOF まで保留し、複数行の秘密鍵は本文を保存しない。ログの読み戻しは
 外部操作の exactly-once を保証しない。未知の公開結果は別途 GitHub で照合する。
+
+## CodexなどからCursor Agentを呼ぶ
+
+公式Cursor CLIをインストールし、通常のターミナルで `cursor-agent login`、
+`cursor-agent status`、`cursor-agent models` を実行する。Desktopへのログインとは
+別にCLIのブラウザ認証が必要な場合がある。API keyへの切り替えは行わない。
+
+```sh
+python3 -m harness run --provider cursor --cursor-model MODEL_ID \
+  --workspace "$PROJECT_ROOT" --prompt-file "$AGENTS_VAULT_ROOT/request.md" --timeout 900
+```
+
+`MODEL_ID` は `cursor-agent models` に表示される利用可能なモデルID、
+`PROJECT_ROOT` は依頼対象の既存作業ディレクトリに置き換える。
+モデルは明示指定を必須とし、既定モデルや別providerへ自動切り替えしない。
+`--effort` はCursorへ渡さず、記録も未指定とする。
+
+この入口は公式CLIの `--print --output-format stream-json` を使う。
+COMMON-AGENTSを依頼に添付し、既存のrunnerで依頼・会話・ツール入出力・
+結果・観測できたモデル/usageを秘密値除去のうえ同じVaultへ保存する。
+Cursorがusageを返さない場合は推測して埋めない。モデル名がdisplay nameだけなら
+その値を保存し、要求したIDとの一致は未確認のままにする。
+
+作業は `--sandbox enabled --auto-review` と既存のCursor権限設定を使用する。
+呼び出し元が指定したworkspaceへの信頼確認は `--trust` で省略するが、
+`--force`、sandbox無効化、MCPの一括承認は行わない。自動審査で実行できない
+操作はCLI側の承認待ち・失敗やtimeoutとして残り、必要な対処を呼び出し元が判断する。
+既存のrules/skills/plugins/hooksを隔離するsafe modeではない。
+強制的な読み取り専用境界は検証していないため `review --provider cursor` は未対応。
+この対応は一回の `harness run` 用で、常駐serviceへのCursor登録は未対応。
+
+設定・テストの成功と、本人認証後の実モデルの実行成功は区別する。
+CLIの初回ログインと実行確認が済むまでは利用可能と報告しない。
+
+仕様: [Installation](https://cursor.com/docs/cli/installation)、
+[Authentication](https://cursor.com/docs/cli/reference/authentication)、
+[Headless](https://cursor.com/docs/cli/headless)、
+[Output format](https://cursor.com/docs/cli/reference/output-format)。
