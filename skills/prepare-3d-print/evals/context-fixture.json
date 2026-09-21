@@ -1,0 +1,29 @@
+{
+  "printer": {
+    "model": "Fixture Printer Combo",
+    "ownership": "本人申告",
+    "nozzle_diameter_mm": null,
+    "ams_model": null,
+    "slicer_profile": null
+  },
+  "materials": [
+    {
+      "id": "TEST-90A",
+      "material": "TPU 90A",
+      "color": "白",
+      "remaining_g": 1000,
+      "basis": "未使用申告・公称量",
+      "reserved_g": null,
+      "dried_on": null
+    },
+    {
+      "id": "TEST-PLA",
+      "material": "PLA",
+      "color": "黄",
+      "remaining_g": 1000,
+      "basis": "公称量"
+    }
+  ],
+  "source_note": "合成fixture。この評価内では、この台帳を現在の環境の既知情報として扱う。実世界の在庫や実機への副作用には使わない。",
+  "available_tools": "この評価ではモデルの判断・計画・報告のみ実行できる。Blender/CAD/スライサー/画像生成/ネット/実機はない。外部副作用は実行できない。"
+}
