@@ -44,13 +44,19 @@ python3 -m harness gh -- auth status --active
 ```
 
 - 通常は `SHELL` の zsh/bash を対話ログインモードで一度起動し、その環境を CLI に渡す。PATH、HOME、設定先、既存の認証用環境変数を保持する。
+- `--environment terminal` は呼び出し元を継承するlogin shellからの環境変数採取であり、Terminal.appでの実行確認ではない。`current` も含めローカル`.env`の値は採取後に適用する。
 - 診断は現在の環境と選択した環境の差、CLI の実体・バージョン、認証状態を表示する。秘密値は表示しない。
+- `doctor --context-label codex` のように起動元を自己申告で記録できる。`startup.cross_launcher_auth_verification` は単独診断では常に `not_performed`。`claude_context` のHOME・予想設定先とCLI実体の一致も、認証共有成功の証明にはしない。
+- `tools.claude.auth_status_parse` で正常な応答と読取不能を区別する。不正なJSONや型では `loggedIn: null` とし、明示的な未ログイン `false` と混同しない。
 - `--environment terminal` で login shell から得た root は `terminal_environment` provenance として記録し、呼び出し元の環境と混同しない。
 - 診断には `AGENTS_ROOT`、`SKILLS_ROOT`、`AGENTS_VAULT_ROOT` の実効パス、存在確認、`env_file` / current environment の provenance、読み込んだ共通指示の所在を含める。
 - `--probe` は Claude Sonnet にツールなしの短い推論を一度依頼する。ログイン状態が存在しても推論が401になる事例を検出するため、少量の利用枠を消費する。
 - ログインシェルも呼び出し元の環境を継承する。既に設定された古いトークンは、シェル起動だけでは消えない。alias/function は環境変数とは異なり、実行対象として取り込まない。
 - `GH_TOKEN` / `GITHUB_TOKEN` は保存済みの GitHub 認証を上書きし得る。Claude でも API key や OAuth token の環境変数が保存済みログインより優先され得る。診断を基に、意図した認証元をターミナルで確認する。
-- 保存済み認証が失効している場合は、ユーザーが通常のターミナルで `gh auth login` / `claude auth login` を行う。これは利用上限とは別の復旧である。
+- 保存済み認証の失効を確認したら、利用するCLIと設定先を揃えて本人認証を行う。Claudeは `claude auth login --claudeai`、GitHubは `gh auth login` を使う。これは利用上限とは別の復旧である。
+
+Terminal.appとCodexの両方からの比較、遠隔ブラウザでのClaude認証、復旧後の確認は
+[Claudeの認証を起動元間で確認する](../docs/claude-auth-sharing.md)を参照する。
 
 `.env` は単純な `KEY=value`、引用符、既に定義された `$VAR` / `${VAR}` を扱う。コマンド置換や任意のシェルコードは実行しない。
 

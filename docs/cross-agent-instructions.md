@@ -70,6 +70,11 @@ Hermesには [会話保存機構](hermes-vault-context.md) を追加し、Discor
 復元する。既存COMMONリンクや他のユーザールールを削除しない。環境symlinkも利用中の
 入口がないことを確認してから外す。Hermes自動保存を止めても既存Vault記録は削除しない。
 
+Claudeを通常のTerminal.appとCodexから利用する場合、同じ有効な認証を両方の
+新規CLIプロセスから利用できることを確認する。`--environment terminal doctor`
+という環境名だけでは実Terminal.appの確認にはならない。具体的なコマンドと確認範囲は
+[Claudeの認証を起動元間で確認する](claude-auth-sharing.md)を参照する。
+
 ## 仕様確認元
 
 2026-09-18に公式仕様と導入済みHermesコードを照合。
