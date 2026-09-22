@@ -1282,36 +1282,89 @@ def _root_diagnostics(env, current, env_file=None, environment_mode='current'):
     return roots
 
 
-def doctor(env, current, probe=False, *, env_file=None, environment_mode='current'):
+def _claude_context_side(env):
+    home = env.get('HOME') or None
+    config_dir = env.get('CLAUDE_CONFIG_DIR') or None
+    return {
+        'home': home,
+        'claude_config_dir_set': config_dir is not None,
+        'claude_config_dir': config_dir,
+        # Preserve overrides literally: resolving ~, variables or relative paths
+        # here would claim knowledge of the CLI's credential lookup semantics.
+        'expected_config_path': config_dir or (str(Path(home)/'.claude') if home else None),
+        'config_path_source': 'CLAUDE_CONFIG_DIR' if config_dir else ('HOME' if home else None),
+    }
+
+
+def _claude_context_diagnostics(env, current):
+    current_side = _claude_context_side(current)
+    selected_side = _claude_context_side(env)
+    def same_known(field):
+        left, right = current_side[field], selected_side[field]
+        return left == right if left is not None and right is not None else None
+    return {
+        'current': current_side,
+        'selected': selected_side,
+        'same_home': same_known('home'),
+        'same_claude_config_dir': same_known('claude_config_dir'),
+        'same_expected_config_path': same_known('expected_config_path'),
+    }
+
+
+def doctor(env, current, probe=False, *, env_file=None, environment_mode='current', context_label=None):
     report = {'environment_differences':{},'tools':{}}
     report['roots'] = _root_diagnostics(env, current, env_file, environment_mode)
     report['startup'] = {
         'environment_mode': environment_mode,
+        'capture_method': ('login shell environment inherited from the calling process; '
+                            'Terminal.app is not launched by this capture'
+                            if environment_mode == 'terminal' else
+                            'current process environment (os.environ); local .env may overlay values'),
+        'launched_terminal_app': False,
+        'cross_launcher_auth_verification': 'not_performed',
+        'context_label': context_label,
         'cwd': str(ROOT),
         'common_instructions': str(ROOT/'COMMON-AGENTS.md'),
         'common_instructions_loaded': (ROOT/'COMMON-AGENTS.md').is_file(),
         'supported_shells': ['zsh', 'bash'],
         'provider_surface': 'installed local CLI only',
     }
+    if context_label is not None:
+        report['startup']['context_label_source'] = 'self_reported'
     for key in AUTH_KEYS:
         report['environment_differences'][key] = {'current_set':bool(current.get(key)),
              'selected_set':bool(env.get(key)), 'same':current.get(key)==env.get(key)}
+    report['claude_context'] = _claude_context_diagnostics(env, current)
     for tool, command in [('gh',['gh','auth','status','--active']),
                            ('claude',['claude','auth','status','--json']),
                            ('codex',['codex','login','status']),
                            ('devin',['devin','auth','status'])]:
         p=execute(command,child_env(env),ROOT,'',20)
-        binary=shutil.which(tool,path=env.get('PATH'))
+        binary=shutil.which(tool,path=env.get('PATH', os.defpath))
+        current_binary=shutil.which(tool,path=current.get('PATH', os.defpath))
         version=execute([tool,'--version'],child_env(env),ROOT,'',10)
-        info={'executable':binary, 'current_executable':shutil.which(tool,path=current.get('PATH')),
-              'resolved_executable':str(Path(binary).resolve()) if binary else None,
+        resolved=str(Path(binary).resolve()) if binary else None
+        current_resolved=str(Path(current_binary).resolve()) if current_binary else None
+        info={'executable':binary, 'current_executable':current_binary,
+              'resolved_executable':resolved,
+              'current_resolved_executable':current_resolved,
+              'executables_match':(resolved==current_resolved) if (resolved and current_resolved) else None,
               'version':version.stdout.strip(), 'auth_status_exit':p.code}
         if tool=='claude':
             try:
                 data=json.loads(p.stdout)
-                info.update({key:data.get(key) for key in ('loggedIn','authMethod','apiProvider')})
             except ValueError:
-                info['loggedIn']=False
+                info['loggedIn']=None
+                info['auth_status_parse']='unparseable'
+            else:
+                if not isinstance(data,dict) or not isinstance(data.get('loggedIn'),bool):
+                    info['loggedIn']=None
+                    info['auth_status_parse']='unexpected_type'
+                else:
+                    info['loggedIn']=data.get('loggedIn')
+                    info['authMethod']=data.get('authMethod') if isinstance(data.get('authMethod'),(str,type(None))) else None
+                    info['apiProvider']=data.get('apiProvider') if isinstance(data.get('apiProvider'),(str,type(None))) else None
+                    info['auth_status_parse']='ok'
         else:
             info['authenticated']=p.code==0
         report['tools'][tool]=info
@@ -1332,7 +1385,15 @@ def doctor(env, current, probe=False, *, env_file=None, environment_mode='curren
     report['notes']=['auth status does not prove inference works; --probe checks one bounded Claude request',
                      'Environment credentials can override saved logins; no credentials were created or replaced',
                      'Login-shell capture inherits the caller environment; aliases and functions are not exported',
-                     'Invalid or expired credentials require manual login; do not treat them as usage limits']
+                     'Invalid or expired credentials require manual login; do not treat them as usage limits',
+                     'terminal/current describe how this process captured environment variables, not which app '
+                     'launched it; local .env values may then be overlaid. Current/selected are not two '
+                     'independent launcher runs, and this single run does not verify shared authentication',
+                     'context_label is a self-reported string only; it is never promoted to a verified value',
+                     'matching HOME/CLAUDE_CONFIG_DIR/resolved executable paths does not prove shared auth. '
+                     'Config paths are expectations from environment values, not observed credential sources; '
+                     'diagnostic helpers do not inspect credential contents, while the CLI handles its own '
+                     'authentication. New processes from each launcher require separate execution-based verification']
     return report
 
 
@@ -1346,6 +1407,9 @@ def main(argv=None):
     u.add_argument('--since', help='Timezone-aware ISO 8601 start time')
     u.add_argument('--run-dir', type=Path, help='Limit records to this directory under Vault agent-runs')
     d=commands.add_parser('doctor'); d.add_argument('--probe',action='store_true')
+    d.add_argument('--context-label',
+                   help='Self-reported label for this invocation origin (e.g. "cursor-native"); '
+                        'never treated as a verified value')
     g=commands.add_parser('gh'); g.add_argument('arguments',nargs=argparse.REMAINDER)
     s=commands.add_parser('status')
     s.add_argument('--db',type=Path,help='Read-only TaskStore SQLite path')
@@ -1411,13 +1475,14 @@ def main(argv=None):
             raise ValueError('Set AGENTS_VAULT_ROOT in the local .env to the existing Vault')
         if args.command=='doctor':
             report=doctor(env,current,args.probe,env_file=args.env_file,
-                          environment_mode=args.environment)
+                          environment_mode=args.environment,context_label=args.context_label)
             path=vault/'01-Projects'/'agent-runs'/('doctor-'+uuid.uuid4().hex)
             path.mkdir(parents=True,mode=0o700)
             save(path/'diagnostic.json',report,env)
             report['record']=str(path/'diagnostic.json')
             print(json.dumps(report,ensure_ascii=False,indent=2))
             healthy=all(t['auth_status_exit']==0 for t in report['tools'].values())
+            healthy=healthy and report['tools'].get('claude',{}).get('loggedIn') is True
             healthy=healthy and report.get('claude_inference',{}).get('status','completed')=='completed'
             return 0 if healthy else 2
         prompt=args.prompt_file.read_text()
