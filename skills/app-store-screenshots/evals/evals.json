@@ -1,0 +1,54 @@
+{
+  "skill_name": "app-store-screenshots",
+  "evals": [
+    {
+      "id": 1,
+      "name": "local-creation-only",
+      "prompt": "家計簿アプリの日本語ストア画像を既存画像から3枚作り直したい。登録はまだ。架空の作業環境ではapp=APP_A、version=VER_2、platform=IOS、locale=ja-JP、localization=LOC_JA、通常製品ページ、display type=APP_IPHONE_61と一意に判明。既存画像3枚と実装済み機能の画面は取得可能。ローカルascの配布元は未確認で、helpは参照できる。次の操作と残す成果物を示して。テストなので外部操作やツールは実行しない。",
+      "expected_output": "CLIの識別と既存画像取得、実画面に基づくローカル制作と順序・寸法・hash付きmanifest、一覧プレビューを計画し、remoteは変更しない。",
+      "files": [],
+      "expectations": [
+        "ascの種類・バージョンとhelpを確認する",
+        "アップロードせず既存画像を参考にローカル制作する",
+        "画像順序・寸法・hashを残すmanifestとプレビューを準備する"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "testflight-near-miss",
+      "prompt": "最新版をTestFlightの社内テスターに配布して。ストア画像の変更は不要です。このApp Storeストア画像スキルを使うべきかと、対応すべき作業だけを説明して。テストなので外部操作やツールは実行しない。",
+      "expected_output": "スキル対象外と判断しTestFlight配布へ引き継ぎ、画像操作を追加しない。",
+      "files": [],
+      "expectations": [
+        "ストア画像スキルの対象外と判断する",
+        "画像取得や画像変更を追加せずTestFlight配布へ引き継ぐ"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "incomplete-backup",
+      "prompt": "指定済みアプリの通常ページ、ja-JP、APP_IPHONE_61のスクショをこの3枚に差し替えて。差し替え権限は与えています。テスト環境では旧画像のinventoryが1ページ目の2枚だけでnextページがあり、そのうち1枚のbackup取得が403で失敗。別localeのen-USは正常。準備済みCLIはrorkai版。次の判断と復旧準備を示して。テストなので外部操作やツールは実行しない。",
+      "expected_output": "ページングと403原因を調査し、復元準備が整うまでreplace/deleteを止め、ローカル検証を続ける。対象外localeを変えず同じ差し替え許可を聞き直さない。",
+      "files": [],
+      "expectations": [
+        "残りページを取得してinventoryを完成させる",
+        "backup欠損のままreplace/deleteを実行しない",
+        "403を権限問題として調査しローカル準備を続ける",
+        "対象外en-USを変更せず許可を聞き直さない",
+        "旧画像の総数を未確定とし新画像の3枚と同じだと仮定しない"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "transformed-cdn-and-processing",
+      "prompt": "ストア画像の登録確認をして。テストの観測では画像AのsourceFileChecksumと送信元MD5は一致、state=COMPLETE。Apple CDN再取得物は再圧縮JPEGで元PNGとSHA-256が違うが、寸法と目視した内容は一致。人間の目視はまだ。画像Bはupload終了コード0、state=UPLOAD_COMPLETEでchecksum未取得。件数と順序は期待どおりです。AとBの確認済み・未確認と次の操作を説明して。テストなので外部操作やツールは実行しない。",
+      "expected_output": "Aは元ファイルの送信整合性と配信内容確認を区別しbyte一致とは言わない。Bは処理待ちとして再取得しCOMPLETEとchecksumを確認。人間の目視と公開は未確認。",
+      "files": [],
+      "expectations": [
+        "AのMD5一致とCDNのbyte不一致を区別し即失敗としない",
+        "Bを完了とせずCOMPLETEとchecksumを再取得する",
+        "人間の目視とストア公開を確認済みと主張しない"
+      ]
+    }
+  ]
+}
