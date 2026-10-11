@@ -2,6 +2,68 @@
 
 同じMacユーザーで通常のTerminal.appとCodexからClaudeを使う場合は、両方の新規CLIプロセスが有効な認証を利用できることを確認する。どちらか一方でのログイン成功だけでは、もう一方での利用や認証共有を確認したことにはならない。
 
+## Codexなどから呼ぶCLIの認証を一つにする
+
+SSHから再認証した結果をローカルのCodexやTerminalにも反映したい場合は、
+公式の`claude setup-token`で作る自動実行用OAuthトークンを一つの正本にする。
+この方式はClaudeの契約利用枠を使い、API課金へ切り替えない。
+通常の会話・コード作業・ローカルMCPは使えるが、Remote Controlとclaude.aiで
+接続したサービスは対象外。この機能範囲を選んだ環境にだけ導入する。
+
+実装は[`claude_shared_auth.py`](../scripts/claude_shared_auth.py)。配布した入口を
+`~/.config/agents/bin/claude`へ配置し、nativeの`~/.local/bin/claude`とは分ける。
+nativeの自動更新で共有入口を上書きしない。シェルの起動設定は、初回認証成功後の
+`~/.config/agents/claude-auth/enabled`を確認して共有入口をPATHの先頭にする。
+Agentsの既存`.env`にも導入完了後にそのPATHを設定することで、古い環境を継承した
+CLI runnerからの実行も同じ入口に揃える。端末固有の絶対パスや秘密値はGitへ入れない。
+
+正本は`~/.config/agents/claude-auth/credential.json`のみ（ディレクトリ0700、
+ファイル0600、所有者本人、symlink不可）。起動するたびに読み直し、子プロセスだけの
+`CLAUDE_CODE_OAUTH_TOKEN`へ渡す。引数・シェル履歴・Vaultへトークンを渡さない。
+正本がない場合はエラーにし、Keychainや`.credentials.json`へ戻らない。
+APIキー・別providerなど競合する指定も黙って使わない。
+ユーザー・プロジェクト・追加設定の`env`や`apiKeyHelper`も起動前に確認し、
+認証を上書きする指定は停止する。通常のMCP・skills・権限設定は引き続き読み込む。
+実行中に設定を変更する任意コードや、新たな組織の管理ポリシーを隔離する機能ではない。
+
+導入時はスクリプトを`~/.config/agents/libexec/claude_shared_auth.py`へ配置（0700）し、
+`~/.config/agents/bin/claude`からそこへsymlinkする。dotfilesの
+`agents/cli-path.sh`を`~/.config/agents/cli-path.sh`へ配置し、`.zshenv`・`.zprofile`・
+`.zshrc`から読み込む。初回本人認証が完了するまで`enabled`は作らない。
+更新時はソースのテストを実行し、入口の実体をatomicに置き換える。
+nativeの将来の出力形式変更などで再認証が止まる場合も、既存正本は保持される。
+
+### SSHでの初回認証と再認証
+
+初回は、SSHでMacへ入った本人のターミナルから共有入口を直接呼ぶ。
+
+```sh
+"$HOME/.config/agents/bin/claude" auth login
+. "$HOME/.config/agents/cli-path.sh"
+```
+
+表示された公式の認証URLを手元のブラウザで開く。コードが表示された場合は、
+チャットへ送らず、待機中の同じターミナルへ入力する。共有入口は公式の
+`setup-token`を実行し、成功後のトークンを表示せず受け取り、短いツールなし推論で
+有効性を確かめてから正本を置き換える。認証・通信・推論確認の失敗時は旧正本を残す。
+同時ログインは拒否し、書換えはatomicに行うため、別プロセスが途中の内容を読まない。
+
+導入後の再認証は`claude auth login`で同じ正本を更新する。対話CLI内の`/login`と
+`/logout`は、そのプロセスだけ別認証に変わるのを防ぐため無効化する。
+`claude auth logout`は共有トークンのローカル保存を削除する操作であり、サーバー上の
+失効は保証しない。導入済みのPATHは維持し、削除後も別の保存先へ戻さない。
+
+開いたままのCodexチャットでも、次に起動するClaude CLIは更新後の正本を読む。
+既に実行中のClaudeプロセスが持つ環境変数までは変更できないため、そのプロセスは
+終了・再開が必要。保存先の一本化と、実行中プロセスへの即時反映を混同しない。
+トークン自体の失効やClaudeサービスの障害は起こり得るが、その際に別の認証情報へ
+切り替えたり、有効な保存内容を消したりしない。
+
+`auth status`の表示だけでは有効性は確定しない。導入時はSSHで保存した正本を使い、
+Codexと実際のTerminal.appの新しいCLIプロセスから短い推論を確認する。
+試験用トークンによるローテーション・失敗時の保持・アクセス権のテストと、
+実サービスでの本人認証・推論の結果は区別して記録する。
+
 ## 診断の環境名が意味するもの
 
 - `--environment current`: 呼び出し元の環境を使用する。ローカル`.env`の設定はその上に適用する。
