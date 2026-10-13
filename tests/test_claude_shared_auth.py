@@ -372,6 +372,18 @@ class LaunchTests(Base):
 
 
 class ScannerTests(unittest.TestCase):
+    def test_current_native_claude_com_authorize_url_visible(self):
+        url = "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=st"
+        sc = auth.LoginScanner()
+        shown = []
+        raw = ("\x1b[2KBrowser didn't open? " + url + "\x1b[0m\r\n").encode()
+        for i in range(0, len(raw), 7):
+            shown += sc.feed(raw[i:i + 7])
+        self.assertEqual(shown, [url])
+        for unsafe in (url.replace("claude.com", "claude.com.evil.example"),
+                       url.replace("/cai/oauth/", "/oauth/"), url + "&token=" + NEW):
+            self.assertEqual(auth.LoginScanner().feed((unsafe + "\n").encode()), [])
+
     def test_oauth_url_path_and_token_restrictions(self):
         def urls(*us):
             sc = auth.LoginScanner()
@@ -425,6 +437,8 @@ class LoginTests(Base):
         self.seed()
         rc = self.run_main(self.login, env={"FAKE_MODE": "ok"})
         self.assertEqual(rc, 0, self.err.getvalue())
+        for step in ("[1/3]", "[2/3]", "[3/3]"):
+            self.assertIn(step, self.out.getvalue())
         self.assertEqual(auth.load_token(self.home), NEW)
         self.assertIn(URL, self.out.getvalue())
         self.assertNotIn("evil.example", self.out.getvalue() + self.err.getvalue())
@@ -488,6 +502,55 @@ class LoginTests(Base):
             rc = self.run_main(self.login, env={"FAKE_MODE": "hang"})
         self.assertEqual(rc, 130)
         self.assertEqual(self.cred_bytes(), before)
+
+    def test_repeated_ctrl_c_during_cleanup_is_absorbed(self):
+        self.seed()
+        before = self.cred_bytes()
+        old_handler = signal.getsignal(signal.SIGINT)
+        real_kill = auth._kill_group
+
+        def second_interrupt(proc):
+            try:
+                os.kill(os.getpid(), signal.SIGINT)
+                os.kill(os.getpid(), signal.SIGINT)
+            finally:
+                real_kill(proc)
+
+        try:
+            with mock.patch.object(auth.select, "select", side_effect=KeyboardInterrupt), \
+                    mock.patch.object(auth, "_kill_group", side_effect=second_interrupt):
+                rc = self.run_main(self.login, env={"FAKE_MODE": "hang"})
+        except KeyboardInterrupt:
+            self.fail("Repeated Ctrl-C escaped cleanup")
+        self.assertEqual(rc, 130)
+        self.assertEqual(self.cred_bytes(), before)
+        self.assertEqual(signal.getsignal(signal.SIGINT), old_handler)
+        self.assertNotIn("Traceback", self.err.getvalue())
+
+    def test_cleanup_closes_child_pty_before_waiting(self):
+        self.seed()
+        opened, still_open = [], []
+        real_open, real_kill = auth.pty.openpty, auth._kill_group
+
+        def open_child():
+            pair = real_open()
+            opened.extend(pair)
+            return pair
+
+        def inspect_then_kill(proc):
+            for fd in opened:
+                try:
+                    os.fstat(fd)
+                    still_open.append(fd)
+                except OSError:
+                    pass
+            real_kill(proc)
+
+        with mock.patch.object(auth.pty, "openpty", side_effect=open_child), \
+                mock.patch.object(auth.select, "select", side_effect=KeyboardInterrupt), \
+                mock.patch.object(auth, "_kill_group", side_effect=inspect_then_kill):
+            self.assertEqual(self.run_main(self.login, env={"FAKE_MODE": "hang"}), 130)
+        self.assertEqual(still_open, [])
 
     def _spy_kill(self):
         procs = []

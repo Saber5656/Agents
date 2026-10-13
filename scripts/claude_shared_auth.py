@@ -363,7 +363,10 @@ def _allowed_url(url):
         return None
     if p.scheme != "https" or p.username or p.password or port not in (None, 443):
         return None
-    if host not in ("claude.ai", "platform.claude.com") or p.path != "/oauth/authorize" or p.fragment:
+    endpoints = {("claude.ai", "/oauth/authorize"),
+                 ("platform.claude.com", "/oauth/authorize"),
+                 ("claude.com", "/cai/oauth/authorize")}
+    if (host, p.path) not in endpoints or p.fragment:
         return None
     if "sk-ant-" in url or any(re.search(r"token|secret|key", k, re.I)
                                for k, _ in parse_qsl(p.query, keep_blank_values=True)):
@@ -421,6 +424,18 @@ class LoginScanner:
 
 
 # ---- PTY ログイン/検証 ------------------------------------------------------
+
+@contextlib.contextmanager
+def _cleanup_signals():
+    """A second interrupt must not skip child cleanup or terminal restoration."""
+    old = {}
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            old[sig] = signal.signal(sig, signal.SIG_IGN)
+        yield
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
 
 def _kill_group(proc):
     for sig, wait in ((signal.SIGTERM, 3), (signal.SIGKILL, 5)):
@@ -490,13 +505,22 @@ def run_setup_token(native, environ, timeout, stdin_fd, out):
     except KeyboardInterrupt:
         raise AuthError("ログインを中断しました。", code=130)
     finally:
-        if proc is not None:
-            _kill_group(proc)
-        if slave is not None:
-            os.close(slave)
-        os.close(master)
-        if saved is not None:
-            termios.tcsetattr(stdin_fd, termios.TCSANOW, saved)
+        with _cleanup_signals():
+            try:
+                # macOS can keep a killed terminal child in tty shutdown until
+                # the master is closed. Release the PTY before waiting for it.
+                try:
+                    if slave is not None:
+                        os.close(slave)
+                finally:
+                    os.close(master)
+            finally:
+                try:
+                    if proc is not None:
+                        _kill_group(proc)
+                finally:
+                    if saved is not None:
+                        termios.tcsetattr(stdin_fd, termios.TCSANOW, saved)
 
 
 def validate_token(native, environ, token):
@@ -516,11 +540,14 @@ def validate_token(native, environ, token):
     except (OSError, ValueError, subprocess.SubprocessError):
         ok = False
     finally:
-        if proc is not None:
-            _kill_group(proc)
-            for stream in (proc.stdout, proc.stderr):
-                if stream is not None:
-                    stream.close()
+        with _cleanup_signals():
+            if proc is not None:
+                try:
+                    _kill_group(proc)
+                finally:
+                    for stream in (proc.stdout, proc.stderr):
+                        if stream is not None:
+                            stream.close()
     if not ok:
         raise AuthError("新しい token の検証に失敗しました。既存の共有認証情報は変更していません。")
 
@@ -555,10 +582,17 @@ def _login(home, environ, timeout, stdin_fd, out):
         for sig in sigs:
             old[sig] = signal.signal(sig, _raise_signalled)
         with login_lock(home):
-            out.write("ブラウザで次のURLを開き、表示されたコードをこの端末に入力してください。\n")
+            out.write("既存のログインを残したまま、SSH・Mac・Codex共通の認証情報を作ります。\n"
+                      "[1/3] Claude公式の認証URLを準備しています。\n"
+                      "URLが表示されたらブラウザで開いてください。コードはこの端末に入力します(入力は表示されません)。\n"
+                      "中止する場合は Ctrl-C を一度押してください。\n")
             out.flush()
             token = run_setup_token(native, environ, timeout, stdin_fd, out)
+            out.write("[2/3] 認証が完了しました。短い応答で利用できることを確認しています。\n")
+            out.flush()
             validate_token(native, environ, token)
+            out.write("[3/3] 共通の保存先へ認証情報を保存しています。\n")
+            out.flush()
             save_credential(home, token)
             write_marker(home)
     except _Signalled as e:
@@ -621,6 +655,9 @@ def main(argv=None, *, environ=None, home=None, out=None, err=None, execve=os.ex
     except AuthError as e:
         err.write("claude-shared-auth: %s\n" % e)
         return e.code
+    except KeyboardInterrupt:
+        err.write("claude-shared-auth: 処理を中断しました。\n")
+        return 130
     except Exception:
         err.write("claude-shared-auth: 内部エラーが発生しました(詳細は秘匿)。\n")
         return 1
