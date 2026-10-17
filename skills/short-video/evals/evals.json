@@ -1,0 +1,53 @@
+{
+  "skill_name": "short-video",
+  "evals": [
+    {
+      "id": 1,
+      "name": "four-second-animation",
+      "prompt": "登録済み素材 dot/default.png（幅120、右向き）がある。白い背景で主人公が右へ歩いて到着する、縦4秒の短いアニメーションを作って。JSON台本と、検査から最終MP4の全フレーム確認までの制作手順を出して。音は不要。",
+      "expected_output": "正しいschemaの台本、足元の世界座標、正確な4秒、静止画と実動画の確認",
+      "files": [],
+      "assertions": [
+        "実在素材を参照する有効な台本を生成する",
+        "終端演出を含め指定の4秒に収まる",
+        "移動の始終点で役者全身がカメラ内に収まる",
+        "60fpsの全フレームを間引かず抽出する手順を提示する"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "draft-all-frames",
+      "prompt": "out/test/test.draft.mp4 だけを出力済み。本番版はまだない。このdraftの全フレームを確認する手順を教えて。元ファイルの名前は変えず、確認完了とはまだ言わないで。",
+      "expected_output": "draftそのものを入力とした全フレーム抽出。標準reviewの参照先と間引きの誤認を避ける",
+      "files": [],
+      "assertions": [
+        "指定されたdraftそのものを確認対象にする",
+        "フレームを間引かず抽出する方法を示す",
+        "手順提示だけで目視確認済みを主張しない"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "live-action-near-miss",
+      "prompt": "文章から、海辺を歩く人物のリアルな映像をAI動画モデルで新規生成したい。JSONで画像を移動させる方式は使わない。今回は適用する制作方式を判断して。",
+      "expected_output": "このスキルは対象外。実写text-to-videoの別経路へ案内し勝手な課金や契約なし",
+      "files": [],
+      "assertions": [
+        "実写text-to-videoを選びスプライト方式へ変更しない",
+        "対象外依頼のために既存エンジン拡張を要求しない"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "missing-asset-and-jump",
+      "prompt": "既存のshort-animation-harnessで、まだ画像のないウサギをジャンプさせるショートを作って。今のschemaにはmove/show/hide/look/turnしかない。素材と機能の不足をどう扱うか、進められる準備と実装方針を示して。",
+      "expected_output": "架空の素材を既存扱いしない。jump未実装を明示しschema/resolve/描画/検査/docsの整合を取る",
+      "files": [],
+      "assertions": [
+        "不足するウサギ素材を明示し架空素材の完成台本を生成しない",
+        "既存schemaにないジャンプの拡張が必要と認識する",
+        "台本・時間解決・描画・検査・説明の整合した拡張を示す"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "format": "short",
+  "title": "最初のショート動画",
+  "end": "cut",
+  "cast": {},
+  "scenes": [{
+    "id": "s1",
+    "place": "white",
+    "setup": {},
+    "beats": [
+      {"dur": 2, "note": "つかみ", "text": [{"body": "最初の一歩", "pos": "center"}]},
+      {"dur": 2, "note": "変化", "text": [{"body": "台本から動画へ", "pos": "center"}]},
+      {"dur": 2, "note": "結末", "text": [{"body": "できました！", "pos": "center"}]}
+    ]
+  }]
+}
