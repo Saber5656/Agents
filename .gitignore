@@ -11,3 +11,7 @@ __pycache__/
 # Private task database, service state and isolated test environments
 .local/
 .venv/
+
+# Locally synchronized vendor skills and independent checkout workspaces
+/skills/synced/
+/worktrees/
