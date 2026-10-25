@@ -12,6 +12,7 @@ import daily_it_news_batch as batch
 
 class BatchTests(unittest.TestCase):
     def setUp(self):
+        self.real_preflight = batch.preflight
         self.preflight = patch.object(batch, 'preflight', create=True)
         self.preflight_mock = self.preflight.start()
         self.addCleanup(self.preflight.stop)
@@ -122,5 +123,33 @@ class BatchTests(unittest.TestCase):
                  patch.object(batch.time,'sleep'):
                 result=batch.run_batch(cfg,{})
             self.assertEqual('blocked',result['status'])
+
+    def test_slack_message_ts_completes_batch_with_news_target(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);cfg=batch.news.Config(root,root,root,root,root,root,'codex')
+            summary=root/'SUMMARY-IT-NEWS-2026-09-14.md';summary.write_text('news')
+            advisory=root/'advice.md';advisory.write_text('advice')
+            env={'NEWS_TARGET':'slack:C0123456789A'}
+            with patch.object(batch.news,'run',return_value={'status':'complete','summary_path':str(summary),'summary_sha256':batch.news.digest(summary)}), \
+                 patch.object(batch,'generate_advisory',return_value=advisory), \
+                 patch.object(batch,'complete_delivery',return_value={'delivery_status':'delivered','message_id':'1792900000.123456'}):
+                result=batch.run_batch(cfg,env)
+            self.assertEqual('complete',result['status'])
+            self.assertEqual('1792900000.123456',result['delivery']['message_id'])
+
+    def test_explicit_invalid_news_target_does_not_fallback_to_discord(self):
+        cfg=batch.news.Config(Path('/tmp'),Path('/tmp'),Path('/tmp'),Path('/tmp'),Path('/tmp'),Path('/tmp'),'codex')
+        env={key:'set' for key in batch.DELIVERY_KEYS}
+        env.update(HERMES_BRIDGE_PYTHON='python3', NEWS_TARGET='discord:not-valid', DISCORD_NEWS_TARGET='discord:12345678901234567')
+        with self.assertRaisesRegex(batch.news.RunnerError, 'invalid news target'):
+            self.real_preflight(cfg,env)
+
+    def test_missing_slack_token_fails_before_collecting_news(self):
+        root = Path('/tmp')
+        cfg = batch.news.Config(root,root,root,root,root,root,'codex')
+        env = {key:'configured' for key in batch.DELIVERY_KEYS}
+        env['NEWS_TARGET'] = 'slack:C0123456789A'
+        with self.assertRaisesRegex(batch.news.RunnerError, 'SLACK_BOT_TOKEN'):
+            self.real_preflight(cfg,env)
 
 if __name__=='__main__':unittest.main()

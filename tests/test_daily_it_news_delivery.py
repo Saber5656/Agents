@@ -180,6 +180,59 @@ class DeliveryTests(unittest.TestCase):
         result = delivery.notify_discord('2026-09-14','https://news','https://advice',artifact,self.run,sys.executable,target,'req-invalid','bridge.py')
         self.assertEqual('unknown', result['delivery_status'])
 
+    def test_slack_delivery_accepts_channel_and_message_ts(self):
+        bridge = Path(self.tmp.name) / 'slack.py'
+        bridge.write_text("import json; print(json.dumps({'success':True,'platform':'slack','chat_id':'C0123456789A','message_id':'1792900000.123456'}))")
+        out = delivery.notify_news('2026-09-10', 'https://news', 'https://advice', 'a' * 64,
+            self.run, sys.executable, 'slack:C0123456789A', 'req-slack', bridge)
+        self.assertEqual({'delivery_status': 'delivered', 'message_id': '1792900000.123456'}, out)
+
+    def test_news_delivery_rejects_mismatched_platform_target_and_ts(self):
+        bridge = Path(self.tmp.name) / 'bad.py'
+        bridge.write_text("import json; print(json.dumps({'success':True,'platform':'discord','chat_id':'C0123456789A','message_id':'1792900000.123456'}))")
+        out = delivery.notify_news('2026-09-10', 'https://news', 'https://advice', 'b' * 64,
+            self.run, sys.executable, 'slack:C0123456789A', 'req-bad', bridge)
+        self.assertEqual('unknown', out['delivery_status'])
+        bridge.write_text("import json; print(json.dumps({'success':True,'platform':'slack','chat_id':'C0123456789A','message_id':'bad'}))")
+        out = delivery.notify_news('2026-09-10', 'https://news', 'https://advice', 'c' * 64,
+            self.run, sys.executable, 'slack:C0123456789A', 'req-ts', bridge)
+        self.assertEqual('unknown', out['delivery_status'])
+        bridge.write_text("import json; print(json.dumps({'success':True,'platform':'slack','chat_id':'C9876543210A','message_id':'1792900000.123456'}))")
+        out = delivery.notify_news('2026-09-10', 'https://news', 'https://advice', 'f' * 64,
+            self.run, sys.executable, 'slack:C0123456789A', 'req-channel', bridge)
+        self.assertEqual('unknown', out['delivery_status'])
+
+    def test_slack_sent_receipt_is_skipped_and_unknown_is_not_resent(self):
+        bridge = Path(self.tmp.name) / 'slack.py'
+        bridge.write_text("import json; print(json.dumps({'success':True,'platform':'slack','chat_id':'C0123456789A','message_id':'1792900000.123456'}))")
+        args = ('2026-09-10', 'https://news', 'https://advice', 'd' * 64, self.run, sys.executable,
+                'slack:C0123456789A', 'req-skip', bridge)
+        self.assertEqual('delivered', delivery.notify_news(*args)['delivery_status'])
+        with patch.object(delivery, 'run_command', side_effect=AssertionError('must not resend')):
+            self.assertEqual('skipped', delivery.notify_news(*args)['delivery_status'])
+        bridge.write_text("print('uncertain')")
+        unknown = delivery.notify_news('2026-09-10', 'https://news', 'https://advice', 'e' * 64,
+            self.run, sys.executable, 'slack:C0123456789A', 'req-unknown', bridge)
+        self.assertEqual('unknown', unknown['delivery_status'])
+        bridge.write_text("raise RuntimeError('must not resend')")
+        self.assertEqual('unknown', delivery.notify_news('2026-09-10', 'https://news', 'https://advice', 'e' * 64,
+            self.run, sys.executable, 'slack:C0123456789A', 'req-unknown', bridge)['delivery_status'])
+
+    def test_slack_native_receipt_recovers_without_resending(self):
+        target = 'slack:C0123456789A'; artifact = '7' * 64
+        key = hashlib.sha256(f'{artifact}:{target}'.encode()).hexdigest()
+        base = self.run / 'slack-bridge'; base.mkdir(parents=True)
+        message = 'ITニュース 2026-09-14\nニュース: https://news\n助言: https://advice'
+        (base / f'intent-{key}.json').write_text(json.dumps({'artifact_sha256':artifact,'target':target,'message':message}))
+        message_file = base / f'message-{key}.txt'; message_file.write_text(message)
+        attempt = base / 'req-recover/attempt-test'; attempt.mkdir(parents=True)
+        (attempt / 'request.json').write_text(json.dumps({'request_id':'req-recover','command':['hermes','send','--to',target,'--json','--file',str(message_file)]}))
+        payload = {'success':True,'platform':'slack','chat_id':'C0123456789A','message_id':'1792900000.123456'}
+        (attempt / 'result.json').write_text(json.dumps({'request_id':'req-recover','returncode':0,'status':'completed','stdout':json.dumps(payload)}))
+        with patch.object(delivery, 'run_command', side_effect=AssertionError('must not resend')):
+            out = delivery.notify_news('2026-09-14','https://news','https://advice',artifact,self.run,sys.executable,target,'req-recover','bridge.py')
+        self.assertEqual({'delivery_status':'delivered','message_id':'1792900000.123456'}, out)
+
 
 if __name__ == "__main__":
     unittest.main()

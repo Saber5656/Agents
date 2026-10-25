@@ -1,4 +1,4 @@
-"""Publish a generated IT-news artifact and notify Discord.
+"""Publish a generated IT-news artifact and notify a Hermes-supported platform.
 
 This module deliberately has no dependency on the retired harness.  Each operation
 is resumable from its run receipt and treats an uncertain remote operation as unknown.
@@ -29,6 +29,8 @@ class RetryableDeliveryError(DeliveryError):
 
 _SNOWFLAKE = re.compile(r"^[1-9][0-9]{16,19}$")
 _TARGET = re.compile(r"^discord:[1-9][0-9]{16,19}$")
+_SLACK_TARGET = re.compile(r"^slack:C[A-Z0-9]{10,}$")
+_SLACK_TS = re.compile(r"^[0-9]+\.[0-9]{6}$")
 
 
 def _sha(path: Path) -> str:
@@ -190,12 +192,24 @@ def _bridge_payload(wrapper):
 
 def _confirmed_message(payload, returncode, target):
     msgid = payload.get("message_id")
-    if (returncode == 0 and payload.get("success") is True
-            and payload.get("platform") == "discord"
-            and str(payload.get("chat_id")) == target.removeprefix("discord:")
+    if returncode != 0 or payload.get("success") is not True:
+        return None
+    platform, channel = target.split(":", 1)
+    if platform == "discord" and (payload.get("platform") == platform
+            and str(payload.get("chat_id")) == channel
             and _SNOWFLAKE.fullmatch(str(msgid or ""))):
         return str(msgid)
+    if platform == "slack" and (payload.get("platform") == platform
+            and str(payload.get("chat_id")) == channel
+            and _SLACK_TS.fullmatch(str(msgid or ""))):
+        return str(msgid)
     return None
+
+
+def _valid_message_id(message_id, target):
+    if target.startswith("discord:"):
+        return bool(_SNOWFLAKE.fullmatch(str(message_id or "")))
+    return bool(_SLACK_TS.fullmatch(str(message_id or "")))
 
 
 def _reconcile_bridge(base, request_id, target, message_file, message):
@@ -228,31 +242,33 @@ def _reconcile_bridge(base, request_id, target, message_file, message):
     return None
 
 
-def notify_discord(summary_date: str, news_url: str, advice_url: str, artifact_sha256: str,
+def notify_news(summary_date: str, news_url: str, advice_url: str, artifact_sha256: str,
                    run_root: Path | str, hermes_python: str, target: str,
                    request_id: str, hermes_bridge: Path | str | None = None) -> dict:
     """Send a short immutable-link message through the Hermes bridge."""
     run_root = Path(run_root)
-    if not _TARGET.fullmatch(target):
-        return {"delivery_status": "failed", "message_id": None, "error": "invalid Discord target"}
+    if not (_TARGET.fullmatch(target) or _SLACK_TARGET.fullmatch(target)):
+        return {"delivery_status": "failed", "message_id": None, "error": "invalid news target"}
     if request_id in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9._-]+", request_id):
         return {"delivery_status": "failed", "message_id": None, "error": "invalid delivery request id"}
     bridge = Path(hermes_bridge or (Path(os.environ.get("SKILLS_ROOT", ".")) / "hermes-agent-bridge/scripts/hermes_bridge.py"))
     message = f"ITニュース {summary_date}\nニュース: {news_url}\n助言: {advice_url}"
     key = hashlib.sha256(f"{artifact_sha256}:{target}".encode()).hexdigest()
-    sent = run_root / "discord-bridge" / f"sent-{key}.json"
+    platform = target.split(":", 1)[0]
+    namespace = run_root / f"{platform}-bridge"
+    sent = namespace / f"sent-{key}.json"
     if sent.exists():
         try:
             prior = json.loads(sent.read_text())
             if (not sent.is_symlink() and prior.get("target") == target
                     and prior.get("artifact_sha256") == artifact_sha256
-                    and _SNOWFLAKE.fullmatch(str(prior.get("message_id") or ""))):
+                    and _valid_message_id(prior.get("message_id"), target)):
                 return {"delivery_status": "skipped", "message_id": prior["message_id"]}
         except (OSError, ValueError, AttributeError):
             pass
         return {"delivery_status": "unknown", "message_id": None, "error": "invalid sent receipt"}
-    intent = run_root / "discord-bridge" / f"intent-{key}.json"
-    message_file = run_root / "discord-bridge" / f"message-{key}.txt"
+    intent = namespace / f"intent-{key}.json"
+    message_file = namespace / f"message-{key}.txt"
     if intent.exists() and not sent.exists():
         try:
             prior = json.loads(intent.read_text(encoding="utf-8"))
@@ -261,7 +277,7 @@ def notify_discord(summary_date: str, news_url: str, advice_url: str, artifact_s
         if not isinstance(prior, dict):
             prior = {}
         if prior.get("artifact_sha256") == artifact_sha256 and prior.get("target") == target:
-            message_id = _reconcile_bridge(run_root / "discord-bridge", request_id, target,
+            message_id = _reconcile_bridge(namespace, request_id, target,
                                            message_file, prior.get("message"))
             if message_id:
                 _receipt(sent.parent, sent.name, {"message_id": message_id,
@@ -274,9 +290,9 @@ def notify_discord(summary_date: str, news_url: str, advice_url: str, artifact_s
     message_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     message_file.write_text(message, encoding="utf-8")
     message_file.chmod(0o600)
-    _receipt(run_root / "discord-bridge", f"intent-{key}.json", {"artifact_sha256": artifact_sha256, "target": target, "message": message})
+    _receipt(namespace, f"intent-{key}.json", {"artifact_sha256": artifact_sha256, "target": target, "message": message})
     cmd = [hermes_python, str(bridge), "send", "--target", target, "--file", str(message_file),
-           "--receipt-dir", str(run_root / "discord-bridge"), "--request-id", request_id]
+           "--receipt-dir", str(namespace), "--request-id", request_id]
     try:
         env = dict(os.environ)
         env["HERMES_INFERENCE_PROVIDER"] = "openai-codex"
@@ -286,8 +302,8 @@ def notify_discord(summary_date: str, news_url: str, advice_url: str, artifact_s
             # No process was started, so retrying cannot duplicate a message.
             intent.unlink(missing_ok=True)
             return {"delivery_status": "failed", "message_id": None, "error": str(exc)}
-        _receipt(run_root / "discord-bridge", f"bridge-{key}.stdout.log", {"stdout": p.stdout})
-        _receipt(run_root / "discord-bridge", f"bridge-{key}.stderr.log", {"stderr": p.stderr})
+        _receipt(namespace, f"bridge-{key}.stdout.log", {"stdout": p.stdout})
+        _receipt(namespace, f"bridge-{key}.stderr.log", {"stderr": p.stderr})
         try:
             wrapper = json.loads(p.stdout)
         except (ValueError, TypeError):
@@ -300,7 +316,7 @@ def notify_discord(summary_date: str, news_url: str, advice_url: str, artifact_s
             definite_failure = payload.get("success") is False or wrapper.get("action") == "rejected_before_process"
             status = "failed" if definite_failure else "unknown"
             out = {"delivery_status": status, "message_id": None, "error": payload.get("error", p.stderr.strip()[:300])}
-            _receipt(run_root, "discord-failure.json", out)
+            _receipt(run_root, f"{platform}-failure.json", out)
             # A bridge rejection/process failure is definite and may be retried;
             # preserve the intent only when the process outcome is uncertain.
             if status == "failed":
@@ -310,13 +326,21 @@ def notify_discord(summary_date: str, news_url: str, advice_url: str, artifact_s
                     pass
             return out
         out = {"delivery_status": "delivered", "message_id": msgid}
-        _receipt(run_root / "discord-bridge", f"sent-{key}.json", {"message_id": msgid, "artifact_sha256": artifact_sha256, "target": target})
+        _receipt(namespace, f"sent-{key}.json", {"message_id": msgid, "artifact_sha256": artifact_sha256, "target": target})
         return out
     except subprocess.TimeoutExpired:
-        msgid = _reconcile_bridge(run_root / "discord-bridge", request_id, target, message_file, message)
+        msgid = _reconcile_bridge(namespace, request_id, target, message_file, message)
         if msgid:
             _receipt(sent.parent, sent.name, {"message_id": msgid, "artifact_sha256": artifact_sha256, "target": target})
             return {"delivery_status": "delivered", "message_id": msgid}
         out = {"delivery_status": "unknown", "message_id": None, "error": "bridge timeout"}
-        _receipt(run_root, "discord-failure.json", out)
+        _receipt(run_root, f"{platform}-failure.json", out)
         return out
+
+
+def notify_discord(summary_date: str, news_url: str, advice_url: str, artifact_sha256: str,
+                   run_root: Path | str, hermes_python: str, target: str,
+                   request_id: str, hermes_bridge: Path | str | None = None) -> dict:
+    """Backward-compatible Discord-only entry point."""
+    return notify_news(summary_date, news_url, advice_url, artifact_sha256, run_root,
+                       hermes_python, target, request_id, hermes_bridge)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the daily news workflow through publication and confirmed Discord delivery."""
+"""Run the daily news workflow through publication and confirmed news delivery."""
 from __future__ import annotations
 
 import argparse
@@ -20,15 +20,24 @@ import daily_it_news as news
 from daily_it_news_runtime import read_verified, run_command
 
 DELIVERY_KEYS = ['USER_VAULT_ROOT','USER_VAULT_REMOTE','AGENTS_VAULT_REMOTE','NEWS_PUBLICATION_BRANCH',
-                 'PUBLISHER_GIT_NAME','PUBLISHER_GIT_EMAIL','GITLEAKS_BIN','HERMES_BRIDGE_PYTHON','DISCORD_NEWS_TARGET']
+                 'PUBLISHER_GIT_NAME','PUBLISHER_GIT_EMAIL','GITLEAKS_BIN','HERMES_BRIDGE_PYTHON']
+
+
+def news_target(env):
+    """NEWS_TARGET overrides the legacy Discord-only setting when present."""
+    return env.get('NEWS_TARGET') if 'NEWS_TARGET' in env else env.get('DISCORD_NEWS_TARGET')
 
 
 def preflight(config, env):
     for key in DELIVERY_KEYS:
         if not env.get(key):
             raise news.RunnerError('missing delivery configuration: '+key)
-    if not re.fullmatch(r'discord:[1-9][0-9]{16,19}', env['DISCORD_NEWS_TARGET']):
-        raise news.RunnerError('invalid Discord target')
+    target = news_target(env)
+    if not target or not (re.fullmatch(r'discord:[1-9][0-9]{16,19}', target)
+                          or re.fullmatch(r'slack:C[A-Z0-9]{10,}', target)):
+        raise news.RunnerError('invalid news target')
+    if target.startswith('slack:') and not env.get('SLACK_BOT_TOKEN'):
+        raise news.RunnerError('missing delivery configuration: SLACK_BOT_TOKEN')
     for command in ['git', config.codex_bin, env['GITLEAKS_BIN'], env['HERMES_BRIDGE_PYTHON']]:
         if not shutil.which(command):
             raise news.RunnerError('required executable is unavailable: '+Path(command).name)
@@ -121,6 +130,8 @@ def complete_delivery(config, env, summary, advisory, run_root, expected_summary
     import daily_it_news_delivery as delivery
     for key in DELIVERY_KEYS:
         if not env.get(key):raise news.RunnerError('missing delivery configuration: '+key)
+    target = news_target(env)
+    if not target: raise news.RunnerError('missing delivery configuration: NEWS_TARGET')
     user_root=Path(env['USER_VAULT_ROOT']).resolve()
     summary_relative=summary.resolve().relative_to(user_root).as_posix()
     advisory_relative=advisory.resolve().relative_to(config.vault_root.resolve()).as_posix()
@@ -144,11 +155,11 @@ def complete_delivery(config, env, summary, advisory, run_root, expected_summary
     write_json(run_root/'publication.json',{'news':public_news,'advisory':public_advice})
     key=hashlib.sha256((expected_summary_sha256+cached['sha256']).encode()).hexdigest()
     summary_date = '-'.join(news.SUMMARY_RE.fullmatch(summary.name).groups()[:3])
-    result=delivery.notify_discord(summary_date,public_news['url'],public_advice['url'],key,
-               config.runtime_root/'delivery-state',env['HERMES_BRIDGE_PYTHON'],env['DISCORD_NEWS_TARGET'],
+    result=delivery.notify_news(summary_date,public_news['url'],public_advice['url'],key,
+               config.runtime_root/'delivery-state',env['HERMES_BRIDGE_PYTHON'],target,
                'daily-news-'+key[:24],config.skills_root/'hermes-agent-bridge/scripts/hermes_bridge.py')
     result.update(news_url=public_news['url'],advisory_url=public_advice['url'])
-    write_json(run_root/'discord-result.json',result)
+    write_json(run_root/(target.split(':', 1)[0]+'-result.json'),result)
     return result
 
 
@@ -195,10 +206,14 @@ def run_batch(config, env, *, force=False, resume_run=None):
                     state['advisory_path']=str(advisory)
                 state['phase']='publication';persist()
                 sent=complete_delivery(config,env,summary,advisory,run_root,result['summary_sha256'])
-                state.update(phase='discord',delivery=sent)
-                if (sent['delivery_status'] not in {'delivered','skipped'}
-                        or not re.fullmatch(r'[1-9][0-9]{16,19}',str(sent.get('message_id') or ''))):
-                    raise news.RunnerError('Discord delivery is not confirmed: '+str(sent.get('error','')))
+                delivery_target = news_target(env)
+                state.update(phase=delivery_target.split(':', 1)[0] if delivery_target else 'discord',delivery=sent)
+                message_id = str(sent.get('message_id') or '')
+                valid_id = (re.fullmatch(r'[1-9][0-9]{16,19}', message_id)
+                            if not delivery_target or delivery_target.startswith('discord:')
+                            else re.fullmatch(r'[0-9]+\.[0-9]{6}', message_id))
+                if (sent['delivery_status'] not in {'delivered','skipped'} or not valid_id):
+                    raise news.RunnerError('news delivery is not confirmed: '+str(sent.get('error','')))
                 state.update(status='complete',phase='done')
                 state.pop('error',None)
                 break
