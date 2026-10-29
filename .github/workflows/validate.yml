@@ -22,8 +22,8 @@ jobs:
           cache-dependency-path: apps/progress-dashboard/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm test
-      - run: npm run test:sites
       - run: npm run build
+      - run: npm run test:sites
   tests:
     runs-on: ubuntu-latest
     steps:
