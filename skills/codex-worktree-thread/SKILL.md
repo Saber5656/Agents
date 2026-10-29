@@ -1,23 +1,26 @@
 ---
 name: codex-worktree-thread
 description: >
-  Codex Appでrepo作業用のworktree付きチャットセッションを作成または分岐するときに使う。
-  ユーザーが「worktreeで作業分岐」「issueごとにチャットセッションを作成」
-  「親チャットの文脈を引き継がずに分岐」「forkで作って」「tmuxが混ざらないように」
-  「別セッションで並行作業」などと言ったら必ず使う。既定は `fork_thread + worktree`
-  で親文脈を引き継ぐ。ユーザーが「文脈なし」「親チャットを引き継がない」と明示した場合だけ
-  `create_thread + existing project + worktree` を使う。repo作業で `projectless` や tmux 起動へ
-  フォールバックしてはいけない。
+  Create or fork Codex App chats with worktrees for repository tasks when the user
+  explicitly asks for separate chats. Default to fork_thread + worktree with
+  inherited context. Use create_thread + existing project + worktree only when
+  the user explicitly asks for fresh context. Preserve project grouping and
+  never substitute projectless chats or tmux sessions for repository worktrees.
 user-invocable: true
 allowed-tools: Read, Grep, Bash, tool_search, codex_app.list_projects, codex_app.list_threads, codex_app.create_thread, codex_app.fork_thread, codex_app.read_thread, codex_app.send_message_to_thread, codex_app.set_thread_title
 category: Operation
 created: 2026-06-29
 status: active
-purpose: Codex Appのthread/worktree分岐を一定の手順に固定し、projectless化やtmux混入による作業分岐のブレを防ぐ
-argument-hint: "[issue番号/分岐したい作業/文脈継承の有無]"
+purpose: Keep Codex chats, repository worktrees and project grouping aligned.
+argument-hint: "[issue/task/context inheritance]"
 ---
 
 # Codex Worktree Thread
+
+Use English for all replies, new chat titles and child prompts. Apply
+`$AGENTS_ROOT/policies/communication.md` even when the user writes in Japanese.
+Treat the Japanese examples below as workflow reference and produce English
+handoffs, preserving exact identifiers and source evidence.
 
 このスキルは、Codex App上でrepo作業をissueやタスクごとにworktree付きチャットへ分岐するための運用ゲートである。
 目的は、毎回同じUI配置・同じ文脈継承ルール・同じ初回プロンプトで分岐し、tmuxやprojectless threadによる混乱を避けること。
@@ -181,29 +184,31 @@ fresh-contextの場合は、親文脈がないため必要情報をより厚く�
 テンプレート:
 
 ```markdown
-このthreadは `<repo>` の `<task>` 用worktree sessionです。
+This is the worktree session for `<task>` in `<repo>`.
 
-必ず最初に `AGENTS.md` とrepo guidanceを読んでください。
-対象: <issue number / issue URL / task summary>
-想定branch: `<branch-name>`
-開始点: latest `origin/main` unless impossible
+Read `AGENTS.md` and the project guidance first.
+Target: <issue number / issue URL / task summary>
+Expected branch: `<branch-name>`
+Starting point: latest `origin/main` unless the accepted task specifies another base
 
-作業ルール:
-- tmuxや外部ターミナルで別作業者を起動しない。
-- Vault記録が必要なrepoでは、作業開始時と完了時に記録する。
-- commit/push/PRは、ユーザーが明示するまで行わない。
-- scope外のissueや無関係なrefactorへ広げない。
+Working rules:
+- Use the assigned worktree; do not substitute tmux or external terminal workers.
+- Record the start, decisions and completion in the existing Vault when required.
+- Carry forward the parent's accepted requirements, corrections and existing
+  authorization. Complete reviewed local commits when the shared policy requires
+  them; apply the existing repository policy and task scope to push/PR delivery.
+  Do not add a new permission gate for work that is already authorized.
+- Stay within the task; record unrelated discoveries without implementing them.
 
-まず確認して報告すること:
-1. 現在のcwd/worktree
-2. branch
-3. 対象issueの理解
-4. 実装または調査の最初の計画
+First report:
+1. Current working directory/worktree and branch.
+2. Understanding of the task and its acceptance criteria.
+3. Initial implementation or investigation plan.
 ```
 
 ### 7. Resultを報告する
 
-必ず次の表を返す。
+Return the following Markdown table, including for queued or failed setup. A prose-only mapping is insufficient. Use only identifiers actually returned by the app.
 
 | Task | Mode | Tool | Thread/Pending ID | Title | Branch/worktree | Status |
 |---|---|---|---|---|---|---|
@@ -225,7 +230,7 @@ fresh-contextの場合は、親文脈がないため必要情報をより厚く�
 
 ## Output Style
 
-- 日本語で、短くても対応表は省略しない。
+- Respond in clear English, even when input is Japanese. Follow `$AGENTS_ROOT/policies/communication.md`; keep the task mapping table even in a short reply. Use English for new thread titles and handoff prompts, preserving original issue text and identifiers.
 - 曖昧な場合は質問する。ただし、親文脈あり/なしが曖昧なだけなら既定の `fork_thread + worktree` で進める。
 - 複数issueを作る場合は、issueごとに1行で対応関係が分かるようにする。
 - 「tmuxは使っていない」「projectlessは使っていない」を結果または検証に含める。

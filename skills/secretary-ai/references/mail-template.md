@@ -1,3 +1,44 @@
+# Reply draft tone and templates
+
+## Language and tone
+
+Use concise, polite English for new drafts unless the user explicitly requests
+another artifact language. Preserve the language when editing an existing
+localized draft. Source email language alone does not change conversation language.
+Explain draft work in English and follow `$AGENTS_ROOT/policies/communication.md`.
+Keep the answer first, with necessary context afterward. Use three to five short
+paragraphs when appropriate, with no repeated apologies or unnecessary formality.
+Do not invent a name, commitment, date or fact to fill a template.
+
+## Default English template
+
+```text
+Hi {recipient name},
+
+{Answer or acknowledgement in one or two sentences.}
+
+{Necessary details or conditions.}
+
+{Next action, if relevant.}
+
+Best,
+{sender name}
+```
+
+Useful patterns:
+- Acknowledgement: "Thanks for sending this. I will review it and follow up."
+- Acceptance: "I can take this on and deliver it by {agreed date}."
+- Alternative: "I can deliver this by {available date}. Would that work?"
+- Scheduling: "Would either of these times work for you? {verified options}"
+
+Use only commitments supported by the user's instructions. Save drafts only;
+this template does not authorize sending mail or change recipient permissions.
+
+## Original Japanese templates — only for a requested Japanese artifact
+
+The original templates below are retained for explicitly requested Japanese
+deliverables. They do not set the default response or briefing language.
+
 # 返信ドラフトのトーンとテンプレ
 
 ## 基本トーン

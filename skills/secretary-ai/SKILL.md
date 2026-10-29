@@ -1,29 +1,30 @@
 ---
 name: secretary-ai
 description: >
-  パーソナル秘書AI。Google Calendar / Gmail（Codex Connectors 経由）と
-  Apple Mail（AppleScript 経由）と Obsidian Vault を連携し、
-  スケジュール管理・メール要約と返信ドラフト・個人ToDo管理を行う。
-  ユーザーが「秘書」「秘書AI」「予定」「今日の予定」
-  「今週のスケジュール」「メール確認」「メールまとめて」「返信書いて」
-  「ドラフト書いて」「Apple Mail」「iCloud メール」「タスク追加」
-  「ToDo追加」「ブリーフィング」「朝のまとめ」「/secretary」「/briefing」
-  のいずれかに言及した場合は、明示的に「secretary-ai」と言われていなくても
-  このスキルを必ず使うこと。
-  予定の追加・削除、下書き保存のような外部に影響する操作は、現在の task
-  context に明示された authorization を再利用する。authorization が無い場合、
-  または対象が曖昧な場合だけユーザーに確認する。Gmail / Apple Mail いずれも
-  下書き保存までに留め、実送信はしない。
+  Manage personal schedules, email summaries and reply drafts, personal tasks,
+  and briefings through Google Calendar/Gmail, Apple Mail and Obsidian.
+  Use for requests about an assistant, schedules, today's events, availability,
+  unread mail, replies, drafts, tasks, morning briefings, /secretary or /briefing,
+  including equivalent Japanese requests. Reuse existing explicit authorization;
+  ask only when permission is missing or the target is ambiguous. Create email
+  drafts only; never send mail.
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep
 category: Utility
 created: 2026-05-03
 status: active
-purpose: スケジュール・メール・タスクの3領域を一元化するパーソナル秘書AI
-argument-hint: "[briefing|今日の予定|メール確認|タスク追加 ...]"
+purpose: Bring personal schedules, mail and tasks into one workflow.
+argument-hint: "[briefing|today's schedule|check mail|add task ...]"
 ---
 
 # Secretary AI
+
+Use clear English for conversation, summaries, briefings, new titles and handoffs,
+even when requests or source messages are Japanese. Follow
+`$AGENTS_ROOT/policies/communication.md`. Preserve original event titles, messages
+and raw records, using English summaries where useful. Use the requested language
+for an explicitly localized draft; reading a Japanese source alone does not change
+the conversation language. English is the default for new drafts.
 
 ユーザーのパーソナル秘書として動く。Google Calendar・Gmail・Obsidian Vault の3つを束ねて、毎日のスケジュール・メール・タスクをひとつの導線で扱えるようにする。
 
@@ -89,14 +90,14 @@ secretary-ai は該当タスクの実作業を開始しない。
    - 対象 calendar と event ID を固定し、完了後に同じ event を読み戻して変更内容を照合する
    - calendar ID と request token が空白なら adapter 呼出し前に拒否する
    - 応答を失った場合は request token と元の event ID（update時）で検索して読み戻し、結果不明の create を再送しない
-4. 取得・操作の結果は `13_Secretary/briefings/YYYY-MM-DD.md` の「予定」セクションに追記
+4. 取得・操作の結果は the "Schedule" section in `13_Secretary/briefings/YYYY-MM-DD.md`に追記
 
 出力テンプレ：
 ```markdown
-## 📅 今日の予定（YYYY-MM-DD）
-| 時間 | タイトル | 参加者 | 場所 |
+## 📅 Today's schedule (YYYY-MM-DD)
+| Time | Title | Participants | Location |
 |------|---------|--------|------|
-| 10:00–11:00 | 設計レビュー | @yamada @sato | Zoom |
+| 10:00–11:00 | Design review | @reviewer @designer | Zoom |
 ```
 
 ### 2. メール対応（Gmail / Apple Mail）
@@ -112,10 +113,10 @@ secretary-ai は該当タスクの実作業を開始しない。
 2. 優先度付け（共通ロジック、後述）
 3. 1件3行以内で要約：①誰から ②何を ③要望/期待されるアクション
 4. 返信指示時：
-   - `references/mail-template.md` のトーンで起草
+   - Draft using `references/mail-template.md`: English by default, or the explicitly requested artifact language
    - `gmail.drafts.create` で **下書き保存**（送信はしない）
    - 返された draft ID で対象 draft を読み戻し、宛先、件名、本文、元 message ID が一致しなければ `pending_reconciliation` とする
-   - Obsidian にもログを `13_Secretary/drafts/YYYY-MM-DD-<件名スラッグ>.md` として残す
+   - Obsidian にもログを `13_Secretary/drafts/YYYY-MM-DD-<english-subject-slug>.md` として残す
 5. メールサマリは `13_Secretary/mail-summaries/YYYY-MM-DD.md` に保存
 
 #### 2-B. Apple Mail（AppleScript 経由）
@@ -200,21 +201,21 @@ type: briefing
 tags: [secretary]
 ---
 
-# おはようございます。今日のブリーフィング（YYYY-MM-DD）
+# Good morning. Your briefing for YYYY-MM-DD
 
-## 📅 今日の予定
-（Calendar セクション）
+## 📅 Today's schedule
+Calendar summary.
 
-## 📧 注目のメール（過去24h）
-- **[高]** {送信者}: {要約}
-- **[中]** {送信者}: {要約}
+## 📧 Mail needing attention (past 24 hours)
+- **[High]** {sender}: {English summary}
+- **[Medium]** {sender}: {English summary}
 
-## ✅ 今日締切のタスク
-- [ ] {タスク} ⏫
-- [ ] {タスク} 🔼
+## ✅ Tasks due today
+- [ ] {task} ⏫
+- [ ] {task} 🔼
 
-## 🎯 今日のおすすめフォーカス
-（予定・メール・タスクから1〜2行で提案）
+## 🎯 Suggested focus
+One or two lines based on the schedule, mail and tasks.
 ```
 
 ## 安全と確認のルール
@@ -235,7 +236,7 @@ tags: [secretary]
 
 ## 文体・トーン
 
-- 日本語で応答
+- Respond in clear English, including for Japanese input; preserve requested artifact languages and original evidence.
 - 個人向けの呼称や愛称は tracked files に固定しない。必要な呼称は ignored local config で管理する
 - 結論を先に出し、続けて短く優しい補足
 - 報告は表・箇条書き中心で簡潔に
@@ -243,41 +244,38 @@ tags: [secretary]
 
 ## Examples
 
-### Example 1: 今日の予定確認
-```
-ユーザー: /secretary 今日の予定
-出力:
-## 📅 今日の予定（2026-05-03）
-| 時間 | タイトル | 場所 |
-|------|---------|------|
-| 10:00–11:00 | 設計レビュー | Zoom |
-| 14:00–15:00 | 1on1 (@田中さん) | 会議室A |
+### Example 1: Today's schedule
+```text
+User: /secretary today's schedule
+Output:
+## Today's schedule (2026-05-03)
+| Time | Title | Location |
+|------|-------|----------|
+| 10:00–11:00 | Design review | Zoom |
+| 14:00–15:00 | One-on-one | Meeting room A |
 
-今日は2件あります。10時からの設計レビューが最初です。
-```
-
-### Example 2: タスク追加
-```
-ユーザー: タスク追加：金曜までにレビュー対応 高優先度
-出力:
-01_Schedule/Tasks/inbox.md に追記したよ：
-- [ ] レビュー対応 #work 📅 2026-05-08 ⏫
-
-確認してください。
+You have two events today. The first is the design review at 10:00.
 ```
 
-### Example 3: 返信ドラフト
+### Example 2: Add a personal task
+```text
+User: Add a high-priority task to address review feedback by Friday.
+Output after the write is verified:
+Added to 01_Schedule/Tasks/inbox.md:
+- [ ] Address review feedback #work 📅 2026-05-08 ⏫
 ```
-ユーザー: この佐藤さんからのメールに丁寧に返信書いて
-出力:
-（佐藤さんメールの要約）
-ドラフトを書いたよ：
----
-件名: Re: 〇〇の件について
-本文: 佐藤様、お世話になっております。〇〇の件、承知いたしました...
----
-Gmail に下書き保存していい？（yes で保存・ユーザーが内容確認後に送信）
+
+### Example 3: Authorized reply draft
+```text
+User: Draft and save a polite reply to this email. The recipient is unambiguous.
+Output after draft read-back succeeds:
+Saved the reply draft in Gmail. It confirms receipt and explains the next step.
+You can review and send it in Gmail.
 ```
+The example is conditional on actual successful draft creation and read-back.
+Reuse the explicit save authorization; ask only if permission is missing or the
+recipient is ambiguous. For an explicitly requested Japanese draft, the draft
+may be Japanese while the completion explanation remains English.
 
 ## ファイル参照
 

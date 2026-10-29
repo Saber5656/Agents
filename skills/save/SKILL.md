@@ -1,15 +1,20 @@
 ---
 name: save
-description: save実行直前までの対話を集約し、Obsidian のプロンプトアーカイブに保存する
+description: Save the conversation before this invocation as an English summary with original visible records in the Obsidian prompt archive.
 user-invocable: true
 category: Obsidian
 created: 2026-02-14
-updated: 2026-05-15
+updated: 2026-10-30
 status: active
-purpose: 対話内容をObsidianに日付・集約要約付きで自動保存
+purpose: Preserve conversation context in Obsidian with a dated English summary and original records.
 allowed-tools: Read, Write, Bash, Glob
-argument-hint: "[追加メモ]"
+argument-hint: "[additional notes]"
 ---
+
+Use clear English for the summary, headings, new filename and completion reply,
+even when the original conversation is Japanese. Follow
+`$AGENTS_ROOT/policies/communication.md`. Preserve original messages and raw
+records in their source language; a summary does not replace those records.
 
 このスキルが、プロンプトアーカイブの保存先・frontmatter・命名規則・機密情報マスクの責務を持つ。ルートの startup instructions に同じ詳細を重複して書かないこと。
 
@@ -18,7 +23,7 @@ argument-hint: "[追加メモ]"
 1. 保存先のベースディレクトリ: `${PROMPT_ARCHIVE_ROOT}`
    - 実環境の Vault パスは `.env` や `*.local.md` などの ignored file で管理し、Git 管理しない
 2. 日付ディレクトリを作成: `10_Prompt/YYYY/MM/DD/`（今日の日付を使用）
-3. 保存対象範囲の内容を20文字程度の日本語で要約し、ファイル名にする（`.md` 拡張子）
+3. Use a short descriptive English filename (about 3–8 words, `.md` extension) for the saved scope. Keep existing filenames and links intact.
    - ファイル名に使えない文字（`/`, `\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`）は除去する
 4. 現在のエージェントに対応する frontmatter を使う:
 
@@ -53,7 +58,7 @@ tags:
 ### 保存対象範囲（重要）
 
 - **保存対象は `save` が実行された直前までのやり取りに限定する**。ユーザーが `/save`、`saveして`、`保存して` などでこのスキルを呼び出したターン自体と、その後の保存処理に関するエージェント応答は本文に含めない
-- `save` 実行時のユーザー発言に追加メモやタグが含まれる場合、その発言を会話ログとしては保存せず、必要に応じて frontmatter の tags または本文の「追加メモ」にだけ反映する
+- `save` 実行時のユーザー発言に追加メモやタグが含まれる場合、その発言を会話ログとしては保存せず、必要に応じて frontmatter の tags またはthe "Additional notes" sectionにだけ反映する
 - 保存処理中に発生したツール実行ログ、保存完了報告、保存先パス表示は、保存対象の本文に含めない
 - ユーザーが明示的に保存範囲を指定した場合も、指定範囲の末尾が `save` 実行ターンを含むときは、`save` 実行直前までで切る
 
@@ -76,28 +81,31 @@ tags:
 推奨する本文構成:
 
 ```markdown
-# (会話全体を20〜40文字程度で表すタイトル)
+# Descriptive English conversation title
 
-## 概要
-(この会話で扱った目的・背景・最終状態)
+## Overview
+Purpose, background and final state.
 
-## 主要な要件・前提
-- (ユーザーが求めたこと、制約、判断に効いた前提)
+## Requirements and assumptions
+What the user requested, constraints and relevant assumptions.
 
-## 実施内容・成果
-- (行った調査、作成・変更したもの、重要な成果物パス)
+## Work and results
+Research, changes and links to important artifacts.
 
-## 決定事項・再利用できる知識
-- (今後も参照すべき判断、ルール、運用知識)
+## Decisions and reusable knowledge
+Decisions, reasons and procedures worth preserving.
 
-## 未解決事項・次アクション
-- (残課題がなければ「なし」)
+## Open items and next actions
+Remaining work, or "None".
 
-## 追加メモ
-(save 実行時の $ARGUMENTS があれば記載。なければ省略可)
+## Additional notes
+Notes provided with this save request, if any.
+
+## Original records
+Links to the ordered source records, with unavailable/truncated coverage stated.
 ```
 
-5. `$ARGUMENTS` があれば、tags に追加タグとして含めるか、本文に追加メモとして記載する
+5. `$ARGUMENTS` があれば、tags に追加タグとして含めるか、include them in the English "Additional notes" section
 6. 保存完了後、ファイルパスを表示する
 
 ## 機密情報のマスク処理
