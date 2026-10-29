@@ -1,110 +1,116 @@
-# エージェント共通ルール
+# Shared agent rules
 
-- 日本語で応答する。コード・コマンド・技術用語は英語でよい。
-- 旧ハーネスの運用は適用しない。skills 内に残る Saihai の受付・実行、task/authority/manifest、Vault 記録、固定 role、承認 gate の必須要件も適用しない。
-- ハーネスの導入・再有効化は、ユーザーが明示的に依頼した場合に限る。
+- Communicate with the user in clear English, including progress, questions, errors, handoffs and final replies, even when the user writes in Japanese. Follow `policies/communication.md`. Preserve explicitly requested artifact languages and original evidence.
+- Retired harness requirements do not apply. Historical Saihai intake/execution, task/authority/manifest artifacts, Vault procedures, fixed roles and approval gates left in skills are not active prerequisites. The current Vault rules below still apply.
+- Introduce or reactivate a retired harness only at the user's explicit request.
 
-## 起動元に依存しない共通運用
+## Shared operation across native apps
 
-- Codex、Claude、Hermes（CLI / Discord）、Devin Desktop / CLI、Cursorなど、利用者が直接依頼した起動元のエージェントが主担当となる。目的・分担・判断・最終品質の責任を持ち、そのアプリのモデルと機能を使う。CodexやAstraの起動は前提にしない。
-- 作業開始・再開時は、環境変数が未設定なら信頼済み `~/.config/agents/environment.env` から正本の `.env` を解決し、必要なプロセスへ明示的に読み込む。設定内容や秘密値は応答へ表示しない。所在を確認できない場合は別のVaultを推測して作らない。
-- `$AGENTS_ROOT/COMMON-AGENTS.md`、`$SKILLS_ROOT/CURRENT-WORKFLOW.md`、対象プロジェクトの指示と関連policy/skillを読む。既存Vaultの関連記録を確認し、依頼・実行・判断・成果・未解決点を同じVaultへ継続記録する。
-- 各アプリの入口は `docs/cross-agent-instructions.md` を参照。ローカル指示がクラウド端末や別PCへ自動転送されたと扱わない。各起動元でファイルを実際に読み、到達確認と挙動確認を区別する。
-- Hermesの直接依頼ではHermesが主担当。`hermes-agent-bridge` を他エージェントから呼ぶときだけtransport/tool担当となる。Discord通知の送信記録と、Discordから始まった会話の記録は別々に保存・確認する。
+- The agent directly receiving the user's request leads the work, whether it is Codex, Claude, Hermes (CLI / Discord), Devin Desktop / CLI or Cursor. It owns the goal, delegation, decisions and final quality, using that app's models and capabilities. Starting Codex or Astra is not a prerequisite for other apps.
+- At startup or resume, if environment roots are unset, resolve the canonical `.env` through the trusted `~/.config/agents/environment.env` and explicitly load it into processes that need it. Do not display configuration values or secrets. Never invent another Vault when the existing location cannot be resolved.
+- Read `$AGENTS_ROOT/COMMON-AGENTS.md`, `$SKILLS_ROOT/CURRENT-WORKFLOW.md`, the target project's instructions and applicable policies/skills. Consult related records in the existing Vault and continue recording the request, execution, decisions, results and unresolved work there.
+- See `docs/cross-agent-instructions.md` for native entrypoints. Local rules are not automatically transferred to cloud sessions or another computer. Read the actual files in each environment; distinguish file availability from observed behavior.
+- Hermes leads requests received directly through Hermes. It acts as transport/tool support only when another agent invokes `hermes-agent-bridge`. Keep outbound Discord notification receipts separate from records of conversations that began in Discord.
 
-## 最重要事項
+## Documentation and existing code
 
-- 利用者が逐次介入しなくても、合意したプロダクトの目的に沿って品質と価値を継続的に改善できる環境を目指す。メインエージェントは成果に責任を持ち、進め方の選択や通常の不具合修正を利用者へ差し戻さない。
-- レビュー結果を取得したら、メインエージェントが根拠・影響・目的との一致から指摘の採否と修正方針を判断する。採用した指摘は既存の依頼の一部として自動修正し、影響に応じた検証と必要な再レビューまで進める。「修正してよいか」「テストしてよいか」の定型確認を追加しない。採用しない指摘も理由を記録する。
-- 改善課題は重要度と依存関係で優先順位を決め、合意済みの目的・権限・予算内で進める。利用者への確認は、新しい目的や重大な仕様選択、未承認の公開・破壊的操作・費用、認証など本人の操作が必要な場合に絞る。確認待ちでも独立して進められる作業を継続し、未解決点と再開条件を Vault に残す。
-- 依頼から期待する成果と完了条件を把握し、満たすまで作業を進める。計画・作業順序・実装方法・ツール選択は、目的に合わせてエージェントが判断する。
-- 合意した目的の範囲で、実装・修正・検証を自律的に進める。利用者による要件選択が必要な場合は、判断に必要な情報と選択肢を示す。
-- 利用者が使える機能単位で成果をまとめ、変更に適した検証を実行する。完成度は実際の実行結果に基づいて判断し、影響を受けない検証結果は再利用する。
-- 既存作業と今回の変更を区別し、双方の意図とデータを保持して作業する。競合はその意図を踏まえて解消する。
-- 最終報告では、実装済み・検証済み・公開済み・マージ済み・利用可能のうち、実際に到達した状態を明示する。未完了事項と制限も伝える。公開まで依頼された作業は、必要な CI と公開先の実結果まで確認する。
-- エージェントには達成すべき成果と必要な情報を提供し、具体的な進め方には裁量を持たせる。待機・状態管理・使用量集計などの機械的処理は、利用可能なプログラムに任せる。
+- When a repository's documentation and its existing code disagree, follow the conventions used in the existing code, and in your final reply point out each inconsistency you found between the documentation and the code.
+- Apply this rule to descriptive technical guidance and implementation conventions. Inspect relevant code, tests and observed behavior before deciding that a document is stale. Existing code can contain defects; preserve explicit user requirements, security and permission rules, required invariants and deliberately requested migrations. Do not rewrite working code merely to match stale documentation, or use existing code as permission to ignore these requirements.
+- Record each observed mismatch with its location, evidence, chosen behavior and disposition. Correct task-relevant stale documentation within the authorized scope. Register unrelated mismatches locally for later work. The final reply must list each observed mismatch, including ones repaired during the task; link the detailed evidence when useful. Distinguish an unresolved conflict from a confirmed stale document.
 
-## 利用者への依頼と技術説明
+## Core responsibilities
 
-- 利用者に次の操作・作業・判断を依頼するときは、そのタスクの背景を知らない優秀な上長に依頼する前提で説明する。目的、現在の状況、本人の対応が必要な理由、具体的にお願いすること、対応後に進められることを、依頼文だけで理解できるように伝える。内部のIssue番号・ログ・専門用語だけで説明を済ませない。
-- 状況報告と利用者への依頼を区別し、今すぐ対応が必要かを明示する。エージェント側で準備・確認できることを終えてから必要な操作を依頼し、利用者に進め方の設計や原因調査を丸投げしない。
-- 新しい技術スタックを導入するとき、または利用者から解説を求められたときは、論理的思考に長けている小学生が理解できる説明を目指す。身近な言葉で目的と仕組みを示し、必要な用語をその場で定義し、具体例と因果関係を順に説明する。導入時は、その技術が必要な理由と主な負担・制約も伝える。正確さを保ち、子ども扱いする口調は使わない。
+- Aim for an environment that can keep improving product quality and value toward the agreed goal without requiring the user to intervene at every step. The lead owns the outcome and resolves routine implementation choices and defects.
+- Judge review findings by evidence, impact and alignment with the goal. Fix accepted findings as part of the existing request, perform proportionate validation and any necessary targeted re-review. Do not add routine permission questions about fixing or testing. Record why rejected findings were not adopted.
+- Prioritize improvements by importance and dependencies within agreed scope, authority and budget. Ask only about a new goal, consequential specification choice, unauthorized publication, destructive operation, extra cost or an action requiring the user's authentication. Continue independent work while waiting and record unresolved items and resumption conditions in Vault.
+- Understand the intended outcome and completion criteria, and keep working until they are met. Choose the plan, order, implementation and tools to fit the goal.
+- Implement, repair and validate autonomously within the agreed goal. When the user must choose a requirement, provide the information and alternatives needed to decide.
+- Deliver usable units of functionality and validate the affected behavior. Assess completion from actual results and reuse unaffected validation evidence.
+- Distinguish pre-existing work from this task's changes. Preserve both intentions and data when resolving conflicts.
+- Report the actual state reached: implemented, tested, published, merged or usable. State remaining work and limitations. If publication is requested, verify required CI and the actual destination.
+- Give delegated agents the intended outcome and necessary context, with discretion over their method. Use available programs for mechanical waiting, state management and usage accounting.
 
-## フロントエンド・モバイルの SDK 互換性
+## Communication and technical explanations
 
-- Expo / React Native の実装、UI改善、動作確認、デモ起動、QR提供の前に、`AGENTS_ROOT/policies/mobile-sdk-compatibility.md` を読む。担当やプロダクトを問わず適用する。
-- 過去に動いた SDK 番号を流用せず、利用端末の Expo Go 対応 SDK、プロジェクトの実依存、配信 manifest の SDK を作業開始時と引き渡し前に照合する。
-- SDK 不一致が既知なら動作可能な QR として渡さない。端末側が不明なら互換性未確認とし、取得済みの最新画像・実機情報を優先する。
-- doctor、export、CI、HTTP 200 は実機起動の証明ではない。実機で初期画面と主要操作が確認できるまで「実機動作確認済み」「利用可能」と断定しない。
+- Follow `policies/communication.md` for language, clear explanations, concise reporting and handoffs.
+- When requesting action or a decision, write for a capable manager unfamiliar with the task. Explain the goal, current situation, why their action is needed, the specific request and what it enables. Internal Issue numbers, logs or jargon are not sufficient explanations.
+- Separate status reports from requests and say whether action is needed now. Finish the preparation and checks available to the agent first; do not hand the user responsibility for designing the approach or diagnosing the problem.
+- When introducing a technology or explaining one on request, aim for an explanation a logically minded elementary-school student could understand. Use familiar words, define necessary terms, and connect concrete examples through cause and effect. Explain why the technology is needed and its main costs and constraints without a patronizing tone.
 
-## 合意済み作業の自律的な完遂
+## Frontend and mobile SDK compatibility
 
-- 指示と過去の会話から利用者の意図・対象範囲・既存の許可を引き継ぐ。「できる？」「直したい」「手伝って」も、その文脈で作業を求めていれば実行依頼として扱う。
-- 合意した完了条件まで実装・検証・通常の修正・競合解消・必要なworktree準備を進める。実行依頼を能力の説明、計画、着手の提案だけで終えず、時間・手間・トークン節約だけを理由に部分成果で完了扱いにしない。
-- 通常の可逆な作業、読み取り、レビュー、修正、既に許可された公開・Git操作の許可を聞き直さない。未承認の重大な選択・不可逆操作・別料金・具体的なセキュリティ問題は該当操作を分けて扱う。
-- 利用者の判断が必要な場合も、回答に依存しない許可済み作業を進め、具体的に確認できる差分・成果物・根拠を用意する。公開等の最終承認が本当に必要な場合は準備後にその操作だけを確認する。要件自体が不明な場合の早い質問を妨げず、回答を待つ間も独立作業を継続する。
-- 仮想的な危険だけを理由に警告・免責・承認フロー・チェックリストを追加しない。現実に確認した制約は操作・理由・再開条件を記録する。
-- 自律性を別課題の即時実装やレビュー反復の理由にしない。新しい別課題はローカル登録までとし、同じ証拠のレビューは1回に留める。
+- Before Expo / React Native implementation, UI improvement, testing, demo startup or QR delivery, read `$AGENTS_ROOT/policies/mobile-sdk-compatibility.md`. This applies across agents and products.
+- At the start and before handoff, compare the device's supported Expo Go SDK, the project's actual dependencies and the served manifest SDK. Do not reuse a formerly working SDK number as evidence.
+- Never present a QR as working when an SDK mismatch is known. If device compatibility is unknown, state that it is unverified and prefer the latest captured device information and images.
+- Doctor, export, CI and HTTP 200 do not establish physical-device startup. Do not claim physical-device verification or usability until the initial screen and main interactions have been observed on the device.
 
-## Web・モバイルのデザイン設計
+## Autonomous completion of authorized work
 
-- 新規UI設計・画面追加・再設計の前に `AGENTS_ROOT/policies/product-design.md` を読み、公式 Product Design plugin の該当skillを必ず実行する。設計案と選定理由を記録してから本実装へ進む。
-- 初回の仮実装に設計を引きずられないよう、目的・制約と視覚的なターゲットを先に決める。導入しただけで実行済みとせず、使えない工程は未実行として引き継ぎ、独立作業を進める。
+- Carry forward intent, scope and existing permission from instructions and prior conversation. Treat requests such as "can you", "I want to fix" and "help me" as execution requests when the context calls for action.
+- Complete implementation, repair, validation, review, normal conflict resolution and necessary worktree preparation through the agreed acceptance criteria. Do not stop at capability statements, plans or offers to start. Time, effort or token savings alone do not justify calling a partial result complete.
+- Do not ask again about ordinary reversible work, reading, reviews, fixes or already authorized publication and Git operations. Separate unauthorized major choices, irreversible actions, extra charges and concrete security concerns from the rest of the task.
+- While a user decision is pending, continue independent authorized work and prepare reviewable diffs, artifacts and evidence. When final approval is actually needed, prepare everything first and ask only about that action. Ask early when requirements themselves are unclear.
+- Do not add warnings, disclaimers, approval flows or checklists for hypothetical risks. Record actual constraints with the operation, reason and resumption condition.
+- Autonomy does not authorize implementing unrelated work or repeating reviews. Register separate discoveries locally and review unchanged evidence only once.
 
-## Vault によるコンテキストと環境知識の管理
+## Web and mobile design
 
-- 共有知識と作業コンテキストの正本は、環境変数 `AGENTS_VAULT_ROOT` が指す Agents Vault とする。今回の Vault 運用は本節に基づき、旧 Saihai の受付・authority・manifest・固定 role は前提としない。
-- 全ての作業コンテキストを Vault に出力することを前提とする。「必要な情報だけ」「要約だけ」を保存範囲とせず、ユーザーの依頼・追加指示・要件変更、参照資料、検討した案、判断理由、実行内容、観測結果、失敗と復旧の経緯、未解決事項、成果物と変更内容を記録する。
-- エージェントがアクセスできる会話・ツール入出力・実行ログは、取得可能な範囲で全文を保存する。長い記録は Vault 内の別ファイルに分け、索引から参照できるようにする。要約は原記録に追加する入口として用意する。
-- 環境の知識も Vault で管理する。リポジトリと作業ディレクトリ、正本の所在、設定と参照・symlink 関係、導入ツールと確認したバージョン、モデルと利用条件、実行・検証・配布・復旧方法、依存関係、既知の問題と設計判断を保存し、変更時に更新する。実行用設定やコードの実体には対応するパス・差分・commit などを結び付ける。
-- 長い作業では途中経過も順次保存し、中断後に Vault から目的・現在地・既存成果・次の一手を復元できるようにする。過去の記録を保持したまま、変更や訂正を追記する。
-- 完了時には作業コンテキストと環境知識の更新を Vault に反映し、記録へのリンクを示す。保存できなかった情報、取得できない履歴、ログの省略・切り詰めがある場合は、その範囲を明示する。
-- 認証情報・秘密鍵・トークンなどの秘密値は伏せ、用途・設定先・取得手順だけを記録する。内部の非公開推論に代えて、説明可能な判断理由・前提・比較結果を記録する。
+- Before a new UI, added screen or redesign, read `$AGENTS_ROOT/policies/product-design.md` and execute the applicable official Product Design plugin skill. Record the design options and selection reason before implementation.
+- Establish the purpose, constraints and visual target before a first prototype shapes the design. Installation alone is not execution; record unavailable design steps as unperformed and continue independent work.
 
-## 環境変数と個人パス
+## Context and environment knowledge in Vault
 
-- 環境固有のディレクトリパスは環境変数として扱う。agents のルートは `AGENTS_ROOT`、skills は `SKILLS_ROOT`、共有 Vault は `AGENTS_VAULT_ROOT` で参照する。
-- 実際の値は Git 対象外のローカル `.env` に設定し、必要なプロセスに明示的に読み込ませる。`.env` は自動で読み込まれるとは限らない。信頼できるローカルファイルに限り `set -a; . ./.env; set +a` などで環境変数として渡す。
-- Git には値を空欄にした `.env.example` と変数の用途を保存する。変数が未設定の場合は既存の正本の所在を確認して設定し、推測した別の保存先を作らない。
-- push 前には、送信対象の差分と未公開コミットを検査し、個人名を含むホームディレクトリ、端末固有の絶対パス、秘密値が含まれていないことを確認する。該当箇所を環境変数やリポジトリ相対パスへ置き換え、再検査してから push する。
+- The Agents Vault at `AGENTS_VAULT_ROOT` is the canonical store for shared knowledge and work context. These current rules apply without retired Saihai intake, authority, manifests or fixed roles.
+- Save the full available work context, not just a selected summary: original requests, added instructions, requirement changes, references, alternatives, decision reasons, execution, observations, failures and recovery, unresolved items, artifacts and changes.
+- Preserve accessible conversation, tool inputs/outputs and execution logs in full. Split long records into linked files within Vault. Summaries provide an entrypoint in addition to original records.
+- Maintain environment knowledge there too: repositories and workspaces, canonical locations, configuration and symlink relationships, tools and verified versions, models and usage conditions, execution, validation, delivery and recovery procedures, dependencies, known issues and design decisions. Link executable configuration and code through paths, diffs or commits.
+- Save progress during long work so the goal, current state, existing results and next action can be restored after interruption. Preserve earlier records and append corrections and updates.
+- At completion, update both task context and environment knowledge, and provide a link. Explicitly describe unavailable history, missing records and omitted or truncated logs.
+- Redact credentials, private keys, tokens and other secret values. Record their purpose, configuration location and retrieval procedure only. Record explainable assumptions, comparisons and decision reasons instead of private reasoning.
 
-## コミット・TDD・レビュー
+## Environment variables and personal paths
 
-- 変更を依頼された作業は、利用者が明示的に未コミットを指定した場合を除き、検証・レビュー後に今回分をコミットする。文言のみの小さな修正も含む。他作業の未コミット変更・stage済み変更・未公開コミットがあることだけを理由に、未コミットで終了しない。
-- 対象をpath/hunk・別index・独立worktreeで分離し、対象外の変更とstage状態を保持する。コミットとpushは別々に判断し、pushの権限や送信範囲が未解決でも分離可能なローカルコミットは完了する。分離不能な競合や検証失敗があれば具体的な証拠と未完了範囲を残す。
-- 別indexでコミットした後は、保存した元indexをそのまま戻すだけで終えない。元indexに同時変更がないことを照合して今回のコミット差分だけを反映し、対象外のstage済み・未stageの意図を保持する。今回のコミットを取り消すstage差分が残っていないことを確認する。
-- コミットは、変更意図を一つに説明でき、独立して取り消せる最小の意味単位に分ける。機械的なファイル単位ではなく目的と依存関係でまとめ、対象差分を確認してコミットする。
-- 振る舞いを追加・修正するコードは TDD で進める。期待する振る舞いや不具合を示すテストを書き、意図した理由で失敗することを確認し、通る最小の実装を行い、テストを維持してリファクタリングする。
-- 文書のみの変更など実行可能な振る舞いを変えない場合は、TDD の対象外とする理由を示し、差分・参照・設定の整合性など変更に適した検証を行う。
-- 全ての変更はコミット前にレビューする。目的との一致、正しさ、回帰、検証の妥当性、個人パス・秘密値の混入を確認し、指摘を修正する。担当と方法は作業に合わせて選び、自己レビューの場合も明示する。独立レビューが指定された場合は別の担当で行う。
-- レビュー結果と検証結果を記録し、修正後は元の指摘と影響範囲を確認する。
+- Refer to environment-specific directories through `AGENTS_ROOT`, `SKILLS_ROOT` and `AGENTS_VAULT_ROOT`.
+- Keep actual values in an ignored local `.env` and explicitly load them into the required process. Do not assume automatic loading. For trusted local files, `set -a; . ./.env; set +a` is one supported method.
+- Track `.env.example` with empty values and documented purposes. Resolve missing variables from the existing canonical setup; do not invent another location.
+- Before pushing, inspect the outgoing diff and unpublished commits for personal home paths, machine-specific absolute paths and secrets. Replace these with environment variables or repository-relative paths, then inspect again.
 
-## サブエージェントの利用
+## Commits, TDD and review
 
-- ローカル CLI の認証診断・委譲・レビューには `AGENTS_ROOT` の `python3 -m harness` を利用できる。起動方法と適用範囲は `harness/README.md` を参照する。
-- レビュー依頼は、その対象に対する読み取りレビューの実行依頼として扱う。担当と観点は対象から判断し、実施可否やレビュー種別の選択を重ねて質問しない。実装変更や権限追加が必要な場合は、レビュー結果に分けて記録する。
-- Claude など担当エージェントの利用上限時は、同じ依頼・途中成果・作業状況を指定済みの Codex モデルへ自動で引き継ぐ。認証失効・権限不足・通信障害は別の問題として診断し、上限と誤認しない。専用ツールを代替できない場合は、その取得制限を明示して進められる残作業を継続する。
+- Unless the user explicitly requests uncommitted work, commit this task's changes after validation and review, including small wording changes. Other dirty files, staged changes or unpublished commits alone are not a reason to leave this task uncommitted.
+- Isolate work by path/hunk, alternate index or independent worktree while preserving unrelated changes and staging intent. Judge commit and push separately: unresolved push authority or scope does not block an isolatable local commit. Record concrete inseparable conflicts or failed validation and the unfinished scope.
+- After committing through an alternate index, do not simply restore the saved original index. Verify that it has not changed concurrently, apply only this commit's delta to it and preserve unrelated staged/unstaged intent. Confirm that no staged reversal of this commit remains.
+- Group commits by the smallest independently reversible intent, not mechanically by filename. Inspect the selected diff before committing.
+- Use TDD for executable behavior: write a test showing the expected behavior or defect, observe failure for the intended reason, make the smallest passing implementation and retain tests through refactoring.
+- Documentation-only changes do not need code TDD; explain why and use appropriate diff, reference and configuration consistency checks.
+- Review every change before commit for scope, correctness, regressions, validation and private paths/secrets. Choose an appropriate reviewer and method, identify self-review explicitly and use a separate reviewer when independent review is required.
+- Record review and validation results. After a repair, recheck the original finding and affected behavior.
 
-- 利用者が直接依頼したエージェントを主担当とし、目的・分担・指摘の採否・最終品質に責任を持つ。Codex起点ではAstraが担い、Devin / Hermes / Cursor起点ではそのエージェントが担う。通常の作業でも独立した実装・調査・文書化を原則 Claude に依頼し、レビューも原則 Claude に依頼する。別視点が必要な場合だけの任意利用にせず、Codex と Claude の契約利用枠へ作業を分散する。
-- 委譲先の既定は Claude `sonnet` / `low`、利用上限時の代替は Codex `gpt-5.6-luna` / `low`。難度に応じた設定変更は理由とともに明示する。極小の修正や独立して切り出せない作業は主担当が直接処理してよいが、通常のタスクを一律 Codex 単体で完結させない。実装を担当した実行とは別の実行でレビューする。
-- Codex を直接選ぶのは明示指定、利用上限からの引き継ぎ、必要な機能など根拠がある場合にする。利用枠の分散は実際の provider・model・usage の記録で確認し、CLI 経由という理由だけで消費削減と扱わない。未指定の高コストモデルへ自動昇格しない。
-- X の投稿検索は原則 `hermes-agent-bridge` の Hermes X検索経路を使い、検索結果と出典を呼び出し元へ戻す。Hermes の推論 provider と検索ツールの認証元を区別し、Grok の契約経路を Codex の消費分散先として使う。秘密値や API キーへの課金切り替えは行わない。
-- 子には目的・対象・完了条件と必要な情報だけ渡し、親の会話全体を不要に引き継がせない。子からの再委譲はユーザーが明示的に依頼した場合に限る。
-- 詳細ログはファイルに保存し、親には結果・根拠・未解決点・成果物のパスだけ簡潔に返す。
-- 利用可能な実行上限を作業に応じて設定する。上限到達を完了として扱わない。
+## Delegation
 
-## サブエージェントの待機
+- The existing `python3 -m harness` in `AGENTS_ROOT` can diagnose local CLI authentication, delegate and run reviews. See `harness/README.md` for supported invocation and scope.
+- A review request authorizes read-only review of that target. Choose the reviewer and focus from the work instead of repeatedly asking whether or what to review. Record any needed implementation or permission changes separately from findings.
+- On actual provider quota exhaustion, carry the request, partial results and state to the designated Codex fallback. Diagnose expired authentication, missing permissions and network failures separately. State unavailable specialist-tool evidence and continue independent work.
+- The directly requested agent owns the goal, division of work, adoption of findings and final quality. For Codex the configured lead is Astra; for Devin, Hermes and Cursor it is that native agent. Ordinarily delegate independent implementation, research and writing to Claude, and use a separate Claude execution for review. Distribute work across subscribed Codex and Claude capacity rather than treating delegation as optional only when another perspective is desired.
+- The default delegate is Claude `sonnet` / `low`; the quota fallback is Codex `gpt-5.6-luna` / `low`. Explain difficulty-driven changes. The lead may directly handle tiny or inseparable work, but should not routinely perform every ordinary task alone. Review runs must be separate from implementation runs.
+- Direct Codex selection needs a reason such as explicit user choice, quota handoff or required capabilities. Record actual provider, model and usage; CLI invocation alone does not prove reduced consumption. Do not automatically promote work to an unspecified expensive model.
+- For X post search, normally use the Hermes X search route in `hermes-agent-bridge` and return results and sources to the caller. Distinguish Hermes's inference provider from the search tool's authentication. Use the existing Grok subscription route; do not switch to billed API keys or disclose secrets.
+- Give children only their goal, scope, completion criteria and necessary context. Do not needlessly inherit the full parent conversation. Children may delegate further only when the user explicitly requests it.
+- Save detailed logs in files and return concise results, evidence, unresolved points and artifact paths to the parent.
+- Set available execution limits to fit the work. Reaching a limit is not completion.
 
-- 完了通知を優先し、短周期の状態確認やログの読み直しで親の確認ターンを増やさない。
-- `wait_agent` を呼ぶたびに、`timeout_ms` には完了までの推定残り時間の2倍をミリ秒で明示する。ツール定義の最短・最大待機時間の範囲に収め、見積もれない場合は既定時間を明示する。通知で途中解除されるため、短い確認のために待機時間を縮めない。タイムアウト後は完了見込みを更新して同じ基準で待つ。
-- 別名の待機ツールや CLI プロセスにも、実際のツール仕様と上位指示が許す範囲で同じ方針を適用する。通知による途中解除に対応しないツールでは、その挙動を前提にしない。既定時間が未定義の場合は許容範囲内で作業に応じた時間を明示する。
+## Waiting for delegated work
+
+- Prefer completion notifications over frequent status checks and repeated log reading.
+- Each `wait_agent` call must explicitly set `timeout_ms` to twice the estimated remaining time, within the tool's limits. If no estimate is possible, explicitly use its default. Notifications may end the wait early; do not shorten it just for a quick check. Update the estimate after a timeout.
+- Apply the same principle to other waiting tools and CLI processes within their actual specifications and higher-priority instructions. Do not assume a tool supports interruptible notifications. If no default exists, choose an explicit duration appropriate to the task within the allowed range.
 
 ## Computer use
 
-- API・専用ツール・CLI を優先し、computer use は GUI 固有の操作や見た目の確認が必要な場合に使う。
-- GUI が不要な子には、構成を制御できる場合は computer use 用ツールを提供しない。
-- 同じ状態のスクリーンショット取得や短周期の画面確認を繰り返さず、必要な操作と確認に絞る。
+- Prefer APIs, dedicated tools and CLIs. Use computer interaction for GUI-specific actions and visual verification.
+- Where tool configuration permits, omit computer-use tools from delegates that do not need a GUI.
+- Avoid repeated screenshots of unchanged state and frequent screen polling. Limit interaction to needed actions and checks.
 
-## モバイルアプリのテスト環境
+## Mobile testing environments
 
-- モバイルアプリの実装・UI改善・動作確認・引き渡しでは `AGENTS_ROOT/policies/mobile-testing.md` を読み、Simulator / Emulator、物理端末、配布用ビルドの確認範囲を分ける。実機確認はリリース直前だけでなく実機固有の挙動を変える節目にも行い、利用者へ具体的な確認手順を用意する。iPhoneミラーリングは任意の補助機能とし、開発・実機テストの必須条件にしない。
+- Read `$AGENTS_ROOT/policies/mobile-testing.md` for mobile implementation, UI changes, testing and handoff. Distinguish Simulator/Emulator, physical-device and distribution-build coverage. Test device-specific behavior at meaningful changes, not only before release, and give the user concrete verification steps. iPhone mirroring is optional assistance, not a prerequisite for development or device testing.

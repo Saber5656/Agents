@@ -1,94 +1,135 @@
-# 各アプリからAgents共通運用を開始する
+# Start the shared Agents workflow from each native app
 
-Agentsは起動元に依存しない指示体系。Devin Desktopで始めればDevin、DiscordでHermesへ
-依頼すればHermesが主担当になる。Codexや `python3 -m harness run` を経由する必要はない。
-`COMMON-AGENTS.md` が正本で、各アプリには短い読み込み・保存指示を置く。
-モデルによる指示遵守の確率性は残る。OS制約や認証・権限を変更する機構ではない。
+The app receiving the user's request remains the lead. A task started in Devin
+Desktop is led by Devin; a Discord request to Hermes is led by Hermes. Neither
+needs to start Codex or `python3 -m harness run`. `COMMON-AGENTS.md` is the
+canonical policy, with short loading and recording instructions in each app.
+These instructions guide model behavior; they do not change OS restrictions,
+authentication or permissions, and compliance still requires verification.
 
-## 正本と入口
+## Canonical policy and entrypoints
 
-| 起動元 | 常時読み込む入口 | 適用範囲 |
+| App | Persistent entrypoint | Scope |
 |---|---|---|
-| Codex | `~/.codex/AGENTS.md`（既存のCOMMONへのsymlinkは保持） | このユーザーの通常セッション |
-| Claude Code | `~/.claude/CLAUDE.md`（同上） | このユーザーの通常セッション |
-| Devin Local / CLI | `~/.config/devin/AGENTS.md` | DesktopのDevin LocalとCLI |
-| Devin Desktop Cascade | `~/.codeium/windsurf/memories/global_rules.md` | Cascadeの全workspace、6,000文字以内 |
-| Hermes CLI / gateway | `~/.hermes/SOUL.md` 内の管理ブロック | 作業ディレクトリに依存しないglobal identity |
-| Cursor | `~/.cursor/rules/agents.mdc`（alwaysApply） | 対応版CursorのローカルUser rule |
-| その他のAGENTS対応agent | このrepoの `AGENTS.md` | このrepoを開いたセッション |
+| Codex | `~/.codex/AGENTS.md` (preserve its existing COMMON symlink) | This user's normal sessions |
+| Claude Code | `~/.claude/CLAUDE.md` (same) | This user's normal sessions |
+| Devin Local / CLI | `~/.config/devin/AGENTS.md` | Desktop Devin Local and CLI |
+| Devin Desktop Cascade | `~/.codeium/windsurf/memories/global_rules.md` | Cascade workspaces; 6,000-character limit |
+| Hermes CLI / gateway | Managed block in `~/.hermes/SOUL.md` | Global identity, independent of working directory |
+| Cursor | `~/.cursor/rules/agents.mdc` (`alwaysApply`) | Local user rules in supported Cursor versions |
+| Other AGENTS-compatible agents | This repository's `AGENTS.md` | Sessions opened in this repository |
 
-`~/.config/agents/environment.env` は既存Agents `.env` へのsymlink。
-正本の環境変数とVaultの場所を一か所から解決する。グローバルなシェル環境変更は不要。
-独自の `CODEX_HOME` / `HERMES_HOME` / XDG設定、別OS、別ユーザーは標準パスとは別の
-環境なので、その起動元で実際の指示パスを確認して接続する。
+`~/.config/agents/environment.env` is a symlink to the existing Agents `.env`,
+resolving canonical roots and Vault location in one place. Global shell changes
+are unnecessary. Custom `CODEX_HOME`, `HERMES_HOME`, XDG settings, another OS or
+another user need their actual entrypoint checked separately.
 
-## 導入と更新
+## Language and documentation conflicts
 
-既にインストール済みの製品だけを選ぶ。`--agents` は明示指定であり、製品検出は行わない。
-未インストールのアプリへの設定だけで動作済みと扱わない。
+The shared policy and generated bootstrap use English for conversation,
+progress, questions, handoffs and new titles even when input is Japanese.
+[Communication policy](../policies/communication.md) preserves explicitly
+requested artifact languages, existing localized artifacts and original
+records, and defines concise explanations and reporting.
+
+When descriptive documentation and existing code disagree, inspect code, tests
+and observed behavior, follow established code conventions and report each
+observed inconsistency in the final reply. Explicit requirements, security rules,
+invariants and intended migrations still apply. Existing code is not assumed
+correct merely because it exists. Record the evidence and disposition.
+
+Changing COMMON alone is insufficient if a generated bootstrap or personal
+skill still requires Japanese. Update the bootstrap and affected user-owned
+skills together. Check installed copies through the preserving
+[skill installation workflow](skill-installation.md). Additional GUI/account
+rules, project instructions and scheduled prompts need separate inspection.
+Vendor packages and historical source records are not bulk-translated.
+
+## Install and update
+
+Select only products already installed. `--agents` is an explicit selection,
+not product detection. Writing a rule does not establish that an app uses it.
 
 ```sh
 cd "$AGENTS_ROOT"
 python3 -m harness.instructions --env-file "$AGENTS_ROOT/.env" --agents codex claude devin hermes
 python3 -m harness.instructions --env-file "$AGENTS_ROOT/.env" --agents codex claude devin hermes --apply
-# Cursorを導入済みの端末では、上記に cursor を追加する。
+# Add cursor when Cursor is installed on this machine.
 ```
 
-既存のSOULやルールは保持し、`agents:begin` / `agents:end` の範囲だけ更新する。
-変更前の内容は `.local/agent-instructions/backups/` にprivate保存する。
-壊れたマーカー、想定外のsymlink、正本と異なる環境参照、文字数超過では上書きせず停止する。
-他のアプリ設定、認証、モデル、ツール権限は変更しない。
-Codex/Claudeが既にCOMMONを直接参照している場合、その参照を保持する。
+The installer preserves existing SOUL and rule content, replacing only the
+`agents:begin` / `agents:end` block. Private preimages are retained in
+`.local/agent-instructions/backups/`. Broken markers, unexpected symlinks,
+conflicting environment references and native size-limit violations stop the
+operation before overwrite. Other app settings, credentials, models and tool
+permissions are unchanged. Existing Codex/Claude links to COMMON are retained.
 
-読込は新しい会話で確認する。起動済みのプロンプトや圧縮済み履歴には遡及適用されない。
-DevinのCustomizationsではロード済みルールの所在を確認できる。
-Hermes gatewayのhook変更にはgateway再起動が必要。進行中の会話を終了させず、
-既存の起動方式に沿ってidleを確認してから反映する。
+Verify loading in fresh conversations. Already loaded prompts and compacted
+history are not retroactively updated. Devin Customizations can show loaded
+rule locations. Hermes gateway hook changes require a gateway restart; apply
+such changes through its existing startup method after checking for idle work,
+without terminating an active conversation. This language rollout changes
+instructions, not hooks, and does not itself restart the gateway.
 
-## コンテキストの継続
+## Context continuity
 
-共通指示は全起動元へ、既存Vaultの検索と作業中の記録を要求する。
-依頼・資料・判断・実行・検証・未解決点を保存し、最終応答から記録へリンクする。
-Devin/Cursorの全文保存は、そのセッションから取得可能なvisible recordを対象にする。
-アプリが公開していない履歴まで保存できたと主張しない。
-Hermesには [会話保存機構](hermes-vault-context.md) を追加し、DiscordとCLIの
-ローカル履歴をモデルによる記録とは別に保存する。送信receiptだけで受信会話保存を証明しない。
+Every entrypoint directs the agent to consult the existing Vault and record work
+as it proceeds. Preserve requests, references, decisions, execution, validation
+and unresolved work, and link the record in the final response. For Devin and
+Cursor, full preservation covers visible records actually available in that
+session; do not claim inaccessible application history was saved.
 
-クラウドDevinや別PCにはこのMacのファイルは届かない。対象端末にもこのrepoと
-既存Vaultへの接続・環境設定・ネイティブ入口を用意する。Vaultへの接続がない場合は
-その事実と後で取り込む記録を明示し、別の正本を勝手に作らない。
-新しいアプリも、その製品が公式に読むglobal ruleからこの正本を参照する。
+The [Hermes conversation exporter](hermes-vault-context.md) records local Discord
+and CLI history separately from model-authored notes. An outbound receipt does
+not establish that an inbound conversation was archived.
 
-## 検証・復旧
+A cloud Devin session or another computer does not receive this Mac's files
+automatically. Configure repository access, the existing Vault, environment roots
+and native entrypoints there. If Vault access is unavailable, state that and
+retain records for later import; do not create another canonical store. Connect
+new apps through their officially supported global rule entrypoints.
 
-`python3 -m unittest tests.test_instructions` で既存設定の保持、再実行、競合拒否、
-環境/Vault不在、symlink、native文字数制限を確認する。
-実機では新規セッションで主担当・指示の参照元・Vaultの場所を読ませ、短い記録を保存して
-ファイルを読み戻す。設定配置、モデルの読込、実行結果を別々に記録する。
+## Verification and recovery
 
-停止時は自分が設置した管理ブロックだけ除去し、直後に外部変更がない場合に限りbackupを
-復元する。既存COMMONリンクや他のユーザールールを削除しない。環境symlinkも利用中の
-入口がないことを確認してから外す。Hermes自動保存を止めても既存Vault記録は削除しない。
+`python3 -m unittest tests.test_instructions` checks preservation, repeatability,
+conflict refusal, missing roots/Vault, symlinks, native size limits and migration
+from Japanese managed rules while preserving original user text.
 
-Claudeを通常のTerminal.appとCodexから利用する場合、同じ有効な認証を両方の
-新規CLIプロセスから利用できることを確認する。`--environment terminal doctor`
-という環境名だけでは実Terminal.appの確認にはならない。具体的なコマンドと確認範囲は
-[Claudeの認証を起動元間で確認する](claude-auth-sharing.md)を参照する。
+In fresh native sessions, check the lead agent, loaded policy and Vault location,
+then save and read back a short record. Test English and Japanese inputs, a
+clarification/error, an explicitly requested Japanese artifact and a handoff.
+Conversation should remain English while original sources and requested artifact
+languages are preserved. Record configuration installation, model loading and
+observed behavior separately. GUI, CLI, cloud and mobile coverage are distinct.
+A missing provider or authentication failure remains unverified, not passed.
 
-## 仕様確認元
+For rollback, remove only the managed block installed by this workflow or
+restore its preimage only after checking for later edits. Preserve existing
+COMMON symlinks and unrelated user rules. Remove the environment symlink only
+after confirming no entrypoints use it. Stopping Hermes archival must not delete
+existing Vault records.
 
-2026-09-18に公式仕様と導入済みHermesコードを照合。
+If Claude is used both in Terminal.app and from Codex, verify valid authentication
+from a fresh CLI process in each context. `--environment terminal doctor` names
+an environment-capture method and does not itself prove execution inside
+Terminal.app. See [Claude authentication across launchers](claude-auth-sharing.md).
+
+## Reference checks
+
+The following specifications and installed Hermes code were checked on
+2026-09-18; this date is historical evidence, not a claim of current testing:
 
 - [Devin Local](https://docs.devin.ai/desktop/devin-local)
 - [Devin Rules / AGENTS](https://docs.devin.ai/cli/extensibility/rules)
 - [Cascade global rules](https://docs.devin.ai/desktop/cascade/memories)
 - [Cursor user rule files](https://prod.cursor.com/help/customization/rules)
-- Hermes: installed `agent/prompt_builder.py` の `load_soul_md` / `build_context_files_prompt`。
-  SOULはHERMES_HOMEから読み込み、AGENTSはcwdだけを探索するため、SOULに入口を配置。
+- Installed Hermes `agent/prompt_builder.py`: `load_soul_md` and
+  `build_context_files_prompt`. SOUL loads from HERMES_HOME; AGENTS discovery was
+  limited to cwd, so the global entrypoint was placed in SOUL.
 
-## CodexからCursorへ委譲する
+## Delegate from Codex to Cursor
 
-Cursor Desktopを開かず、公式CLIを `harness run --provider cursor` から呼べる。
-初回の本人認証、明示的なモデル選択、Vault記録、実行範囲は
-[harness README](../harness/README.md#codexなどからcursor-agentを呼ぶ)を参照する。
-ネイティブ起動用の共通指示と併用できる。
+The official CLI can be called through `harness run --provider cursor` without
+opening Cursor Desktop. See the [harness README](../harness/README.md) for initial
+user authentication, explicit model selection, Vault records and execution scope.
+This can coexist with the shared instructions for native sessions.

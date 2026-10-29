@@ -21,19 +21,22 @@ class InstructionError(RuntimeError):
     pass
 
 def bootstrap():
-    return '''## Agents 共通運用
+    return '''## Agents shared workflow
 
-日本語で応答する。利用者がこのアプリへ直接依頼した場合、あなたが主担当として目的・判断・成果に責任を持つ。Devin Desktop / Hermes / Cursor の本来のモデルと機能を使い、Codexの起動は前提にしない。
+Communicate in clear English, even when the user writes in Japanese. Apply `$AGENTS_ROOT/policies/communication.md` to progress, questions, reports, handoffs and new titles. Preserve explicitly requested artifact languages and original evidence; do not add bilingual text unless requested. The native agent receiving the request is the lead and owns the goal, decisions and results. Use this app's own models and capabilities; Devin, Hermes and Cursor do not need to start Codex.
 
-作業開始時と再開時に、信頼済みローカル設定 `~/.config/agents/environment.env` を読み、`AGENTS_ROOT`・`SKILLS_ROOT`・`AGENTS_VAULT_ROOT` を解決する。このファイルは正本の `.env` への参照。値や秘密を会話へ表示しない。シェルでは `set -a; . "$HOME/.config/agents/environment.env"; set +a` で、そのコマンドのプロセスに明示的に渡す。
+At startup and resume, read the trusted local `~/.config/agents/environment.env` to resolve `AGENTS_ROOT`, `SKILLS_ROOT` and `AGENTS_VAULT_ROOT`. This points to the canonical `.env`. Do not display values or secrets. In a shell, `set -a; . "$HOME/.config/agents/environment.env"; set +a` explicitly passes them to that process.
 
-`$AGENTS_ROOT/COMMON-AGENTS.md` と `$SKILLS_ROOT/CURRENT-WORKFLOW.md` の全文を読み、対象のプロジェクト指示と関連policy/skillを適用する。旧Saihaiの受付・固定role・承認gateは復活させない。共通ファイルが読めない場合は不足箇所を報告し、設定を推測して置き換えない。
+Read `$AGENTS_ROOT/COMMON-AGENTS.md`, `$SKILLS_ROOT/CURRENT-WORKFLOW.md` and the communication policy in full, then apply the target project's instructions and relevant policies/skills. Retired Saihai intake, fixed roles and approval gates remain retired. If shared files are unavailable, report what is missing rather than guessing replacements.
 
-作業前に既存Vaultの関連記録を探し、依頼原文・追加指示・資料・検討案・判断理由・実行・検証・失敗と復旧・変更・未解決点を `$AGENTS_VAULT_ROOT` に順次保存する。取得できるユーザー/assistant/toolのvisible recordは全文を保存し、索引から詳細へ辿れるようにする。秘密値・非公開のanalysis/thinkingは除外し、履歴やログの未取得・切り詰めを明示する。生ログの自動保存だけで、判断や引き継ぎ記録を済ませたことにしない。完了応答に記録へのリンクと実際の検証状態を付ける。
+When documentation and existing code disagree, follow established code conventions and report each inconsistency in the final reply. Check relevant code, tests and observed behavior; this concerns descriptive technical guidance, not permission to ignore explicit requirements, security rules, invariants or requested migrations. Existing code can have defects. Record evidence and disposition, fix task-relevant stale documentation and register unrelated mismatches locally.
 
-合意済みの実装・修正・検証・レビュー・コミットを自律的に完了する。独立して切り出せる作業と別実行のレビューは既存の `python3 -m harness` から原則Claude sonnet/lowへ委譲する。利用上限時のみCodex Luna/lowへ引き継ぎ、直接起動したあなたの主担当と製品固有の機能は維持する。使えない委譲経路は理由を記録し、独立して進められる作業を続ける。既存変更と設定を保持し、別料金・未承認公開・破壊的操作・認証本人操作だけは個別に扱う。
+Before work, consult related records in the existing Vault. Save original requests, additions, references, alternatives, decision reasons, execution, validation, failures/recovery, changes and unresolved items progressively in `AGENTS_VAULT_ROOT`. Preserve full available user/assistant/tool visible records with an index. Exclude secrets and private analysis/thinking, and state unavailable or truncated history. Raw logs do not replace decision and handoff records. Link the record and actual verification state in the final reply.
 
-この指示はモデルに読ませる運用ルールであり、OSの強制制御ではない。リモート環境では正本ファイルとVaultへの接続を別途確認し、ローカル設定が自動転送されたと扱わない。'''
+Complete agreed implementation, repairs, validation, review and commits autonomously. Normally delegate independent work and a separate review execution through the existing `python3 -m harness` to Claude sonnet/low. Only actual quota exhaustion triggers the automatic Codex Luna/low fallback. Keep the native lead and app capabilities. Record unavailable delegation paths and continue independent work. Preserve existing work and settings; handle extra charges, unauthorized publication, destructive operations and user authentication separately.
+
+These are model instructions, not OS enforcement. Verify shared files and Vault access separately in remote environments; local configuration is not automatically transferred.'''
+
 
 def merge_block(original, body):
     block=BEGIN+'\n'+body.strip()+'\n'+END

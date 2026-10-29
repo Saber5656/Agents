@@ -54,8 +54,33 @@ class InstructionsTest(unittest.TestCase):
         with self.assertRaises(InstructionError):configure(self.env,self.home,['devin'],apply=True)
     def test_bootstrap_is_provider_neutral_and_vault_complete(self):
         text=bootstrap()
-        for term in ('COMMON-AGENTS.md','AGENTS_VAULT_ROOT','environment.env','主担当','全文','再開'):
+        for term in ('COMMON-AGENTS.md','AGENTS_VAULT_ROOT','environment.env','lead','full','resume'):
             self.assertIn(term,text)
         self.assertNotIn('/Users/',text)
+    def test_migrates_japanese_managed_rules_without_changing_user_content(self):
+        legacy='<!-- agents:begin -->\n日本語で応答する。\n<!-- agents:end -->'
+        paths=['.codex/AGENTS.md','.claude/CLAUDE.md','.config/devin/AGENTS.md',
+               '.codeium/windsurf/memories/global_rules.md','.hermes/SOUL.md',
+               '.cursor/rules/agents.mdc']
+        for relative in paths:
+            path=self.home/relative;path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_text('Keep this user note: 原文を保存\n'+legacy+'\nKeep this footer.\n')
+        agents=['codex','claude','devin','hermes','cursor']
+        configure(self.env,self.home,agents,apply=False)
+        self.assertTrue(all(legacy in (self.home/p).read_text() for p in paths))
+        configure(self.env,self.home,agents,apply=True)
+        for relative in paths:
+            text=(self.home/relative).read_text()
+            self.assertTrue(text.startswith('Keep this user note: 原文を保存\n'))
+            self.assertTrue(text.endswith('\nKeep this footer.\n'))
+            self.assertNotIn('日本語で応答する',text)
+            self.assertIn('English',text)
+            self.assertIn('policies/communication.md',text)
+            self.assertIn('existing code',text)
+            self.assertIn('each inconsistency',text)
+            managed=text.split('<!-- agents:begin -->')[1].split('<!-- agents:end -->')[0]
+            self.assertNotRegex(managed,r'[\u3040-\u30ff\u3400-\u9fff]')
+        self.assertTrue(all(row['state']=='current' for row in
+                            configure(self.env,self.home,agents)['results']))
 
 if __name__=='__main__':unittest.main()

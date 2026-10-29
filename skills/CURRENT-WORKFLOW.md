@@ -5,6 +5,13 @@ Legacy Saihai intake, authority/manifests, fixed roles and approval gates are
 retired. Unchanged historical references may explain earlier designs but must
 not be loaded as active prerequisites or used to reactivate old infrastructure.
 
+Use clear English for user-facing conversation, progress, handoffs and new report
+names, including when input is Japanese. Read `policies/communication.md` for
+artifact-language exceptions, source preservation and concise reporting. Follow
+established code conventions when descriptive documentation is stale, preserving
+explicit requirements, security rules and intended migrations. Report each
+observed documentation/code inconsistency and its disposition in the final reply.
+
 Use existing authenticated App/CLI capabilities. Load the canonical local `.env`
 when necessary; roots are `AGENTS_ROOT`, `SKILLS_ROOT`, `AGENTS_VAULT_ROOT`.
 Never guess a replacement Vault. Keep full available requirements, corrections,
